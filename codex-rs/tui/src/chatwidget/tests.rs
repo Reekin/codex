@@ -31,6 +31,7 @@ use codex_core::protocol::AgentReasoningDeltaEvent;
 use codex_core::protocol::AgentReasoningEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::BackgroundEventEvent;
+use codex_core::protocol::ChatTreeTurnInfo;
 use codex_core::protocol::CreditsSnapshot;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
@@ -100,6 +101,7 @@ use pretty_assertions::assert_eq;
 #[cfg(target_os = "windows")]
 use serial_test::serial;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
@@ -1637,6 +1639,9 @@ async fn make_chatwidget_manual(
         thread_id: None,
         thread_name: None,
         forked_from: None,
+        chat_tree_nodes: HashMap::new(),
+        chat_tree_node_order: Vec::new(),
+        chat_tree_current_node_id: None,
         frame_requester: FrameRequester::test_dummy(),
         show_welcome_banner: true,
         queued_user_messages: VecDeque::new(),
@@ -2278,6 +2283,7 @@ async fn plan_implementation_popup_skips_replayed_turn_complete() {
     chat.replay_initial_messages(vec![EventMsg::TurnComplete(TurnCompleteEvent {
         turn_id: "turn-1".to_string(),
         last_agent_message: Some("Plan details".to_string()),
+        chat_tree: None,
     })]);
 
     let popup = render_bottom_popup(&chat, 80);
@@ -2303,6 +2309,7 @@ async fn plan_implementation_popup_shows_once_when_replay_precedes_live_turn_com
     chat.replay_initial_messages(vec![EventMsg::TurnComplete(TurnCompleteEvent {
         turn_id: "turn-1".to_string(),
         last_agent_message: Some("Plan details".to_string()),
+        chat_tree: None,
     })]);
     let replay_popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -2315,6 +2322,7 @@ async fn plan_implementation_popup_shows_once_when_replay_precedes_live_turn_com
         msg: EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: Some("Plan details".to_string()),
+            chat_tree: None,
         }),
     });
 
@@ -2336,6 +2344,7 @@ async fn plan_implementation_popup_shows_once_when_replay_precedes_live_turn_com
         msg: EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: Some("Plan details".to_string()),
+            chat_tree: None,
         }),
     });
     let duplicate_popup = render_bottom_popup(&chat, 80);
@@ -2376,7 +2385,7 @@ async fn plan_implementation_popup_skips_when_messages_queued() {
     chat.bottom_pane.set_task_running(true);
     chat.queue_user_message("Queued message".into());
 
-    chat.on_task_complete(Some("Plan details".to_string()), false);
+    chat.on_task_complete(Some("Plan details".to_string()), None, false);
 
     let popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -2402,7 +2411,7 @@ async fn plan_implementation_popup_skips_without_proposed_plan() {
             status: StepStatus::Pending,
         }],
     });
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None, false);
 
     let popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -2423,7 +2432,7 @@ async fn plan_implementation_popup_shows_after_proposed_plan_output() {
     chat.on_task_started();
     chat.on_plan_delta("- Step 1\n- Step 2\n".to_string());
     chat.on_plan_item_completed("- Step 1\n- Step 2\n".to_string());
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None, false);
 
     let popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -2453,7 +2462,7 @@ async fn plan_implementation_popup_skips_when_rate_limit_prompt_pending() {
         }],
     });
     chat.on_rate_limit_snapshot(Some(snapshot(92.0)));
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None, false);
 
     let popup = render_bottom_popup(&chat, 80);
     assert!(
@@ -3274,7 +3283,7 @@ async fn unified_exec_end_after_task_complete_is_suppressed() {
     );
     drain_insert_history(&mut rx);
 
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None, false);
     end_exec(&mut chat, begin, "", "", 0);
 
     let cells = drain_insert_history(&mut rx);
@@ -3288,7 +3297,7 @@ async fn unified_exec_end_after_task_complete_is_suppressed() {
 async fn unified_exec_interaction_after_task_complete_is_suppressed() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
     chat.on_task_started();
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None, false);
 
     chat.handle_codex_event(Event {
         id: "call-1".to_string(),
@@ -3333,6 +3342,7 @@ async fn unified_exec_wait_after_final_agent_message_snapshot() {
         msg: EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: Some("Final response.".into()),
+            chat_tree: None,
         }),
     });
 
@@ -3375,6 +3385,7 @@ async fn unified_exec_wait_before_streamed_agent_message_snapshot() {
         msg: EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: None,
+            chat_tree: None,
         }),
     });
 
@@ -3428,6 +3439,7 @@ async fn unified_exec_waiting_multiple_empty_snapshots() {
         msg: EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: None,
+            chat_tree: None,
         }),
     });
 
@@ -3480,6 +3492,7 @@ async fn unified_exec_non_empty_then_empty_snapshots() {
         msg: EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: None,
+            chat_tree: None,
         }),
     });
 
@@ -3975,6 +3988,73 @@ async fn slash_fork_requests_current_fork() {
     chat.dispatch_command(SlashCommand::Fork);
 
     assert_matches!(rx.try_recv(), Ok(AppEvent::ForkCurrentSession));
+}
+
+#[tokio::test]
+async fn slash_chattree_opens_chat_tree_overlay() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Chattree);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenChatTree));
+}
+
+#[tokio::test]
+async fn set_current_chat_tree_node_submits_protocol_op() {
+    let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event(Event {
+        id: "evt-1".to_string(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: None,
+            chat_tree: Some(ChatTreeTurnInfo {
+                node_id: "turn-1".to_string(),
+                parent_node_id: None,
+                summary: Some("node one".to_string()),
+            }),
+        }),
+    });
+
+    chat.set_current_chat_tree_node("turn-1".to_string());
+
+    assert_matches!(
+        op_rx.try_recv(),
+        Ok(Op::SetCurrentChatTreeNode { node_id }) if node_id == "turn-1"
+    );
+}
+
+#[tokio::test]
+async fn chat_tree_node_updated_event_refreshes_summary() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event(Event {
+        id: "evt-1".to_string(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: None,
+            chat_tree: Some(ChatTreeTurnInfo {
+                node_id: "turn-1".to_string(),
+                parent_node_id: None,
+                summary: None,
+            }),
+        }),
+    });
+
+    chat.handle_codex_event(Event {
+        id: "evt-2".to_string(),
+        msg: EventMsg::ChatTreeNodeUpdated(codex_core::protocol::ChatTreeNodeUpdatedEvent {
+            chat_tree: ChatTreeTurnInfo {
+                node_id: "turn-1".to_string(),
+                parent_node_id: None,
+                summary: Some("updated summary".to_string()),
+            },
+        }),
+    });
+
+    let entries = chat.chat_tree_overlay_entries();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].summary, "updated summary".to_string());
 }
 
 #[tokio::test]
@@ -6094,6 +6174,7 @@ async fn turn_complete_keeps_unified_exec_processes() {
         msg: EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: None,
+            chat_tree: None,
         }),
     });
 
@@ -6929,6 +7010,7 @@ async fn status_line_branch_refreshes_after_turn_complete() {
         msg: EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: None,
+            chat_tree: None,
         }),
     });
 
@@ -7022,7 +7104,7 @@ async fn runtime_metrics_websocket_timing_logs_and_final_separator_sums_totals()
         .expect("expected websocket timing log");
     assert!(second_log.contains("TTFT: 80ms (iapi)"));
 
-    chat.on_task_complete(None, false);
+    chat.on_task_complete(None, None, false);
     let mut final_separator = None;
     while let Ok(event) = rx.try_recv() {
         if let AppEvent::InsertHistoryCell(cell) = event {
@@ -7072,6 +7154,7 @@ async fn multiple_agent_messages_in_single_turn_emit_multiple_headers() {
         msg: EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: None,
+            chat_tree: None,
         }),
     });
 
@@ -7373,6 +7456,7 @@ printf 'fenced within fenced\n'
         msg: EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: None,
+            chat_tree: None,
         }),
     });
     for lines in drain_insert_history(&mut rx) {

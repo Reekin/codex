@@ -1,5 +1,6 @@
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use codex_core::CodexAuth;
 use codex_core::ContentItem;
@@ -21,6 +22,7 @@ use core_test_support::test_codex::test_codex;
 use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+use wiremock::matchers::body_string_contains;
 use wiremock::matchers::header;
 
 #[tokio::test]
@@ -444,6 +446,23 @@ async fn responses_stream_includes_turn_metadata_header_for_git_workspace_e2e() 
         responses::ev_assistant_message("msg-1", "done"),
         responses::ev_completed("resp-3"),
     ]);
+    let summary_response = responses::sse(vec![
+        responses::ev_response_created("resp-summary"),
+        responses::ev_assistant_message("msg-summary", "summary"),
+        responses::ev_completed("resp-summary"),
+    ]);
+    let _summary_mock_1 = responses::mount_sse_once_match(
+        &server,
+        body_string_contains("Summarize this turn for a chat tree node."),
+        summary_response.clone(),
+    )
+    .await;
+    let _summary_mock_2 = responses::mount_sse_once_match(
+        &server,
+        body_string_contains("Summarize this turn for a chat tree node."),
+        summary_response,
+    )
+    .await;
     let request_log = responses::mount_response_sequence(
         &server,
         vec![
@@ -523,5 +542,121 @@ async fn responses_stream_includes_turn_metadata_header_for_git_workspace_e2e() 
             .get("has_changes")
             .and_then(serde_json::Value::as_bool),
         Some(false)
+    );
+}
+
+#[tokio::test]
+async fn responses_stream_reuses_turn_state_when_sessions_share_handle() {
+    core_test_support::skip_if_no_network!();
+
+    let server = responses::start_mock_server().await;
+    let first_response = responses::sse_response(responses::sse(vec![
+        responses::ev_response_created("resp-1"),
+        responses::ev_completed("resp-1"),
+    ]))
+    .insert_header("x-codex-turn-state", "ts-1");
+    let second_response = responses::sse_response(responses::sse(vec![
+        responses::ev_response_created("resp-2"),
+        responses::ev_completed("resp-2"),
+    ]));
+    let request_log =
+        responses::mount_response_sequence(&server, vec![first_response, second_response]).await;
+
+    let provider = ModelProviderInfo {
+        name: "mock".into(),
+        base_url: Some(format!("{}/v1", server.uri())),
+        env_key: None,
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        wire_api: WireApi::Responses,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: Some(0),
+        stream_max_retries: Some(0),
+        stream_idle_timeout_ms: Some(5_000),
+        requires_openai_auth: false,
+        supports_websockets: false,
+    };
+
+    let codex_home = TempDir::new().expect("failed to create TempDir");
+    let mut config = load_default_config_for_test(&codex_home).await;
+    config.model_provider_id = provider.name.clone();
+    config.model_provider = provider.clone();
+    let effort = config.model_reasoning_effort;
+    let summary = config.model_reasoning_summary;
+    let model = codex_core::test_support::get_model_offline(config.model.as_deref());
+    config.model = Some(model.clone());
+    let config = Arc::new(config);
+
+    let conversation_id = ThreadId::new();
+    let session_source = SessionSource::Cli;
+    let model_info =
+        codex_core::test_support::construct_model_info_offline(model.as_str(), &config);
+    let otel_manager = OtelManager::new(
+        conversation_id,
+        model.as_str(),
+        model_info.slug.as_str(),
+        None,
+        Some("test@test.com".to_string()),
+        Some(TelemetryAuthMode::Chatgpt),
+        "test_originator".to_string(),
+        false,
+        "test".to_string(),
+        session_source.clone(),
+    );
+
+    let client = ModelClient::new(
+        None,
+        conversation_id,
+        provider,
+        session_source,
+        config.model_verbosity,
+        false,
+        false,
+        false,
+        false,
+        None,
+    );
+    let mut prompt = Prompt::default();
+    prompt.input = vec![ResponseItem::Message {
+        id: None,
+        role: "user".into(),
+        content: vec![ContentItem::InputText {
+            text: "hello".into(),
+        }],
+        end_turn: None,
+        phase: None,
+    }];
+
+    let turn_state = Arc::new(OnceLock::new());
+    let mut first_session = client.new_session_with_turn_state(Arc::clone(&turn_state));
+    let mut first_stream = first_session
+        .stream(&prompt, &model_info, &otel_manager, effort, summary, None)
+        .await
+        .expect("first stream should succeed");
+    while let Some(event) = first_stream.next().await {
+        if matches!(event, Ok(ResponseEvent::Completed { .. })) {
+            break;
+        }
+    }
+
+    let mut second_session = client.new_session_with_turn_state(turn_state);
+    let mut second_stream = second_session
+        .stream(&prompt, &model_info, &otel_manager, effort, summary, None)
+        .await
+        .expect("second stream should succeed");
+    while let Some(event) = second_stream.next().await {
+        if matches!(event, Ok(ResponseEvent::Completed { .. })) {
+            break;
+        }
+    }
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].header("x-codex-turn-state"), None);
+    assert_eq!(
+        requests[1].header("x-codex-turn-state"),
+        Some("ts-1".to_string())
     );
 }

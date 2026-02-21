@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 
 use crate::AuthManager;
@@ -167,6 +168,7 @@ use crate::protocol::AgentReasoningSectionBreakEvent;
 use crate::protocol::ApplyPatchApprovalRequestEvent;
 use crate::protocol::AskForApproval;
 use crate::protocol::BackgroundEventEvent;
+use crate::protocol::ChatTreeTurnInfo;
 use crate::protocol::DeprecationNoticeEvent;
 use crate::protocol::ErrorEvent;
 use crate::protocol::Event;
@@ -563,6 +565,7 @@ pub(crate) struct TurnContext {
     pub(crate) truncation_policy: TruncationPolicy,
     pub(crate) js_repl: Arc<JsReplHandle>,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
+    pub(crate) turn_state: Arc<OnceLock<String>>,
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
 }
 impl TurnContext {
@@ -644,6 +647,7 @@ impl TurnContext {
             truncation_policy,
             js_repl: Arc::clone(&self.js_repl),
             dynamic_tools: self.dynamic_tools.clone(),
+            turn_state: Arc::clone(&self.turn_state),
             turn_metadata_state: self.turn_metadata_state.clone(),
         }
     }
@@ -983,6 +987,7 @@ impl Session {
             truncation_policy: model_info.truncation_policy.into(),
             js_repl,
             dynamic_tools: session_configuration.dynamic_tools.clone(),
+            turn_state: Arc::new(OnceLock::new()),
             turn_metadata_state,
         }
     }
@@ -2532,6 +2537,28 @@ impl Session {
         state.replace_history(items);
     }
 
+    pub(crate) async fn create_chat_tree_child_node(
+        &self,
+        node_id: String,
+    ) -> Option<ChatTreeTurnInfo> {
+        let mut state = self.state.lock().await;
+        state.create_chat_tree_child_node(node_id)
+    }
+
+    pub(crate) async fn finalize_chat_tree_node(
+        &self,
+        node_id: &str,
+        summary: Option<String>,
+    ) -> Option<ChatTreeTurnInfo> {
+        let mut state = self.state.lock().await;
+        state.finalize_chat_tree_node(node_id, summary)
+    }
+
+    pub(crate) async fn set_current_chat_tree_node(&self, node_id: &str) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        state.set_current_chat_tree_node(node_id)
+    }
+
     pub(crate) async fn seed_initial_context_if_needed(&self, turn_context: &TurnContext) {
         {
             let mut state = self.state.lock().await;
@@ -3282,6 +3309,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::SetThreadName { name } => {
                 handlers::set_thread_name(&sess, sub.id.clone(), name).await;
             }
+            Op::SetCurrentChatTreeNode { node_id } => {
+                handlers::set_current_chat_tree_node(&sess, sub.id.clone(), node_id).await;
+            }
             Op::RunUserShellCommand { command } => {
                 handlers::run_user_shell_command(&sess, sub.id.clone(), command).await;
             }
@@ -3449,6 +3479,9 @@ mod handlers {
         // Attempt to inject input into current task.
         if let Err(SteerInputError::NoActiveTurn(items)) = sess.steer_input(items, None).await {
             sess.seed_initial_context_if_needed(&current_context).await;
+            let _ = sess
+                .create_chat_tree_child_node(current_context.sub_id.clone())
+                .await;
             let previous_model = sess.previous_model().await;
             let previous_context_item = sess.previous_context_item().await;
             let update_items = sess.build_settings_update_items(
@@ -3468,6 +3501,31 @@ mod handlers {
                 .await;
             sess.set_previous_context_item(Some(current_context.to_turn_context_item()))
                 .await;
+        }
+    }
+
+    pub async fn set_current_chat_tree_node(sess: &Arc<Session>, sub_id: String, node_id: String) {
+        if sess.active_turn.lock().await.is_some() {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: "cannot switch chat-tree node while a task is running".to_string(),
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+            return;
+        }
+
+        if let Err(err) = sess.set_current_chat_tree_node(&node_id).await {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: err,
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
         }
     }
 
@@ -4196,6 +4254,7 @@ async fn spawn_review_thread(
         js_repl: Arc::clone(&sess.js_repl),
         dynamic_tools: parent_turn_context.dynamic_tools.clone(),
         truncation_policy: model_info.truncation_policy.into(),
+        turn_state: Arc::new(OnceLock::new()),
         turn_metadata_state,
     };
 
@@ -4441,8 +4500,13 @@ pub(crate) async fn run_turn(
 
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
-    let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    let turn_state = Arc::clone(&turn_context.turn_state);
+    let mut client_session = prewarmed_client_session.unwrap_or_else(|| {
+        sess.services
+            .model_client
+            .new_session_with_turn_state(Arc::clone(&turn_state))
+    });
+    client_session.adopt_turn_state(turn_state);
 
     loop {
         // Note that pending_input would be something like a message the user

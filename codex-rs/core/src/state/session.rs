@@ -6,12 +6,107 @@ use std::collections::HashSet;
 
 use crate::codex::SessionConfiguration;
 use crate::context_manager::ContextManager;
+use crate::protocol::ChatTreeTurnInfo;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::TokenUsage;
 use crate::protocol::TokenUsageInfo;
 use crate::tasks::RegularTask;
 use crate::truncate::TruncationPolicy;
 use codex_protocol::protocol::TurnContextItem;
+
+const CHAT_TREE_ROOT_NODE_ID: &str = "__root__";
+
+#[derive(Debug, Clone)]
+struct ChatTreeNodeState {
+    parent_node_id: Option<String>,
+    summary: Option<String>,
+    history_snapshot: Option<ContextManager>,
+}
+
+#[derive(Debug, Clone)]
+struct ChatTreeState {
+    current_node_id: String,
+    nodes: HashMap<String, ChatTreeNodeState>,
+}
+
+impl ChatTreeState {
+    fn new(history: &ContextManager) -> Self {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            CHAT_TREE_ROOT_NODE_ID.to_string(),
+            ChatTreeNodeState {
+                parent_node_id: None,
+                summary: Some("root".to_string()),
+                history_snapshot: Some(history.clone()),
+            },
+        );
+        Self {
+            current_node_id: CHAT_TREE_ROOT_NODE_ID.to_string(),
+            nodes,
+        }
+    }
+
+    fn create_child_and_set_current(&mut self, node_id: String) -> Option<ChatTreeTurnInfo> {
+        if self.nodes.contains_key(&node_id) {
+            return None;
+        }
+
+        let parent_node_id = Some(self.current_node_id.clone());
+        self.nodes.insert(
+            node_id.clone(),
+            ChatTreeNodeState {
+                parent_node_id: parent_node_id.clone(),
+                summary: None,
+                history_snapshot: None,
+            },
+        );
+        self.current_node_id = node_id.clone();
+
+        Some(ChatTreeTurnInfo {
+            node_id,
+            parent_node_id: parent_node_id.filter(|id| id != CHAT_TREE_ROOT_NODE_ID),
+            summary: None,
+        })
+    }
+
+    fn set_current_snapshot(&mut self, history_snapshot: ContextManager) {
+        if let Some(node) = self.nodes.get_mut(&self.current_node_id) {
+            node.history_snapshot = Some(history_snapshot);
+        }
+    }
+
+    fn finalize_node(
+        &mut self,
+        node_id: &str,
+        summary: Option<String>,
+        history_snapshot: ContextManager,
+    ) -> Option<ChatTreeTurnInfo> {
+        let node = self.nodes.get_mut(node_id)?;
+        node.summary = summary.clone();
+        node.history_snapshot = Some(history_snapshot);
+        Some(ChatTreeTurnInfo {
+            node_id: node_id.to_string(),
+            parent_node_id: node
+                .parent_node_id
+                .clone()
+                .filter(|id| id != CHAT_TREE_ROOT_NODE_ID),
+            summary,
+        })
+    }
+
+    fn set_current_and_get_snapshot(&mut self, node_id: &str) -> Result<ContextManager, String> {
+        let node = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| format!("unknown chat tree node id: {node_id}"))?;
+        let snapshot = node
+            .history_snapshot
+            .clone()
+            .ok_or_else(|| format!("chat tree node has no snapshot yet: {node_id}"))?;
+        self.current_node_id = node_id.to_string();
+        Ok(snapshot)
+    }
+}
 
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
@@ -32,6 +127,7 @@ pub(crate) struct SessionState {
     pub(crate) startup_regular_task: Option<RegularTask>,
     pub(crate) active_mcp_tool_selection: Option<Vec<String>>,
     pub(crate) active_connector_selection: HashSet<String>,
+    chat_tree: ChatTreeState,
 }
 
 impl SessionState {
@@ -40,6 +136,7 @@ impl SessionState {
         let history = ContextManager::new();
         Self {
             session_configuration,
+            chat_tree: ChatTreeState::new(&history),
             history,
             latest_rate_limits: None,
             server_reasoning_included: false,
@@ -75,6 +172,29 @@ impl SessionState {
 
     pub(crate) fn replace_history(&mut self, items: Vec<ResponseItem>) {
         self.history.replace(items);
+    }
+
+    pub(crate) fn create_chat_tree_child_node(
+        &mut self,
+        node_id: String,
+    ) -> Option<ChatTreeTurnInfo> {
+        self.chat_tree.set_current_snapshot(self.history.clone());
+        self.chat_tree.create_child_and_set_current(node_id)
+    }
+
+    pub(crate) fn finalize_chat_tree_node(
+        &mut self,
+        node_id: &str,
+        summary: Option<String>,
+    ) -> Option<ChatTreeTurnInfo> {
+        let snapshot = self.history.clone();
+        self.chat_tree.finalize_node(node_id, summary, snapshot)
+    }
+
+    pub(crate) fn set_current_chat_tree_node(&mut self, node_id: &str) -> Result<(), String> {
+        let snapshot = self.chat_tree.set_current_and_get_snapshot(node_id)?;
+        self.history = snapshot;
+        Ok(())
     }
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
@@ -252,7 +372,84 @@ mod tests {
     use super::*;
     use crate::codex::make_session_configuration_for_tests;
     use crate::protocol::RateLimitWindow;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
     use pretty_assertions::assert_eq;
+
+    fn user_message(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
+
+    fn assistant_message(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_tree_switch_restores_branch_snapshot_without_diverged_turns() {
+        let session_configuration = make_session_configuration_for_tests().await;
+        let mut state = SessionState::new(session_configuration);
+
+        let node_a = state
+            .create_chat_tree_child_node("node-a".to_string())
+            .expect("create node-a");
+        assert_eq!(node_a.parent_node_id, None);
+
+        let items_a = vec![
+            user_message("turn-a-user"),
+            assistant_message("turn-a-assistant"),
+        ];
+        state.record_items(items_a.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-a", Some("summary-a".to_string()));
+
+        let snapshot_a = state.clone_history().raw_items().to_vec();
+
+        let node_b = state
+            .create_chat_tree_child_node("node-b".to_string())
+            .expect("create node-b");
+        assert_eq!(node_b.parent_node_id, Some("node-a".to_string()));
+        let items_b = vec![
+            user_message("turn-b-user"),
+            assistant_message("turn-b-assistant"),
+        ];
+        state.record_items(items_b.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-b", Some("summary-b".to_string()));
+
+        state
+            .set_current_chat_tree_node("node-a")
+            .expect("switch to node-a");
+        assert_eq!(state.clone_history().raw_items(), snapshot_a.as_slice());
+
+        let node_c = state
+            .create_chat_tree_child_node("node-c".to_string())
+            .expect("create node-c");
+        assert_eq!(node_c.parent_node_id, Some("node-a".to_string()));
+        let items_c = vec![
+            user_message("turn-c-user"),
+            assistant_message("turn-c-assistant"),
+        ];
+        state.record_items(items_c.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-c", Some("summary-c".to_string()));
+
+        let mut expected = snapshot_a.clone();
+        expected.extend(items_c);
+        assert_eq!(state.clone_history().raw_items(), expected.as_slice());
+    }
 
     #[tokio::test]
     async fn merge_mcp_tool_selection_deduplicates_and_preserves_order() {
