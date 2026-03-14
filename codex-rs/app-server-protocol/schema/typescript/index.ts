@@ -20,6 +20,8 @@ export type { AuthMode } from "./AuthMode";
 export type { BackgroundEventEvent } from "./BackgroundEventEvent";
 export type { ByteRange } from "./ByteRange";
 export type { CallToolResult } from "./CallToolResult";
+export type { ChatTreeNodeUpdatedEvent } from "./ChatTreeNodeUpdatedEvent";
+export type { ChatTreeTurnInfo } from "./ChatTreeTurnInfo";
 export type { ClientInfo } from "./ClientInfo";
 export type { ClientNotification } from "./ClientNotification";
 export type { ClientRequest } from "./ClientRequest";

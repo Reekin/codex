@@ -29,6 +29,7 @@ pub enum SlashCommand {
     Fork,
     Init,
     Compact,
+    Chattree,
     Plan,
     Collab,
     Agent,
@@ -75,6 +76,7 @@ impl SlashCommand {
             SlashCommand::Resume => "resume a saved chat",
             SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
+            SlashCommand::Chattree => "browse and switch chat tree branches",
             // SlashCommand::Undo => "ask Codex to undo a turn",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
@@ -136,6 +138,7 @@ impl SlashCommand {
             SlashCommand::New
             | SlashCommand::Resume
             | SlashCommand::Fork
+            | SlashCommand::Chattree
             | SlashCommand::Init
             | SlashCommand::Compact
             // | SlashCommand::Undo

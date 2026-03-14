@@ -108,6 +108,10 @@ impl ThreadState {
         self.current_turn_history.active_turn_snapshot()
     }
 
+    pub(crate) fn listener_thread(&self) -> Option<Arc<CodexThread>> {
+        self.listener_thread.as_ref().and_then(Weak::upgrade)
+    }
+
     pub(crate) fn track_current_turn_event(&mut self, event: &EventMsg) {
         self.current_turn_history.handle_event(event);
         if !self.current_turn_history.has_active_turn() {

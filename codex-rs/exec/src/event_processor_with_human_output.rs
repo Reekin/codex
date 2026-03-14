@@ -859,6 +859,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             EventMsg::HookCompleted(event) => self.render_hook_completed(event),
             EventMsg::ShutdownComplete => return CodexStatus::Shutdown,
             EventMsg::ThreadNameUpdated(_)
+            | EventMsg::ChatTreeNodeUpdated(_)
             | EventMsg::ExecApprovalRequest(_)
             | EventMsg::ApplyPatchApprovalRequest(_)
             | EventMsg::TerminalInteraction(_)

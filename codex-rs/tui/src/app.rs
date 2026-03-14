@@ -3123,6 +3123,24 @@ impl App {
             AppEvent::OpenApprovalsPopup => {
                 self.chat_widget.open_approvals_popup();
             }
+            AppEvent::OpenChatTree => {
+                let entries = self
+                    .chat_widget
+                    .chat_tree_overlay_entries()
+                    .into_iter()
+                    .map(|entry| (entry.node_id, entry.depth, entry.summary, entry.is_current))
+                    .collect::<Vec<_>>();
+                if entries.is_empty() {
+                    self.chat_widget.add_info_message(
+                        "Chat tree is empty. Send a prompt first.".to_string(),
+                        None,
+                    );
+                } else {
+                    let _ = tui.enter_alt_screen();
+                    self.overlay = Some(Overlay::new_chat_tree(entries));
+                    tui.frame_requester().schedule_frame();
+                }
+            }
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker().await;
             }

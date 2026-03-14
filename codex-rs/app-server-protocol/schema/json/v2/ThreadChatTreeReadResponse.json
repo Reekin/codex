@@ -1,0 +1,74 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadChatTree": {
+      "properties": {
+        "currentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/definitions/ThreadChatTreeNode"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "nodes"
+      ],
+      "type": "object"
+    },
+    "ThreadChatTreeNode": {
+      "properties": {
+        "nodeId": {
+          "type": "string"
+        },
+        "order": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "parentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "order"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "chatTree": {
+      "$ref": "#/definitions/ThreadChatTree"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "chatTree",
+    "threadId"
+  ],
+  "title": "ThreadChatTreeReadResponse",
+  "type": "object"
+}

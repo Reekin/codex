@@ -1,0 +1,14 @@
+---
+source: tui/src/pager_overlay.rs
+expression: term.backend()
+---
+" / C H A T  T R E E / / / / / / "
+"  [ ] a root summary that should"
+"      wrap in a narrow overlay  "
+">   [*] a deeply nested summary "
+"        that should also wrap   "
+" ↑/↓ to select                  "
+" space set current   q/esc close"
+"                                "
+"                                "
+"                                "

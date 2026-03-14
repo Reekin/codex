@@ -287,6 +287,14 @@ client_request_definitions! {
         params: v2::ThreadReadParams,
         response: v2::ThreadReadResponse,
     },
+    ThreadChatTreeRead => "thread/chatTree/read" {
+        params: v2::ThreadChatTreeReadParams,
+        response: v2::ThreadChatTreeReadResponse,
+    },
+    ThreadChatTreeSetCurrent => "thread/chatTree/current/set" {
+        params: v2::ThreadChatTreeSetCurrentParams,
+        response: v2::ThreadChatTreeSetCurrentResponse,
+    },
     SkillsList => "skills/list" {
         params: v2::SkillsListParams,
         response: v2::SkillsListResponse,

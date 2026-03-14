@@ -449,6 +449,12 @@ pub enum Op {
     /// involve the model.
     SetThreadName { name: String },
 
+    /// Set the current chat-tree node used as the active turn context.
+    ///
+    /// Subsequent user turns branch from this node and use only its ancestor
+    /// path in model-visible history.
+    SetCurrentChatTreeNode { node_id: String },
+
     /// Request Codex to undo a turn (turn are stacked so it is the same effect as CMD + Z).
     Undo,
 
@@ -1102,6 +1108,9 @@ pub enum EventMsg {
     #[serde(rename = "task_complete", alias = "turn_complete")]
     TurnComplete(TurnCompleteEvent),
 
+    /// Existing chat-tree node metadata was updated after turn completion.
+    ChatTreeNodeUpdated(ChatTreeNodeUpdatedEvent),
+
     /// Usage update for the current session, including totals and last turn.
     /// Optional means unknown — UIs should not display when `None`.
     TokenCount(TokenCountEvent),
@@ -1685,9 +1694,25 @@ pub struct ModelRerouteEvent {
 pub struct ContextCompactedEvent;
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ChatTreeTurnInfo {
+    pub node_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_node_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct TurnCompleteEvent {
     pub turn_id: String,
     pub last_agent_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_tree: Option<ChatTreeTurnInfo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ChatTreeNodeUpdatedEvent {
+    pub chat_tree: ChatTreeTurnInfo,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -3106,6 +3131,7 @@ pub struct Chunk {
 pub struct TurnAbortedEvent {
     pub turn_id: Option<String>,
     pub reason: TurnAbortReason,
+    pub chat_tree: Option<ChatTreeTurnInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -4108,9 +4134,14 @@ mod tests {
         }))?;
 
         match event {
-            EventMsg::TurnAborted(TurnAbortedEvent { turn_id, reason }) => {
+            EventMsg::TurnAborted(TurnAbortedEvent {
+                turn_id,
+                reason,
+                chat_tree,
+            }) => {
                 assert_eq!(turn_id, None);
                 assert_eq!(reason, TurnAbortReason::Interrupted);
+                assert_eq!(chat_tree, None);
             }
             _ => panic!("expected turn_aborted event"),
         }

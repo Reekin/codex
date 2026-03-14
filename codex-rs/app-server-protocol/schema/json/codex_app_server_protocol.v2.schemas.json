@@ -857,6 +857,29 @@
       ],
       "type": "string"
     },
+    "ChatTreeTurnInfo": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "parent_node_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "type": "object"
+    },
     "ClientInfo": {
       "properties": {
         "name": {
@@ -1217,6 +1240,54 @@
             "params"
           ],
           "title": "Thread/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/chatTree/read"
+              ],
+              "title": "Thread/chatTree/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadChatTreeReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/chatTree/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/chatTree/current/set"
+              ],
+              "title": "Thread/chatTree/current/setRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadChatTreeSetCurrentParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/chatTree/current/setRequest",
           "type": "object"
         },
         {
@@ -3989,6 +4060,16 @@
         {
           "description": "Agent has completed all actions. v1 wire format uses `task_complete`; accept `turn_complete` for v2 interop.",
           "properties": {
+            "chat_tree": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ChatTreeTurnInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "last_agent_message": {
               "type": [
                 "string",
@@ -4011,6 +4092,27 @@
             "type"
           ],
           "title": "TaskCompleteEventMsg",
+          "type": "object"
+        },
+        {
+          "description": "Existing chat-tree node metadata was updated after turn completion.",
+          "properties": {
+            "chat_tree": {
+              "$ref": "#/definitions/ChatTreeTurnInfo"
+            },
+            "type": {
+              "enum": [
+                "chat_tree_node_updated"
+              ],
+              "title": "ChatTreeNodeUpdatedEventMsgType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "chat_tree",
+            "type"
+          ],
+          "title": "ChatTreeNodeUpdatedEventMsg",
           "type": "object"
         },
         {
@@ -5808,6 +5910,16 @@
         },
         {
           "properties": {
+            "chat_tree": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ChatTreeTurnInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "reason": {
               "$ref": "#/definitions/TurnAbortReason"
             },
@@ -12861,6 +12973,125 @@
         "threadId"
       ],
       "title": "ThreadArchivedNotification",
+      "type": "object"
+    },
+    "ThreadChatTree": {
+      "properties": {
+        "currentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/definitions/ThreadChatTreeNode"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "nodes"
+      ],
+      "type": "object"
+    },
+    "ThreadChatTreeNode": {
+      "properties": {
+        "nodeId": {
+          "type": "string"
+        },
+        "order": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "parentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "order"
+      ],
+      "type": "object"
+    },
+    "ThreadChatTreeReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadChatTreeReadParams",
+      "type": "object"
+    },
+    "ThreadChatTreeReadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "chatTree": {
+          "$ref": "#/definitions/ThreadChatTree"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chatTree",
+        "threadId"
+      ],
+      "title": "ThreadChatTreeReadResponse",
+      "type": "object"
+    },
+    "ThreadChatTreeSetCurrentParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "nodeId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId",
+        "threadId"
+      ],
+      "title": "ThreadChatTreeSetCurrentParams",
+      "type": "object"
+    },
+    "ThreadChatTreeSetCurrentResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "currentNodeId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "currentNodeId",
+        "threadId"
+      ],
+      "title": "ThreadChatTreeSetCurrentResponse",
       "type": "object"
     },
     "ThreadClosedNotification": {

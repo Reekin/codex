@@ -8,14 +8,162 @@ use tokio::task::JoinHandle;
 
 use crate::codex::PreviousTurnSettings;
 use crate::codex::SessionConfiguration;
+use crate::compact;
 use crate::context_manager::ContextManager;
 use crate::error::Result as CodexResult;
+use crate::protocol::ChatTreeTurnInfo;
+use crate::protocol::EventMsg;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::TokenUsage;
 use crate::protocol::TokenUsageInfo;
+use crate::protocol::TurnAbortReason;
 use crate::tasks::RegularTask;
 use crate::truncate::TruncationPolicy;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnContextItem;
+
+const CHAT_TREE_ROOT_NODE_ID: &str = "__root__";
+
+#[derive(Debug, Clone)]
+struct ChatTreeNodeState {
+    parent_node_id: Option<String>,
+    summary: Option<String>,
+    history_snapshot: Option<ContextManager>,
+}
+
+#[derive(Debug, Clone)]
+struct ChatTreeState {
+    current_node_id: String,
+    nodes: HashMap<String, ChatTreeNodeState>,
+}
+
+impl ChatTreeState {
+    fn new(history: &ContextManager) -> Self {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            CHAT_TREE_ROOT_NODE_ID.to_string(),
+            ChatTreeNodeState {
+                parent_node_id: None,
+                summary: Some("root".to_string()),
+                history_snapshot: Some(history.clone()),
+            },
+        );
+        Self {
+            current_node_id: CHAT_TREE_ROOT_NODE_ID.to_string(),
+            nodes,
+        }
+    }
+
+    fn create_child_and_set_current(&mut self, node_id: String) -> Option<ChatTreeTurnInfo> {
+        if self.nodes.contains_key(&node_id) {
+            return None;
+        }
+
+        let parent_node_id = Some(self.current_node_id.clone());
+        self.nodes.insert(
+            node_id.clone(),
+            ChatTreeNodeState {
+                parent_node_id: parent_node_id.clone(),
+                summary: None,
+                history_snapshot: None,
+            },
+        );
+        self.current_node_id = node_id.clone();
+
+        Some(ChatTreeTurnInfo {
+            node_id,
+            parent_node_id: parent_node_id.filter(|id| id != CHAT_TREE_ROOT_NODE_ID),
+            summary: None,
+        })
+    }
+
+    fn set_current_snapshot(&mut self, history_snapshot: ContextManager) {
+        if let Some(node) = self.nodes.get_mut(&self.current_node_id) {
+            node.history_snapshot = Some(history_snapshot);
+        }
+    }
+
+    fn finalize_node(
+        &mut self,
+        node_id: &str,
+        summary: Option<String>,
+        history_snapshot: ContextManager,
+    ) -> Option<ChatTreeTurnInfo> {
+        let node = self.nodes.get_mut(node_id)?;
+        if let Some(summary) = summary {
+            node.summary = Some(summary);
+        }
+        if node.history_snapshot.is_none() {
+            node.history_snapshot = Some(history_snapshot);
+        }
+        Some(ChatTreeTurnInfo {
+            node_id: node_id.to_string(),
+            parent_node_id: node
+                .parent_node_id
+                .clone()
+                .filter(|id| id != CHAT_TREE_ROOT_NODE_ID),
+            summary: node.summary.clone(),
+        })
+    }
+
+    fn update_node_summary(&mut self, node_id: &str, summary: String) -> Option<ChatTreeTurnInfo> {
+        let node = self.nodes.get_mut(node_id)?;
+        node.summary = Some(summary);
+        Some(ChatTreeTurnInfo {
+            node_id: node_id.to_string(),
+            parent_node_id: node
+                .parent_node_id
+                .clone()
+                .filter(|id| id != CHAT_TREE_ROOT_NODE_ID),
+            summary: node.summary.clone(),
+        })
+    }
+
+    fn restore_node(
+        &mut self,
+        node_id: &str,
+        parent_node_id: Option<String>,
+        summary: Option<String>,
+        history_snapshot: ContextManager,
+    ) -> ChatTreeTurnInfo {
+        let stored_parent_node_id =
+            parent_node_id.unwrap_or_else(|| CHAT_TREE_ROOT_NODE_ID.to_string());
+        self.nodes.insert(
+            node_id.to_string(),
+            ChatTreeNodeState {
+                parent_node_id: Some(stored_parent_node_id.clone()),
+                summary: summary.clone(),
+                history_snapshot: Some(history_snapshot),
+            },
+        );
+        self.current_node_id = node_id.to_string();
+        ChatTreeTurnInfo {
+            node_id: node_id.to_string(),
+            parent_node_id: normalize_parent_node_id(stored_parent_node_id),
+            summary,
+        }
+    }
+
+    fn snapshot_for_node(&self, node_id: &str) -> Option<ContextManager> {
+        self.nodes
+            .get(node_id)
+            .and_then(|node| node.history_snapshot.clone())
+    }
+
+    fn set_current_and_get_snapshot(&mut self, node_id: &str) -> Result<ContextManager, String> {
+        let node = self
+            .nodes
+            .get(node_id)
+            .ok_or_else(|| format!("unknown chat tree node id: {node_id}"))?;
+        let snapshot = node
+            .history_snapshot
+            .clone()
+            .ok_or_else(|| format!("chat tree node has no snapshot yet: {node_id}"))?;
+        self.current_node_id = node_id.to_string();
+        Ok(snapshot)
+    }
+}
 
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
@@ -35,6 +183,7 @@ pub(crate) struct SessionState {
     pub(crate) active_connector_selection: HashSet<String>,
     pub(crate) pending_session_start_source: Option<codex_hooks::SessionStartSource>,
     granted_permissions: Option<PermissionProfile>,
+    chat_tree: ChatTreeState,
 }
 
 impl SessionState {
@@ -43,6 +192,7 @@ impl SessionState {
         let history = ContextManager::new();
         Self {
             session_configuration,
+            chat_tree: ChatTreeState::new(&history),
             history,
             latest_rate_limits: None,
             server_reasoning_included: false,
@@ -88,6 +238,198 @@ impl SessionState {
         self.history.replace(items);
         self.history
             .set_reference_context_item(reference_context_item);
+    }
+
+    pub(crate) fn sync_current_chat_tree_snapshot(&mut self) {
+        self.chat_tree.set_current_snapshot(self.history.clone());
+    }
+
+    pub(crate) fn create_chat_tree_child_node(
+        &mut self,
+        node_id: String,
+    ) -> Option<ChatTreeTurnInfo> {
+        self.chat_tree.set_current_snapshot(self.history.clone());
+        self.chat_tree.create_child_and_set_current(node_id)
+    }
+
+    pub(crate) fn finalize_chat_tree_node(
+        &mut self,
+        node_id: &str,
+        summary: Option<String>,
+    ) -> Option<ChatTreeTurnInfo> {
+        let snapshot = self.history.clone();
+        self.chat_tree.finalize_node(node_id, summary, snapshot)
+    }
+
+    pub(crate) fn set_current_chat_tree_node(&mut self, node_id: &str) -> Result<(), String> {
+        let snapshot = self.chat_tree.set_current_and_get_snapshot(node_id)?;
+        self.history = snapshot;
+        Ok(())
+    }
+
+    pub(crate) fn current_chat_tree_node_id(&self) -> Option<String> {
+        (self.chat_tree.current_node_id != CHAT_TREE_ROOT_NODE_ID)
+            .then(|| self.chat_tree.current_node_id.clone())
+    }
+
+    pub(crate) fn restore_from_rollout(
+        &mut self,
+        rollout_items: &[RolloutItem],
+        initial_context: &[ResponseItem],
+        policy: TruncationPolicy,
+    ) {
+        let mut history = ContextManager::new();
+        let mut chat_tree = ChatTreeState::new(&history);
+        let mut active_turn: Option<PendingChatTreeTurnRestore> = None;
+
+        for item in rollout_items {
+            match item {
+                RolloutItem::ResponseItem(_)
+                | RolloutItem::Compacted(_)
+                | RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)) => {
+                    if let Some(active_turn) = active_turn.as_mut() {
+                        active_turn.history_mutations.push(item.clone());
+                    } else {
+                        apply_rollout_item_to_history(&mut history, item, initial_context, policy);
+                        chat_tree.set_current_snapshot(history.clone());
+                    }
+                }
+                RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                    active_turn = Some(PendingChatTreeTurnRestore {
+                        turn_id: event.turn_id.clone(),
+                        parent_node_id: chat_tree.current_node_id.clone(),
+                        history_mutations: Vec::new(),
+                    });
+                }
+                RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
+                    let pending_turn = active_turn.take();
+                    if let Some(chat_tree_turn) = &event.chat_tree {
+                        let mut snapshot = build_chat_tree_snapshot(
+                            &chat_tree,
+                            pending_turn.as_ref(),
+                            chat_tree_turn.parent_node_id.as_deref(),
+                        );
+                        if let Some(pending_turn) = pending_turn.as_ref()
+                            && pending_turn.turn_id == chat_tree_turn.node_id
+                        {
+                            for mutation in &pending_turn.history_mutations {
+                                apply_rollout_item_to_history(
+                                    &mut snapshot,
+                                    mutation,
+                                    initial_context,
+                                    policy,
+                                );
+                            }
+                        }
+                        history = snapshot.clone();
+                        chat_tree.restore_node(
+                            &chat_tree_turn.node_id,
+                            chat_tree_turn.parent_node_id.clone(),
+                            chat_tree_turn.summary.clone(),
+                            snapshot,
+                        );
+                    } else if let Some(pending_turn) = pending_turn {
+                        for mutation in &pending_turn.history_mutations {
+                            apply_rollout_item_to_history(
+                                &mut history,
+                                mutation,
+                                initial_context,
+                                policy,
+                            );
+                        }
+                        chat_tree.set_current_snapshot(history.clone());
+                    }
+                }
+                RolloutItem::EventMsg(EventMsg::ChatTreeNodeUpdated(event)) => {
+                    let chat_tree_turn = &event.chat_tree;
+                    if let Some(summary) = &chat_tree_turn.summary {
+                        let _ =
+                            chat_tree.update_node_summary(&chat_tree_turn.node_id, summary.clone());
+                    }
+                }
+                RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+                    turn_id: Some(turn_id),
+                    reason,
+                    chat_tree: event_chat_tree,
+                })) => {
+                    let pending_turn = active_turn.take();
+                    let mut snapshot = build_chat_tree_snapshot(
+                        &chat_tree,
+                        pending_turn.as_ref(),
+                        event_chat_tree
+                            .as_ref()
+                            .and_then(|turn| turn.parent_node_id.as_deref())
+                            .or_else(|| {
+                                pending_turn
+                                    .as_ref()
+                                    .map(|turn| turn.parent_node_id.as_str())
+                            }),
+                    );
+                    if let Some(pending_turn) = pending_turn.as_ref()
+                        && pending_turn.turn_id == *turn_id
+                    {
+                        for mutation in &pending_turn.history_mutations {
+                            apply_rollout_item_to_history(
+                                &mut snapshot,
+                                mutation,
+                                initial_context,
+                                policy,
+                            );
+                        }
+                    }
+                    history = snapshot.clone();
+                    let parent_node_id = event_chat_tree
+                        .as_ref()
+                        .and_then(|turn| turn.parent_node_id.clone())
+                        .and_then(normalize_parent_node_id)
+                        .or_else(|| {
+                            pending_turn
+                                .and_then(|turn| normalize_parent_node_id(turn.parent_node_id))
+                        });
+                    chat_tree.restore_node(
+                        event_chat_tree
+                            .as_ref()
+                            .map(|turn| turn.node_id.as_str())
+                            .unwrap_or(turn_id),
+                        parent_node_id,
+                        event_chat_tree
+                            .as_ref()
+                            .and_then(|turn| turn.summary.clone())
+                            .or_else(|| Some(abort_reason_summary(reason))),
+                        snapshot,
+                    );
+                }
+                RolloutItem::TurnContext(_)
+                | RolloutItem::SessionMeta(_)
+                | RolloutItem::EventMsg(_) => {}
+            }
+        }
+
+        if let Some(pending_turn) = active_turn {
+            for mutation in &pending_turn.history_mutations {
+                apply_rollout_item_to_history(&mut history, mutation, initial_context, policy);
+            }
+            chat_tree.set_current_snapshot(history.clone());
+        }
+
+        self.history = history;
+        self.chat_tree = chat_tree;
+    }
+
+    pub(crate) fn append_to_all_chat_tree_snapshots(
+        &mut self,
+        items: &[ResponseItem],
+        policy: TruncationPolicy,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+
+        for node in self.chat_tree.nodes.values_mut() {
+            if let Some(snapshot) = node.history_snapshot.as_mut() {
+                snapshot.record_items(items.iter(), policy);
+            }
+        }
     }
 
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
@@ -267,6 +609,72 @@ impl SessionState {
     }
 }
 
+fn abort_reason_summary(reason: &TurnAbortReason) -> String {
+    match reason {
+        TurnAbortReason::Interrupted => "turn interrupted".to_string(),
+        TurnAbortReason::Replaced => "turn replaced".to_string(),
+        TurnAbortReason::ReviewEnded => "turn review ended".to_string(),
+    }
+}
+
+fn normalize_parent_node_id(parent_node_id: String) -> Option<String> {
+    if parent_node_id == CHAT_TREE_ROOT_NODE_ID {
+        None
+    } else {
+        Some(parent_node_id)
+    }
+}
+
+fn build_chat_tree_snapshot(
+    chat_tree: &ChatTreeState,
+    pending_turn: Option<&PendingChatTreeTurnRestore>,
+    persisted_parent_node_id: Option<&str>,
+) -> ContextManager {
+    let parent_node_id = persisted_parent_node_id
+        .or_else(|| pending_turn.map(|turn| turn.parent_node_id.as_str()))
+        .unwrap_or(CHAT_TREE_ROOT_NODE_ID);
+    chat_tree
+        .snapshot_for_node(parent_node_id)
+        .unwrap_or_default()
+}
+
+fn apply_rollout_item_to_history(
+    history: &mut ContextManager,
+    item: &RolloutItem,
+    initial_context: &[ResponseItem],
+    policy: TruncationPolicy,
+) {
+    match item {
+        RolloutItem::ResponseItem(response_item) => {
+            history.record_items(std::iter::once(response_item), policy);
+        }
+        RolloutItem::Compacted(compacted) => {
+            if let Some(replacement) = &compacted.replacement_history {
+                history.replace(replacement.clone());
+            } else {
+                let user_messages = compact::collect_user_messages(history.raw_items());
+                let rebuilt = compact::build_compacted_history(
+                    initial_context.to_vec(),
+                    &user_messages,
+                    &compacted.message,
+                );
+                history.replace(rebuilt);
+            }
+        }
+        RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
+            history.drop_last_n_user_turns(rollback.num_turns);
+        }
+        RolloutItem::TurnContext(_) | RolloutItem::SessionMeta(_) | RolloutItem::EventMsg(_) => {}
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingChatTreeTurnRestore {
+    turn_id: String,
+    parent_node_id: String,
+    history_mutations: Vec<RolloutItem>,
+}
+
 // Sometimes new snapshots don't include credits or plan information.
 // Preserve those from the previous snapshot when missing. For `limit_id`, treat
 // missing values as the default `"codex"` bucket.
@@ -290,8 +698,256 @@ fn merge_rate_limit_fields(
 mod tests {
     use super::*;
     use crate::codex::make_session_configuration_for_tests;
+    use crate::protocol::EventMsg;
     use crate::protocol::RateLimitWindow;
+    use crate::protocol::TurnCompleteEvent;
+    use crate::protocol::TurnStartedEvent;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+    use codex_protocol::protocol::RolloutItem;
     use pretty_assertions::assert_eq;
+
+    fn user_message(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
+
+    fn assistant_message(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_tree_switch_restores_branch_snapshot_without_diverged_turns() {
+        let session_configuration = make_session_configuration_for_tests().await;
+        let mut state = SessionState::new(session_configuration);
+
+        let node_a = state
+            .create_chat_tree_child_node("node-a".to_string())
+            .expect("create node-a");
+        assert_eq!(node_a.parent_node_id, None);
+
+        let items_a = [
+            user_message("turn-a-user"),
+            assistant_message("turn-a-assistant"),
+        ];
+        state.record_items(items_a.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-a", Some("summary-a".to_string()));
+
+        let snapshot_a = state.clone_history().raw_items().to_vec();
+
+        let node_b = state
+            .create_chat_tree_child_node("node-b".to_string())
+            .expect("create node-b");
+        assert_eq!(node_b.parent_node_id, Some("node-a".to_string()));
+        let items_b = [
+            user_message("turn-b-user"),
+            assistant_message("turn-b-assistant"),
+        ];
+        state.record_items(items_b.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-b", Some("summary-b".to_string()));
+
+        state
+            .set_current_chat_tree_node("node-a")
+            .expect("switch to node-a");
+        assert_eq!(state.clone_history().raw_items(), snapshot_a.as_slice());
+
+        let node_c = state
+            .create_chat_tree_child_node("node-c".to_string())
+            .expect("create node-c");
+        assert_eq!(node_c.parent_node_id, Some("node-a".to_string()));
+        let items_c = vec![
+            user_message("turn-c-user"),
+            assistant_message("turn-c-assistant"),
+        ];
+        state.record_items(items_c.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-c", Some("summary-c".to_string()));
+
+        let mut expected = snapshot_a;
+        expected.extend(items_c);
+        assert_eq!(state.clone_history().raw_items(), expected.as_slice());
+    }
+
+    #[tokio::test]
+    async fn chat_tree_late_summary_keeps_original_snapshot() {
+        let session_configuration = make_session_configuration_for_tests().await;
+        let mut state = SessionState::new(session_configuration);
+
+        state
+            .create_chat_tree_child_node("node-a".to_string())
+            .expect("create node-a");
+        let items_a = [
+            user_message("turn-a-user"),
+            assistant_message("turn-a-assistant"),
+        ];
+        state.record_items(items_a.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-a", None);
+        let snapshot_a = state.clone_history().raw_items().to_vec();
+
+        state
+            .create_chat_tree_child_node("node-b".to_string())
+            .expect("create node-b");
+        let items_b = [
+            user_message("turn-b-user"),
+            assistant_message("turn-b-assistant"),
+        ];
+        state.record_items(items_b.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-b", Some("summary-b".to_string()));
+
+        let updated = state
+            .finalize_chat_tree_node("node-a", Some("summary-a".to_string()))
+            .expect("update node-a");
+        assert_eq!(updated.node_id, "node-a");
+        assert_eq!(updated.parent_node_id, None);
+        assert_eq!(updated.summary, Some("summary-a".to_string()));
+
+        state
+            .set_current_chat_tree_node("node-a")
+            .expect("switch to node-a");
+        assert_eq!(state.clone_history().raw_items(), snapshot_a.as_slice());
+    }
+
+    #[tokio::test]
+    async fn sync_current_chat_tree_snapshot_keeps_compacted_branch_after_switching_away_and_back()
+    {
+        let session_configuration = make_session_configuration_for_tests().await;
+        let mut state = SessionState::new(session_configuration);
+
+        state
+            .create_chat_tree_child_node("node-a".to_string())
+            .expect("create node-a");
+        let items_a = [
+            user_message("turn-a-user"),
+            assistant_message("turn-a-assistant"),
+        ];
+        state.record_items(items_a.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-a", Some("summary-a".to_string()));
+
+        state
+            .create_chat_tree_child_node("node-b".to_string())
+            .expect("create node-b");
+        let items_b = [
+            user_message("turn-b-user"),
+            assistant_message("turn-b-assistant"),
+        ];
+        state.record_items(items_b.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-b", Some("summary-b".to_string()));
+
+        state
+            .set_current_chat_tree_node("node-a")
+            .expect("switch to node-a");
+        state
+            .create_chat_tree_child_node("node-c".to_string())
+            .expect("create node-c");
+        let items_c = [
+            user_message("turn-c-user"),
+            assistant_message("turn-c-assistant"),
+        ];
+        state.record_items(items_c.iter(), TruncationPolicy::Bytes(usize::MAX));
+        state.finalize_chat_tree_node("node-c", Some("summary-c".to_string()));
+
+        let compacted_history = vec![
+            user_message("compacted-user"),
+            assistant_message("compacted-summary"),
+        ];
+        state.replace_history(compacted_history.clone());
+        state.sync_current_chat_tree_snapshot();
+
+        state
+            .set_current_chat_tree_node("node-b")
+            .expect("switch to node-b");
+        state
+            .set_current_chat_tree_node("node-c")
+            .expect("switch to node-c");
+        assert_eq!(
+            state.clone_history().raw_items(),
+            compacted_history.as_slice()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_from_rollout_uses_persisted_parent_node_id() {
+        let session_configuration = make_session_configuration_for_tests().await;
+        let mut state = SessionState::new(session_configuration);
+        let policy = TruncationPolicy::Bytes(usize::MAX);
+
+        let turn_started = |turn_id: &str| {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: turn_id.to_string(),
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }))
+        };
+        let turn_complete = |turn_id: &str, parent_node_id: Option<&str>, summary: &str| {
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: turn_id.to_string(),
+                last_agent_message: None,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: turn_id.to_string(),
+                    parent_node_id: parent_node_id.map(std::string::ToString::to_string),
+                    summary: Some(summary.to_string()),
+                }),
+            }))
+        };
+
+        let rollout_items = vec![
+            turn_started("node-a"),
+            RolloutItem::ResponseItem(user_message("turn-a-user")),
+            RolloutItem::ResponseItem(assistant_message("turn-a-assistant")),
+            turn_complete("node-a", None, "summary-a"),
+            turn_started("node-b"),
+            RolloutItem::ResponseItem(user_message("turn-b-user")),
+            RolloutItem::ResponseItem(assistant_message("turn-b-assistant")),
+            turn_complete("node-b", Some("node-a"), "summary-b"),
+            turn_started("node-c"),
+            RolloutItem::ResponseItem(user_message("turn-c-user")),
+            RolloutItem::ResponseItem(assistant_message("turn-c-assistant")),
+            turn_complete("node-c", Some("node-a"), "summary-c"),
+        ];
+
+        state.restore_from_rollout(&rollout_items, &[], policy);
+
+        state
+            .set_current_chat_tree_node("node-b")
+            .expect("switch to node-b");
+        assert_eq!(
+            state.clone_history().raw_items(),
+            &[
+                user_message("turn-a-user"),
+                assistant_message("turn-a-assistant"),
+                user_message("turn-b-user"),
+                assistant_message("turn-b-assistant"),
+            ]
+        );
+
+        state
+            .set_current_chat_tree_node("node-c")
+            .expect("switch to node-c");
+        assert_eq!(
+            state.clone_history().raw_items(),
+            &[
+                user_message("turn-a-user"),
+                assistant_message("turn-a-assistant"),
+                user_message("turn-c-user"),
+                assistant_message("turn-c-assistant"),
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn merge_mcp_tool_selection_deduplicates_and_preserves_order() {

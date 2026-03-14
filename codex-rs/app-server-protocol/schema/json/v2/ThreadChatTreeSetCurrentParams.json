@@ -1,0 +1,17 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "properties": {
+    "nodeId": {
+      "type": "string"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "nodeId",
+    "threadId"
+  ],
+  "title": "ThreadChatTreeSetCurrentParams",
+  "type": "object"
+}

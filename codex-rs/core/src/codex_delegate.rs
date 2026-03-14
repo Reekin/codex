@@ -581,6 +581,7 @@ mod tests {
                 msg: EventMsg::TurnAborted(TurnAbortedEvent {
                     turn_id: Some("turn-1".to_string()),
                     reason: TurnAbortReason::Interrupted,
+                    chat_tree: None,
                 }),
             })
             .await

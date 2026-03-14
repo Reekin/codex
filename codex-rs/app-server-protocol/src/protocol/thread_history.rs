@@ -11,6 +11,8 @@ use crate::protocol::v2::McpToolCallResult;
 use crate::protocol::v2::McpToolCallStatus;
 use crate::protocol::v2::PatchApplyStatus;
 use crate::protocol::v2::PatchChangeKind;
+use crate::protocol::v2::ThreadChatTree;
+use crate::protocol::v2::ThreadChatTreeNode;
 use crate::protocol::v2::ThreadItem;
 use crate::protocol::v2::Turn;
 use crate::protocol::v2::TurnError as V2TurnError;
@@ -23,6 +25,7 @@ use codex_protocol::protocol::AgentReasoningEvent;
 use codex_protocol::protocol::AgentReasoningRawContentEvent;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
+use codex_protocol::protocol::ChatTreeNodeUpdatedEvent;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ContextCompactedEvent;
 use codex_protocol::protocol::DynamicToolCallResponseEvent;
@@ -67,6 +70,217 @@ pub fn build_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
         builder.handle_rollout_item(item);
     }
     builder.finish()
+}
+
+pub fn build_thread_chat_tree_from_rollout_items(items: &[RolloutItem]) -> ThreadChatTree {
+    let mut builder = ThreadChatTreeBuilder::default();
+    for item in items {
+        builder.handle_rollout_item(item);
+    }
+    builder.finish()
+}
+
+pub fn build_projected_turns_from_rollout_items(
+    items: &[RolloutItem],
+    current_node_id_override: Option<&str>,
+) -> Vec<Turn> {
+    let chat_tree = build_thread_chat_tree_from_rollout_items(items);
+    if chat_tree.nodes.is_empty() {
+        return build_turns_from_rollout_items(items);
+    }
+
+    let Some(current_node_id) = current_node_id_override
+        .map(ToOwned::to_owned)
+        .or(chat_tree.current_node_id.clone())
+    else {
+        return build_turns_from_rollout_items(items);
+    };
+
+    let node_by_id: HashMap<&str, &ThreadChatTreeNode> = chat_tree
+        .nodes
+        .iter()
+        .map(|node| (node.node_id.as_str(), node))
+        .collect();
+    if !node_by_id.contains_key(current_node_id.as_str()) {
+        return build_turns_from_rollout_items(items);
+    }
+    let mut visible_node_ids = HashMap::new();
+    let mut walker = Some(current_node_id.as_str());
+    while let Some(node_id) = walker {
+        visible_node_ids.insert(node_id.to_string(), ());
+        walker = node_by_id
+            .get(node_id)
+            .and_then(|node| node.parent_node_id.as_deref());
+    }
+
+    let turn_node_ids: HashMap<String, String> = chat_tree
+        .nodes
+        .iter()
+        .filter_map(|node| {
+            node.turn_id
+                .as_ref()
+                .map(|turn_id| (turn_id.clone(), node.node_id.clone()))
+        })
+        .collect();
+
+    build_turns_from_rollout_items(items)
+        .into_iter()
+        .filter(|turn| {
+            turn_node_ids
+                .get(&turn.id)
+                .is_none_or(|node_id| visible_node_ids.contains_key(node_id))
+        })
+        .collect()
+}
+
+#[derive(Default)]
+struct ThreadChatTreeBuilder {
+    current_node_id: Option<String>,
+    current_turn: Option<PendingChatTreeTurn>,
+    node_indices: HashMap<String, usize>,
+    nodes: Vec<ThreadChatTreeNode>,
+}
+
+struct PendingChatTreeTurn {
+    turn_id: String,
+    parent_node_id: Option<String>,
+}
+
+impl ThreadChatTreeBuilder {
+    fn finish(self) -> ThreadChatTree {
+        ThreadChatTree {
+            current_node_id: self.current_node_id,
+            nodes: self.nodes,
+        }
+    }
+
+    fn handle_rollout_item(&mut self, item: &RolloutItem) {
+        if let RolloutItem::EventMsg(event) = item {
+            self.handle_event(event);
+        }
+    }
+
+    fn handle_event(&mut self, event: &EventMsg) {
+        match event {
+            EventMsg::TurnStarted(payload) => self.handle_turn_started(payload),
+            EventMsg::TurnComplete(payload) => self.handle_turn_complete(payload),
+            EventMsg::ChatTreeNodeUpdated(payload) => self.handle_node_updated(payload),
+            EventMsg::TurnAborted(payload) => self.handle_turn_aborted(payload),
+            _ => {}
+        }
+    }
+
+    fn handle_turn_started(&mut self, payload: &TurnStartedEvent) {
+        self.current_turn = Some(PendingChatTreeTurn {
+            turn_id: payload.turn_id.clone(),
+            parent_node_id: self.current_node_id.clone(),
+        });
+    }
+
+    fn handle_turn_complete(&mut self, payload: &TurnCompleteEvent) {
+        self.current_turn = None;
+        let Some(chat_tree) = payload.chat_tree.as_ref() else {
+            return;
+        };
+        let node = ThreadChatTreeNode {
+            node_id: chat_tree.node_id.clone(),
+            parent_node_id: chat_tree.parent_node_id.clone(),
+            summary: chat_tree.summary.clone(),
+            turn_id: Some(payload.turn_id.clone()),
+            order: self.next_order(),
+        };
+        self.upsert_node(node);
+        self.current_node_id = Some(chat_tree.node_id.clone());
+    }
+
+    fn handle_node_updated(&mut self, payload: &ChatTreeNodeUpdatedEvent) {
+        let chat_tree = &payload.chat_tree;
+        let node = ThreadChatTreeNode {
+            node_id: chat_tree.node_id.clone(),
+            parent_node_id: chat_tree.parent_node_id.clone(),
+            summary: chat_tree.summary.clone(),
+            turn_id: None,
+            order: self.next_order(),
+        };
+        self.upsert_node(node);
+    }
+
+    fn handle_turn_aborted(&mut self, payload: &TurnAbortedEvent) {
+        let Some(turn_id) = payload
+            .turn_id
+            .as_ref()
+            .or_else(|| payload.chat_tree.as_ref().map(|turn| &turn.node_id))
+        else {
+            self.current_turn = None;
+            return;
+        };
+
+        let parent_node_id = payload
+            .chat_tree
+            .as_ref()
+            .and_then(|turn| turn.parent_node_id.clone())
+            .or_else(|| {
+                self.current_turn
+                    .take()
+                    .filter(|turn| turn.turn_id == *turn_id)
+                    .and_then(|turn| turn.parent_node_id)
+            });
+        let node_id = payload
+            .chat_tree
+            .as_ref()
+            .map(|turn| turn.node_id.clone())
+            .unwrap_or_else(|| turn_id.clone());
+        let node = ThreadChatTreeNode {
+            node_id: node_id.clone(),
+            parent_node_id,
+            summary: payload
+                .chat_tree
+                .as_ref()
+                .and_then(|turn| turn.summary.clone())
+                .or_else(|| Some(abort_reason_summary(&payload.reason))),
+            turn_id: payload
+                .turn_id
+                .clone()
+                .or_else(|| payload.chat_tree.as_ref().map(|turn| turn.node_id.clone())),
+            order: self.next_order(),
+        };
+        self.upsert_node(node);
+        self.current_turn = None;
+        self.current_node_id = Some(node_id);
+    }
+
+    fn next_order(&self) -> u32 {
+        u32::try_from(self.node_indices.len()).unwrap_or(u32::MAX)
+    }
+
+    fn upsert_node(&mut self, node: ThreadChatTreeNode) {
+        if let Some(index) = self.node_indices.get(&node.node_id).copied() {
+            let existing = &mut self.nodes[index];
+            if node.parent_node_id.is_some() {
+                existing.parent_node_id = node.parent_node_id;
+            }
+            if node.summary.is_some() {
+                existing.summary = node.summary;
+            }
+            if node.turn_id.is_some() {
+                existing.turn_id = node.turn_id;
+            }
+            return;
+        }
+
+        self.node_indices
+            .insert(node.node_id.clone(), self.nodes.len());
+        self.nodes.push(node);
+    }
+}
+
+fn abort_reason_summary(reason: &codex_protocol::protocol::TurnAbortReason) -> String {
+    match reason {
+        codex_protocol::protocol::TurnAbortReason::Interrupted => "turn interrupted",
+        codex_protocol::protocol::TurnAbortReason::Replaced => "turn replaced",
+        codex_protocol::protocol::TurnAbortReason::ReviewEnded => "turn review ended",
+    }
+    .to_string()
 }
 
 pub struct ThreadHistoryBuilder {
@@ -1125,6 +1339,8 @@ mod tests {
     use codex_protocol::protocol::AgentReasoningEvent;
     use codex_protocol::protocol::AgentReasoningRawContentEvent;
     use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
+    use codex_protocol::protocol::ChatTreeNodeUpdatedEvent;
+    use codex_protocol::protocol::ChatTreeTurnInfo;
     use codex_protocol::protocol::CodexErrorInfo;
     use codex_protocol::protocol::CompactedItem;
     use codex_protocol::protocol::DynamicToolCallResponseEvent;
@@ -1271,6 +1487,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: turn_id.to_string(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
         ];
 
@@ -1291,6 +1508,330 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[test]
+    fn builds_chat_tree_from_rollout_items() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "node-a".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "root".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "reply-a".into(),
+                phase: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "node-a".into(),
+                last_agent_message: None,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: "node-a".into(),
+                    parent_node_id: None,
+                    summary: None,
+                }),
+            })),
+            RolloutItem::EventMsg(EventMsg::ChatTreeNodeUpdated(ChatTreeNodeUpdatedEvent {
+                chat_tree: ChatTreeTurnInfo {
+                    node_id: "node-a".into(),
+                    parent_node_id: None,
+                    summary: Some("summary-a".into()),
+                },
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "node-b".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "left".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "reply-b".into(),
+                phase: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "node-b".into(),
+                last_agent_message: None,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: "node-b".into(),
+                    parent_node_id: Some("node-a".into()),
+                    summary: Some("summary-b".into()),
+                }),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "node-c".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "right".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "reply-c".into(),
+                phase: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "node-c".into(),
+                last_agent_message: None,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: "node-c".into(),
+                    parent_node_id: Some("node-a".into()),
+                    summary: Some("summary-c".into()),
+                }),
+            })),
+        ];
+
+        let chat_tree = build_thread_chat_tree_from_rollout_items(&items);
+
+        assert_eq!(
+            chat_tree,
+            ThreadChatTree {
+                current_node_id: Some("node-c".into()),
+                nodes: vec![
+                    ThreadChatTreeNode {
+                        node_id: "node-a".into(),
+                        parent_node_id: None,
+                        summary: Some("summary-a".into()),
+                        turn_id: Some("node-a".into()),
+                        order: 0,
+                    },
+                    ThreadChatTreeNode {
+                        node_id: "node-b".into(),
+                        parent_node_id: Some("node-a".into()),
+                        summary: Some("summary-b".into()),
+                        turn_id: Some("node-b".into()),
+                        order: 1,
+                    },
+                    ThreadChatTreeNode {
+                        node_id: "node-c".into(),
+                        parent_node_id: Some("node-a".into()),
+                        summary: Some("summary-c".into()),
+                        turn_id: Some("node-c".into()),
+                        order: 2,
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn projects_turns_to_selected_chat_tree_branch() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "node-a".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "root".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "reply-a".into(),
+                phase: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "node-a".into(),
+                last_agent_message: None,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: "node-a".into(),
+                    parent_node_id: None,
+                    summary: Some("summary-a".into()),
+                }),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "node-b".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "left".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "reply-b".into(),
+                phase: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "node-b".into(),
+                last_agent_message: None,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: "node-b".into(),
+                    parent_node_id: Some("node-a".into()),
+                    summary: Some("summary-b".into()),
+                }),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "node-c".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "right".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "reply-c".into(),
+                phase: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "node-c".into(),
+                last_agent_message: None,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: "node-c".into(),
+                    parent_node_id: Some("node-a".into()),
+                    summary: Some("summary-c".into()),
+                }),
+            })),
+        ];
+
+        let projected = build_projected_turns_from_rollout_items(&items, Some("node-c"));
+
+        assert_eq!(projected.len(), 2);
+        assert_eq!(projected[0].id, "node-a");
+        assert_eq!(projected[1].id, "node-c");
+        assert_eq!(
+            projected
+                .iter()
+                .flat_map(|turn| turn.items.iter())
+                .filter_map(|item| match item {
+                    ThreadItem::UserMessage { content, .. } => Some(content),
+                    _ => None,
+                })
+                .flat_map(|content| content.iter())
+                .filter_map(|input| match input {
+                    UserInput::Text { text, .. } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["root", "right"]
+        );
+    }
+
+    #[test]
+    fn projects_interrupted_turn_to_selected_chat_tree_branch() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "node-a".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "one".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "reply-a".into(),
+                phase: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "node-a".into(),
+                last_agent_message: None,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: "node-a".into(),
+                    parent_node_id: None,
+                    summary: Some("summary-a".into()),
+                }),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "node-b".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "two".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "reply-b".into(),
+                phase: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "node-b".into(),
+                last_agent_message: None,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: "node-b".into(),
+                    parent_node_id: Some("node-a".into()),
+                    summary: Some("summary-b".into()),
+                }),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "node-c".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "three".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "reply-c".into(),
+                phase: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "node-c".into(),
+                last_agent_message: None,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: "node-c".into(),
+                    parent_node_id: Some("node-b".into()),
+                    summary: Some("summary-c".into()),
+                }),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "node-d".into(),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: "four".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+                turn_id: Some("node-d".into()),
+                reason: TurnAbortReason::Interrupted,
+                chat_tree: Some(ChatTreeTurnInfo {
+                    node_id: "node-d".into(),
+                    parent_node_id: Some("node-b".into()),
+                    summary: Some("turn interrupted".into()),
+                }),
+            })),
+        ];
+
+        let projected = build_projected_turns_from_rollout_items(&items, None);
+        assert_eq!(projected.len(), 3);
+        assert_eq!(projected[0].id, "node-a");
+        assert_eq!(projected[1].id, "node-b");
+        assert_eq!(projected[2].id, "node-d");
+        assert_eq!(projected[0].status, TurnStatus::Completed);
+        assert_eq!(projected[1].status, TurnStatus::Completed);
+        assert_eq!(projected[2].status, TurnStatus::Interrupted);
     }
 
     #[test]
@@ -1383,6 +1924,7 @@ mod tests {
             EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some("turn-1".into()),
                 reason: TurnAbortReason::Replaced,
+                chat_tree: None,
             }),
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Let's try again".into(),
@@ -1588,6 +2130,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
         ];
 
@@ -1885,6 +2428,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-b".into(),
@@ -1919,6 +2463,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-b".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
         ];
 
@@ -1967,6 +2512,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-b".into(),
@@ -2001,6 +2547,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-b".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
         ];
 
@@ -2170,6 +2717,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-b".into(),
@@ -2185,6 +2733,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "still in b".into(),
@@ -2193,6 +2742,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-b".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
         ];
 
@@ -2224,6 +2774,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
             EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-b".into(),
@@ -2239,6 +2790,7 @@ mod tests {
             EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some("turn-a".into()),
                 reason: TurnAbortReason::Replaced,
+                chat_tree: None,
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "still in b".into(),
@@ -2273,6 +2825,7 @@ mod tests {
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-compact".into(),
                 last_agent_message: None,
+                chat_tree: None,
             })),
         ];
 
@@ -2384,6 +2937,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
             EventMsg::Error(ErrorEvent {
                 message: "request-level failure".into(),
@@ -2437,6 +2991,7 @@ mod tests {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 last_agent_message: None,
+                chat_tree: None,
             }),
         ];
 

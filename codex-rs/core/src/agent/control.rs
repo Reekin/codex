@@ -674,6 +674,7 @@ mod tests {
         let status = agent_status_from_event(&EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: Some("done".to_string()),
+            chat_tree: None,
         }));
         let expected = AgentStatus::Completed(Some("done".to_string()));
         assert_eq!(status, Some(expected));
@@ -695,6 +696,7 @@ mod tests {
         let status = agent_status_from_event(&EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some("turn-1".to_string()),
             reason: TurnAbortReason::Interrupted,
+            chat_tree: None,
         }));
 
         let expected = AgentStatus::Errored("Interrupted".to_string());
