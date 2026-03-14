@@ -27,6 +27,8 @@ export type { ByteRange } from "./ByteRange";
 export type { CallToolResult } from "./CallToolResult";
 export type { CancelLoginChatGptParams } from "./CancelLoginChatGptParams";
 export type { CancelLoginChatGptResponse } from "./CancelLoginChatGptResponse";
+export type { ChatTreeNodeUpdatedEvent } from "./ChatTreeNodeUpdatedEvent";
+export type { ChatTreeTurnInfo } from "./ChatTreeTurnInfo";
 export type { ClientInfo } from "./ClientInfo";
 export type { ClientNotification } from "./ClientNotification";
 export type { ClientRequest } from "./ClientRequest";

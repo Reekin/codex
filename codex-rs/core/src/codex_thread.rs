@@ -127,6 +127,14 @@ impl CodexThread {
         self.codex.thread_config_snapshot().await
     }
 
+    pub async fn current_chat_tree_node_id(&self) -> Option<String> {
+        self.codex.current_chat_tree_node_id().await
+    }
+
+    pub async fn set_current_chat_tree_node(&self, node_id: &str) -> Result<(), String> {
+        self.codex.set_current_chat_tree_node(node_id).await
+    }
+
     pub fn enabled(&self, feature: Feature) -> bool {
         self.codex.enabled(feature)
     }

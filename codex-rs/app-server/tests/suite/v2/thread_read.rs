@@ -7,6 +7,11 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadChatTreeReadParams;
+use codex_app_server_protocol::ThreadChatTreeReadResponse;
+use codex_app_server_protocol::ThreadChatTreeSetCurrentParams;
+use codex_app_server_protocol::ThreadChatTreeSetCurrentResponse;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
@@ -139,6 +144,216 @@ async fn thread_read_can_include_turns() -> Result<()> {
         other => panic!("expected user message item, got {other:?}"),
     }
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_read_projects_loaded_thread_to_selected_chat_tree_branch() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let start_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+
+    let user_messages = |thread: &Thread| {
+        thread
+            .turns
+            .iter()
+            .flat_map(|turn| turn.items.iter())
+            .filter_map(|item| match item {
+                ThreadItem::UserMessage { content, .. } => Some(content),
+                _ => None,
+            })
+            .flat_map(|content| content.iter())
+            .filter_map(|input| match input {
+                UserInput::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let first_turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "root".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let first_turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(first_turn_id)),
+    )
+    .await??;
+    let _: TurnStartResponse = to_response::<TurnStartResponse>(first_turn_resp)?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let tree_read_id = mcp
+        .send_thread_chat_tree_read_request(ThreadChatTreeReadParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    let tree_read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(tree_read_id)),
+    )
+    .await??;
+    let ThreadChatTreeReadResponse { chat_tree, .. } =
+        to_response::<ThreadChatTreeReadResponse>(tree_read_resp)?;
+    assert_eq!(chat_tree.nodes.len(), 1);
+    let root_node_id = chat_tree.current_node_id.expect("root node id");
+
+    let second_turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "left".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let second_turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(second_turn_id)),
+    )
+    .await??;
+    let _: TurnStartResponse = to_response::<TurnStartResponse>(second_turn_resp)?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let tree_read_id = mcp
+        .send_thread_chat_tree_read_request(ThreadChatTreeReadParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    let tree_read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(tree_read_id)),
+    )
+    .await??;
+    let ThreadChatTreeReadResponse { chat_tree, .. } =
+        to_response::<ThreadChatTreeReadResponse>(tree_read_resp)?;
+    assert_eq!(chat_tree.nodes.len(), 2);
+    let left_node_id = chat_tree.current_node_id.expect("left node id");
+    assert_ne!(left_node_id, root_node_id);
+
+    let set_current_id = mcp
+        .send_thread_chat_tree_set_current_request(ThreadChatTreeSetCurrentParams {
+            thread_id: thread.id.clone(),
+            node_id: root_node_id.clone(),
+        })
+        .await?;
+    let set_current_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(set_current_id)),
+    )
+    .await??;
+    let ThreadChatTreeSetCurrentResponse {
+        current_node_id, ..
+    } = to_response::<ThreadChatTreeSetCurrentResponse>(set_current_resp)?;
+    assert_eq!(current_node_id, root_node_id);
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread.id.clone(),
+            include_turns: true,
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadReadResponse { thread: read } = to_response::<ThreadReadResponse>(read_resp)?;
+    assert_eq!(user_messages(&read), vec!["root".to_string()]);
+
+    let third_turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "right".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let third_turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(third_turn_id)),
+    )
+    .await??;
+    let _: TurnStartResponse = to_response::<TurnStartResponse>(third_turn_resp)?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let tree_read_id = mcp
+        .send_thread_chat_tree_read_request(ThreadChatTreeReadParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    let tree_read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(tree_read_id)),
+    )
+    .await??;
+    let ThreadChatTreeReadResponse { chat_tree, .. } =
+        to_response::<ThreadChatTreeReadResponse>(tree_read_resp)?;
+    assert_eq!(chat_tree.nodes.len(), 3);
+    let right_node_id = chat_tree.current_node_id.expect("right node id");
+    assert_ne!(right_node_id, left_node_id);
+    assert_eq!(
+        chat_tree
+            .nodes
+            .iter()
+            .find(|node| node.node_id == right_node_id)
+            .and_then(|node| node.parent_node_id.as_deref()),
+        Some(root_node_id.as_str())
+    );
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread.id,
+            include_turns: true,
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadReadResponse { thread: read } = to_response::<ThreadReadResponse>(read_resp)?;
+    assert_eq!(
+        user_messages(&read),
+        vec!["root".to_string(), "right".to_string()]
+    );
 
     Ok(())
 }

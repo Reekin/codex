@@ -2,6 +2,8 @@ use anyhow::Result;
 use app_test_support::McpProcess;
 use app_test_support::create_fake_rollout_with_text_elements;
 use app_test_support::create_mock_responses_server_repeating_assistant;
+use app_test_support::create_mock_responses_server_sequence;
+use app_test_support::create_shell_command_sse_response;
 use app_test_support::rollout_path;
 use app_test_support::to_response;
 use chrono::Utc;
@@ -9,12 +11,19 @@ use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadChatTreeReadParams;
+use codex_app_server_protocol::ThreadChatTreeReadResponse;
+use codex_app_server_protocol::ThreadChatTreeSetCurrentParams;
+use codex_app_server_protocol::ThreadChatTreeSetCurrentResponse;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStatus;
+use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
@@ -35,6 +44,35 @@ use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const CODEX_5_2_INSTRUCTIONS_TEMPLATE_DEFAULT: &str = "You are Codex, a coding agent based on GPT-5. You and the user share the same workspace and collaborate to achieve the user's goals.";
+
+async fn complete_turn(mcp: &mut McpProcess, thread_id: &str, text: &str) -> Result<()> {
+    let turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread_id.to_string(),
+            input: vec![UserInput::Text {
+                text: text.to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_id)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("codex/event/chat_tree_node_updated"),
+    )
+    .await??;
+    Ok(())
+}
 
 #[tokio::test]
 async fn thread_resume_rejects_unmaterialized_thread() -> Result<()> {
@@ -303,6 +341,207 @@ async fn thread_resume_keeps_in_flight_turn_streaming() -> Result<()> {
         primary.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_resume_after_interrupted_branch_returns_interrupted_branch_turn() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    let shell_command = vec![
+        "powershell".to_string(),
+        "-Command".to_string(),
+        "Start-Sleep -Seconds 10".to_string(),
+    ];
+    #[cfg(not(target_os = "windows"))]
+    let shell_command = vec!["sleep".to_string(), "10".to_string()];
+
+    let server = create_mock_responses_server_sequence(vec![
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            responses::ev_assistant_message("msg-1", "Done 1"),
+            responses::ev_completed("resp-1"),
+        ]),
+        responses::sse(vec![
+            responses::ev_response_created("resp-1-summary"),
+            responses::ev_assistant_message("msg-1-summary", "summary 1"),
+            responses::ev_completed("resp-1-summary"),
+        ]),
+        responses::sse(vec![
+            responses::ev_response_created("resp-2"),
+            responses::ev_assistant_message("msg-2", "Done 2"),
+            responses::ev_completed("resp-2"),
+        ]),
+        responses::sse(vec![
+            responses::ev_response_created("resp-2-summary"),
+            responses::ev_assistant_message("msg-2-summary", "summary 2"),
+            responses::ev_completed("resp-2-summary"),
+        ]),
+        responses::sse(vec![
+            responses::ev_response_created("resp-3"),
+            responses::ev_assistant_message("msg-3", "Done 3"),
+            responses::ev_completed("resp-3"),
+        ]),
+        responses::sse(vec![
+            responses::ev_response_created("resp-3-summary"),
+            responses::ev_assistant_message("msg-3-summary", "summary 3"),
+            responses::ev_completed("resp-3-summary"),
+        ]),
+        create_shell_command_sse_response(shell_command.clone(), None, Some(10_000), "call_sleep")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut primary = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, primary.initialize()).await??;
+
+    let mut secondary = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, secondary.initialize()).await??;
+
+    let start_id = primary
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+
+    let user_messages = |thread: &Thread| {
+        thread
+            .turns
+            .iter()
+            .flat_map(|turn| turn.items.iter())
+            .filter_map(|item| match item {
+                ThreadItem::UserMessage { content, .. } => Some(content),
+                _ => None,
+            })
+            .flat_map(|content| content.iter())
+            .filter_map(|input| match input {
+                UserInput::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    complete_turn(&mut primary, &thread.id, "one").await?;
+    complete_turn(&mut primary, &thread.id, "two").await?;
+
+    let tree_read_id = primary
+        .send_thread_chat_tree_read_request(ThreadChatTreeReadParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    let tree_read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.read_stream_until_response_message(RequestId::Integer(tree_read_id)),
+    )
+    .await??;
+    let ThreadChatTreeReadResponse { chat_tree, .. } =
+        to_response::<ThreadChatTreeReadResponse>(tree_read_resp)?;
+    let branch_parent_id = chat_tree.current_node_id.expect("second turn node id");
+
+    complete_turn(&mut primary, &thread.id, "three").await?;
+
+    let set_current_id = primary
+        .send_thread_chat_tree_set_current_request(ThreadChatTreeSetCurrentParams {
+            thread_id: thread.id.clone(),
+            node_id: branch_parent_id.clone(),
+        })
+        .await?;
+    let set_current_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.read_stream_until_response_message(RequestId::Integer(set_current_id)),
+    )
+    .await??;
+    let ThreadChatTreeSetCurrentResponse {
+        current_node_id, ..
+    } = to_response::<ThreadChatTreeSetCurrentResponse>(set_current_resp)?;
+    assert_eq!(current_node_id, branch_parent_id);
+
+    let turn_request_id = primary
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "four".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let turn_start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.read_stream_until_response_message(RequestId::Integer(turn_request_id)),
+    )
+    .await??;
+    let TurnStartResponse { turn } = to_response::<TurnStartResponse>(turn_start_resp)?;
+
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    let interrupt_id = primary
+        .send_turn_interrupt_request(TurnInterruptParams {
+            thread_id: thread.id.clone(),
+            turn_id: turn.id,
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.read_stream_until_response_message(RequestId::Integer(interrupt_id)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let resume_id = secondary
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        secondary.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let ThreadResumeResponse {
+        thread: resumed_thread,
+        ..
+    } = to_response::<ThreadResumeResponse>(resume_resp)?;
+
+    assert_eq!(resumed_thread.status, ThreadStatus::Idle);
+    assert_eq!(user_messages(&resumed_thread), vec!["one", "two", "four"]);
+    assert_eq!(resumed_thread.turns.len(), 3);
+    assert_eq!(
+        resumed_thread.turns.last().map(|turn| &turn.status),
+        Some(&TurnStatus::Interrupted)
+    );
+
+    let read_id = secondary
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread.id,
+            include_turns: true,
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        secondary.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let read: codex_app_server_protocol::ThreadReadResponse =
+        to_response::<codex_app_server_protocol::ThreadReadResponse>(read_resp)?;
+    assert_eq!(user_messages(&read.thread), vec!["one", "two", "four"]);
+    assert_eq!(
+        read.thread.turns.last().map(|turn| &turn.status),
+        Some(&TurnStatus::Interrupted)
+    );
 
     Ok(())
 }

@@ -4,6 +4,7 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicU64;
 
 use crate::AuthManager;
@@ -167,6 +168,7 @@ use crate::protocol::AgentReasoningSectionBreakEvent;
 use crate::protocol::ApplyPatchApprovalRequestEvent;
 use crate::protocol::AskForApproval;
 use crate::protocol::BackgroundEventEvent;
+use crate::protocol::ChatTreeTurnInfo;
 use crate::protocol::DeprecationNoticeEvent;
 use crate::protocol::ErrorEvent;
 use crate::protocol::Event;
@@ -502,6 +504,14 @@ impl Codex {
         state.session_configuration.thread_config_snapshot()
     }
 
+    pub(crate) async fn current_chat_tree_node_id(&self) -> Option<String> {
+        self.session.current_chat_tree_node_id().await
+    }
+
+    pub(crate) async fn set_current_chat_tree_node(&self, node_id: &str) -> Result<(), String> {
+        self.session.set_current_chat_tree_node(node_id).await
+    }
+
     pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
         self.session.state_db()
     }
@@ -563,6 +573,7 @@ pub(crate) struct TurnContext {
     pub(crate) truncation_policy: TruncationPolicy,
     pub(crate) js_repl: Arc<JsReplHandle>,
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
+    pub(crate) turn_state: Arc<OnceLock<String>>,
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
 }
 impl TurnContext {
@@ -644,6 +655,7 @@ impl TurnContext {
             truncation_policy,
             js_repl: Arc::clone(&self.js_repl),
             dynamic_tools: self.dynamic_tools.clone(),
+            turn_state: Arc::clone(&self.turn_state),
             turn_metadata_state: self.turn_metadata_state.clone(),
         }
     }
@@ -983,6 +995,7 @@ impl Session {
             truncation_policy: model_info.truncation_policy.into(),
             js_repl,
             dynamic_tools: session_configuration.dynamic_tools.clone(),
+            turn_state: Arc::new(OnceLock::new()),
             turn_metadata_state,
         }
     }
@@ -1626,12 +1639,14 @@ impl Session {
                 }
 
                 // Always add response items to conversation history
-                let reconstructed_history = self
-                    .reconstruct_history_from_rollout(&turn_context, &rollout_items)
-                    .await;
-                if !reconstructed_history.is_empty() {
-                    self.record_into_history(&reconstructed_history, &turn_context)
-                        .await;
+                let initial_context = self.build_initial_context(&turn_context).await;
+                {
+                    let mut state = self.state.lock().await;
+                    state.restore_from_rollout(
+                        &rollout_items,
+                        &initial_context,
+                        turn_context.truncation_policy,
+                    );
                 }
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
@@ -1656,12 +1671,14 @@ impl Session {
                 self.set_previous_model(previous_model).await;
 
                 // Always add response items to conversation history
-                let reconstructed_history = self
-                    .reconstruct_history_from_rollout(&turn_context, &rollout_items)
-                    .await;
-                if !reconstructed_history.is_empty() {
-                    self.record_into_history(&reconstructed_history, &turn_context)
-                        .await;
+                let base_initial_context = self.build_initial_context(&turn_context).await;
+                {
+                    let mut state = self.state.lock().await;
+                    state.restore_from_rollout(
+                        &rollout_items,
+                        &base_initial_context,
+                        turn_context.truncation_policy,
+                    );
                 }
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
@@ -1686,6 +1703,10 @@ impl Session {
                 {
                     let mut state = self.state.lock().await;
                     state.initial_context_seeded = true;
+                    state.append_to_all_chat_tree_snapshots(
+                        &initial_context,
+                        turn_context.truncation_policy,
+                    );
                 }
 
                 // Forked threads should remain file-backed immediately after startup.
@@ -2414,6 +2435,7 @@ impl Session {
         self.send_raw_response_items(turn_context, items).await;
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn reconstruct_history_from_rollout(
         &self,
         turn_context: &TurnContext,
@@ -2530,6 +2552,38 @@ impl Session {
     pub(crate) async fn replace_history(&self, items: Vec<ResponseItem>) {
         let mut state = self.state.lock().await;
         state.replace_history(items);
+    }
+
+    pub(crate) async fn sync_current_chat_tree_snapshot(&self) {
+        let mut state = self.state.lock().await;
+        state.sync_current_chat_tree_snapshot();
+    }
+
+    pub(crate) async fn create_chat_tree_child_node(
+        &self,
+        node_id: String,
+    ) -> Option<ChatTreeTurnInfo> {
+        let mut state = self.state.lock().await;
+        state.create_chat_tree_child_node(node_id)
+    }
+
+    pub(crate) async fn finalize_chat_tree_node(
+        &self,
+        node_id: &str,
+        summary: Option<String>,
+    ) -> Option<ChatTreeTurnInfo> {
+        let mut state = self.state.lock().await;
+        state.finalize_chat_tree_node(node_id, summary)
+    }
+
+    pub(crate) async fn set_current_chat_tree_node(&self, node_id: &str) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        state.set_current_chat_tree_node(node_id)
+    }
+
+    pub(crate) async fn current_chat_tree_node_id(&self) -> Option<String> {
+        let state = self.state.lock().await;
+        state.current_chat_tree_node_id()
     }
 
     pub(crate) async fn seed_initial_context_if_needed(&self, turn_context: &TurnContext) {
@@ -3282,6 +3336,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::SetThreadName { name } => {
                 handlers::set_thread_name(&sess, sub.id.clone(), name).await;
             }
+            Op::SetCurrentChatTreeNode { node_id } => {
+                handlers::set_current_chat_tree_node(&sess, sub.id.clone(), node_id).await;
+            }
             Op::RunUserShellCommand { command } => {
                 handlers::run_user_shell_command(&sess, sub.id.clone(), command).await;
             }
@@ -3449,6 +3506,9 @@ mod handlers {
         // Attempt to inject input into current task.
         if let Err(SteerInputError::NoActiveTurn(items)) = sess.steer_input(items, None).await {
             sess.seed_initial_context_if_needed(&current_context).await;
+            let _ = sess
+                .create_chat_tree_child_node(current_context.sub_id.clone())
+                .await;
             let previous_model = sess.previous_model().await;
             let previous_context_item = sess.previous_context_item().await;
             let update_items = sess.build_settings_update_items(
@@ -3468,6 +3528,31 @@ mod handlers {
                 .await;
             sess.set_previous_context_item(Some(current_context.to_turn_context_item()))
                 .await;
+        }
+    }
+
+    pub async fn set_current_chat_tree_node(sess: &Arc<Session>, sub_id: String, node_id: String) {
+        if sess.active_turn.lock().await.is_some() {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: "cannot switch chat-tree node while a task is running".to_string(),
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
+            return;
+        }
+
+        if let Err(err) = sess.set_current_chat_tree_node(&node_id).await {
+            sess.send_event_raw(Event {
+                id: sub_id,
+                msg: EventMsg::Error(ErrorEvent {
+                    message: err,
+                    codex_error_info: Some(CodexErrorInfo::BadRequest),
+                }),
+            })
+            .await;
         }
     }
 
@@ -4196,6 +4281,7 @@ async fn spawn_review_thread(
         js_repl: Arc::clone(&sess.js_repl),
         dynamic_tools: parent_turn_context.dynamic_tools.clone(),
         truncation_policy: model_info.truncation_policy.into(),
+        turn_state: Arc::new(OnceLock::new()),
         turn_metadata_state,
     };
 
@@ -4441,8 +4527,13 @@ pub(crate) async fn run_turn(
 
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
-    let mut client_session =
-        prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
+    let turn_state = Arc::clone(&turn_context.turn_state);
+    let mut client_session = prewarmed_client_session.unwrap_or_else(|| {
+        sess.services
+            .model_client
+            .new_session_with_turn_state(Arc::clone(&turn_state))
+    });
+    client_session.adopt_turn_state(turn_state);
 
     loop {
         // Note that pending_input would be something like a message the user
@@ -5863,6 +5954,18 @@ mod tests {
         }
     }
 
+    fn assistant_message(text: &str) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: "assistant".to_string(),
+            content: vec![ContentItem::OutputText {
+                text: text.to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        }
+    }
+
     fn skill_message(text: &str) -> ResponseItem {
         ResponseItem::Message {
             id: None,
@@ -6416,6 +6519,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn record_initial_history_resumed_restores_chat_tree_branch_snapshots() {
+        let (session, _turn_context) = make_session_and_context().await;
+        let turn_started = |turn_id: &str| {
+            RolloutItem::EventMsg(crate::protocol::EventMsg::TurnStarted(
+                crate::protocol::TurnStartedEvent {
+                    turn_id: turn_id.to_string(),
+                    model_context_window: None,
+                    collaboration_mode_kind: codex_protocol::config_types::ModeKind::Default,
+                },
+            ))
+        };
+        let turn_complete = |turn_id: &str, parent_node_id: Option<&str>, summary: &str| {
+            RolloutItem::EventMsg(crate::protocol::EventMsg::TurnComplete(
+                crate::protocol::TurnCompleteEvent {
+                    turn_id: turn_id.to_string(),
+                    last_agent_message: None,
+                    chat_tree: Some(crate::protocol::ChatTreeTurnInfo {
+                        node_id: turn_id.to_string(),
+                        parent_node_id: parent_node_id.map(std::string::ToString::to_string),
+                        summary: Some(summary.to_string()),
+                    }),
+                },
+            ))
+        };
+        let rollout_items = vec![
+            turn_started("node-a"),
+            RolloutItem::ResponseItem(user_message("turn-a-user")),
+            RolloutItem::ResponseItem(assistant_message("turn-a-assistant")),
+            turn_complete("node-a", None, "summary-a"),
+            turn_started("node-b"),
+            RolloutItem::ResponseItem(user_message("turn-b-user")),
+            RolloutItem::ResponseItem(assistant_message("turn-b-assistant")),
+            turn_complete("node-b", Some("node-a"), "summary-b"),
+            turn_started("node-c"),
+            RolloutItem::ResponseItem(user_message("turn-c-user")),
+            RolloutItem::ResponseItem(assistant_message("turn-c-assistant")),
+            turn_complete("node-c", Some("node-a"), "summary-c"),
+        ];
+
+        session
+            .record_initial_history(InitialHistory::Resumed(ResumedHistory {
+                conversation_id: ThreadId::default(),
+                history: rollout_items,
+                rollout_path: PathBuf::from("/tmp/resume.jsonl"),
+            }))
+            .await;
+
+        session
+            .set_current_chat_tree_node("node-b")
+            .await
+            .expect("switch to node-b");
+        assert_eq!(
+            session.clone_history().await.raw_items(),
+            &[
+                user_message("turn-a-user"),
+                assistant_message("turn-a-assistant"),
+                user_message("turn-b-user"),
+                assistant_message("turn-b-assistant"),
+            ]
+        );
+
+        session
+            .set_current_chat_tree_node("node-c")
+            .await
+            .expect("switch to node-c");
+        assert_eq!(
+            session.clone_history().await.raw_items(),
+            &[
+                user_message("turn-a-user"),
+                assistant_message("turn-a-assistant"),
+                user_message("turn-c-user"),
+                assistant_message("turn-c-assistant"),
+            ]
+        );
+    }
+
+    #[tokio::test]
     async fn record_initial_history_resumed_hydrates_previous_model() {
         let (session, turn_context) = make_session_and_context().await;
         let previous_model = "previous-rollout-model";
@@ -6632,6 +6812,88 @@ mod tests {
         );
         let history = session.state.lock().await.clone_history();
         assert_eq!(expected, history.raw_items());
+    }
+
+    #[tokio::test]
+    async fn record_initial_history_forked_restores_chat_tree_branch_snapshots() {
+        let (session, _turn_context) = make_session_and_context().await;
+        let turn_started = |turn_id: &str| {
+            RolloutItem::EventMsg(crate::protocol::EventMsg::TurnStarted(
+                crate::protocol::TurnStartedEvent {
+                    turn_id: turn_id.to_string(),
+                    model_context_window: None,
+                    collaboration_mode_kind: codex_protocol::config_types::ModeKind::Default,
+                },
+            ))
+        };
+        let turn_complete = |turn_id: &str, parent_node_id: Option<&str>, summary: &str| {
+            RolloutItem::EventMsg(crate::protocol::EventMsg::TurnComplete(
+                crate::protocol::TurnCompleteEvent {
+                    turn_id: turn_id.to_string(),
+                    last_agent_message: None,
+                    chat_tree: Some(crate::protocol::ChatTreeTurnInfo {
+                        node_id: turn_id.to_string(),
+                        parent_node_id: parent_node_id.map(std::string::ToString::to_string),
+                        summary: Some(summary.to_string()),
+                    }),
+                },
+            ))
+        };
+        let rollout_items = vec![
+            turn_started("node-a"),
+            RolloutItem::ResponseItem(user_message("turn-a-user")),
+            RolloutItem::ResponseItem(assistant_message("turn-a-assistant")),
+            turn_complete("node-a", None, "summary-a"),
+            turn_started("node-b"),
+            RolloutItem::ResponseItem(user_message("turn-b-user")),
+            RolloutItem::ResponseItem(assistant_message("turn-b-assistant")),
+            turn_complete("node-b", Some("node-a"), "summary-b"),
+            turn_started("node-c"),
+            RolloutItem::ResponseItem(user_message("turn-c-user")),
+            RolloutItem::ResponseItem(assistant_message("turn-c-assistant")),
+            turn_complete("node-c", Some("node-a"), "summary-c"),
+        ];
+
+        session
+            .record_initial_history(InitialHistory::Forked(rollout_items))
+            .await;
+
+        let reconstruction_turn = session.new_default_turn().await;
+        let initial_context = session
+            .build_initial_context(reconstruction_turn.as_ref())
+            .await;
+
+        session
+            .set_current_chat_tree_node("node-b")
+            .await
+            .expect("switch to node-b");
+        let mut expected = vec![
+            user_message("turn-a-user"),
+            assistant_message("turn-a-assistant"),
+            user_message("turn-b-user"),
+            assistant_message("turn-b-assistant"),
+        ];
+        expected.extend(initial_context.clone());
+        assert_eq!(
+            session.clone_history().await.raw_items(),
+            expected.as_slice()
+        );
+
+        session
+            .set_current_chat_tree_node("node-c")
+            .await
+            .expect("switch to node-c");
+        let mut expected = vec![
+            user_message("turn-a-user"),
+            assistant_message("turn-a-assistant"),
+            user_message("turn-c-user"),
+            assistant_message("turn-c-assistant"),
+        ];
+        expected.extend(initial_context);
+        assert_eq!(
+            session.clone_history().await.raw_items(),
+            expected.as_slice()
+        );
     }
 
     #[tokio::test]

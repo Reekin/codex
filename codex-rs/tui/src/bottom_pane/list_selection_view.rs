@@ -77,6 +77,7 @@ pub(crate) struct SelectionViewParams {
     pub is_searchable: bool,
     pub search_placeholder: Option<String>,
     pub col_width_mode: ColumnWidthMode,
+    pub accept_on_space: bool,
     pub header: Box<dyn Renderable>,
     pub initial_selected_idx: Option<usize>,
 }
@@ -93,6 +94,7 @@ impl Default for SelectionViewParams {
             is_searchable: false,
             search_placeholder: None,
             col_width_mode: ColumnWidthMode::AutoVisible,
+            accept_on_space: false,
             header: Box::new(()),
             initial_selected_idx: None,
         }
@@ -116,6 +118,7 @@ pub(crate) struct ListSelectionView {
     search_query: String,
     search_placeholder: Option<String>,
     col_width_mode: ColumnWidthMode,
+    accept_on_space: bool,
     filtered_indices: Vec<usize>,
     last_selected_actual_idx: Option<usize>,
     header: Box<dyn Renderable>,
@@ -157,6 +160,7 @@ impl ListSelectionView {
                 None
             },
             col_width_mode: params.col_width_mode,
+            accept_on_space: params.accept_on_space,
             filtered_indices: Vec::new(),
             last_selected_actual_idx: None,
             header,
@@ -456,6 +460,11 @@ impl BottomPaneView for ListSelectionView {
                 modifiers: KeyModifiers::NONE,
                 ..
             } => self.accept(),
+            KeyEvent {
+                code: KeyCode::Char(' '),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } if self.accept_on_space => self.accept(),
             _ => {}
         }
     }

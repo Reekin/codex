@@ -237,12 +237,23 @@ impl ModelClient {
     /// This constructor does not perform network I/O itself; the session opens a websocket lazily
     /// when the first stream request is issued.
     pub fn new_session(&self) -> ModelClientSession {
+        self.new_session_with_turn_state(Arc::new(OnceLock::new()))
+    }
+
+    /// Creates a fresh turn-scoped streaming session bound to a caller-provided turn-state lock.
+    ///
+    /// This is used when multiple request paths (for example regular sampling and chat-tree
+    /// summary) must share the same per-turn sticky-routing token.
+    pub fn new_session_with_turn_state(
+        &self,
+        turn_state: Arc<OnceLock<String>>,
+    ) -> ModelClientSession {
         ModelClientSession {
             client: self.clone(),
             connection: None,
             websocket_last_request: None,
             websocket_last_response_rx: None,
-            turn_state: Arc::new(OnceLock::new()),
+            turn_state,
         }
     }
 
@@ -453,6 +464,21 @@ impl ModelClient {
 }
 
 impl ModelClientSession {
+    /// Rebinds this session to the provided turn-state lock.
+    ///
+    /// If this session already captured a turn-state value (for example via prewarm handshake),
+    /// copy it into the new lock before switching so subsequent same-turn requests can reuse it.
+    pub fn adopt_turn_state(&mut self, turn_state: Arc<OnceLock<String>>) {
+        if Arc::ptr_eq(&self.turn_state, &turn_state) {
+            return;
+        }
+
+        if let Some(existing_state) = self.turn_state.get() {
+            let _ = turn_state.set(existing_state.clone());
+        }
+        self.turn_state = turn_state;
+    }
+
     fn activate_http_fallback(&self, websocket_enabled: bool) -> bool {
         websocket_enabled
             && !self

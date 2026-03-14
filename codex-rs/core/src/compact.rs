@@ -217,6 +217,7 @@ async fn run_compact_task_inner(
     new_history.extend(ghost_snapshots);
     sess.replace_history(new_history).await;
     sess.recompute_token_usage(&turn_context).await;
+    sess.sync_current_chat_tree_snapshot().await;
 
     let rollout_item = RolloutItem::Compacted(CompactedItem {
         message: summary_text.clone(),

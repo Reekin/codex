@@ -126,6 +126,10 @@ use codex_app_server_protocol::ThreadArchiveResponse;
 use codex_app_server_protocol::ThreadArchivedNotification;
 use codex_app_server_protocol::ThreadBackgroundTerminalsCleanParams;
 use codex_app_server_protocol::ThreadBackgroundTerminalsCleanResponse;
+use codex_app_server_protocol::ThreadChatTreeReadParams;
+use codex_app_server_protocol::ThreadChatTreeReadResponse;
+use codex_app_server_protocol::ThreadChatTreeSetCurrentParams;
+use codex_app_server_protocol::ThreadChatTreeSetCurrentResponse;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadCompactStartResponse;
 use codex_app_server_protocol::ThreadForkParams;
@@ -166,6 +170,8 @@ use codex_app_server_protocol::WindowsSandboxSetupCompletedNotification;
 use codex_app_server_protocol::WindowsSandboxSetupMode;
 use codex_app_server_protocol::WindowsSandboxSetupStartParams;
 use codex_app_server_protocol::WindowsSandboxSetupStartResponse;
+use codex_app_server_protocol::build_projected_turns_from_rollout_items;
+use codex_app_server_protocol::build_thread_chat_tree_from_rollout_items;
 use codex_app_server_protocol::build_turns_from_rollout_items;
 use codex_backend_client::Client as BackendClient;
 use codex_chatgpt::connectors;
@@ -581,6 +587,14 @@ impl CodexMessageProcessor {
             }
             ClientRequest::ThreadRead { request_id, params } => {
                 self.thread_read(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ThreadChatTreeRead { request_id, params } => {
+                self.thread_chat_tree_read(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ThreadChatTreeSetCurrent { request_id, params } => {
+                self.thread_chat_tree_set_current(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::SkillsList { request_id, params } => {
@@ -2640,6 +2654,7 @@ impl CodexMessageProcessor {
                 return;
             }
         };
+        let loaded_thread = self.thread_manager.get_thread(thread_uuid).await.ok();
 
         let db_summary = read_summary_from_state_db_by_thread_id(&self.config, thread_uuid).await;
         let mut rollout_path = db_summary.as_ref().map(|summary| summary.path.clone());
@@ -2694,15 +2709,7 @@ impl CodexMessageProcessor {
                     return;
                 }
             }
-        } else {
-            let Ok(thread) = self.thread_manager.get_thread(thread_uuid).await else {
-                self.send_invalid_request_error(
-                    request_id,
-                    format!("thread not loaded: {thread_uuid}"),
-                )
-                .await;
-                return;
-            };
+        } else if let Some(thread) = loaded_thread.as_ref() {
             let config_snapshot = thread.config_snapshot().await;
             let loaded_rollout_path = thread.rollout_path();
             if include_turns && loaded_rollout_path.is_none() {
@@ -2717,12 +2724,27 @@ impl CodexMessageProcessor {
                 rollout_path = loaded_rollout_path.clone();
             }
             build_thread_from_snapshot(thread_uuid, &config_snapshot, loaded_rollout_path)
+        } else {
+            self.send_invalid_request_error(
+                request_id,
+                format!("thread not loaded: {thread_uuid}"),
+            )
+            .await;
+            return;
         };
 
         if include_turns && let Some(rollout_path) = rollout_path.as_ref() {
             match read_rollout_items_from_rollout(rollout_path).await {
                 Ok(items) => {
-                    thread.turns = build_turns_from_rollout_items(&items);
+                    let current_node_id = if let Some(thread) = loaded_thread.as_ref() {
+                        thread.current_chat_tree_node_id().await
+                    } else {
+                        None
+                    };
+                    thread.turns = build_projected_turns_from_rollout_items(
+                        &items,
+                        current_node_id.as_deref(),
+                    );
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                     self.send_invalid_request_error(
@@ -2753,6 +2775,94 @@ impl CodexMessageProcessor {
             .loaded_status_for_thread(&thread.id)
             .await;
         let response = ThreadReadResponse { thread };
+        self.outgoing.send_response(request_id, response).await;
+    }
+
+    async fn thread_chat_tree_read(
+        &mut self,
+        request_id: ConnectionRequestId,
+        params: ThreadChatTreeReadParams,
+    ) {
+        let thread_uuid = match ThreadId::from_string(&params.thread_id) {
+            Ok(id) => id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+
+        let Some(rollout_path) = self
+            .resolve_thread_rollout_path(request_id.clone(), thread_uuid)
+            .await
+        else {
+            return;
+        };
+
+        let items = match read_rollout_items_from_rollout(&rollout_path).await {
+            Ok(items) => items,
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!(
+                        "failed to load rollout `{}` for thread {thread_uuid}: {err}",
+                        rollout_path.display()
+                    ),
+                )
+                .await;
+                return;
+            }
+        };
+
+        let mut chat_tree = build_thread_chat_tree_from_rollout_items(&items);
+        if let Ok(thread) = self.thread_manager.get_thread(thread_uuid).await
+            && let Some(current_node_id) = thread.current_chat_tree_node_id().await
+        {
+            chat_tree.current_node_id = Some(current_node_id);
+        }
+
+        let response = ThreadChatTreeReadResponse {
+            thread_id: thread_uuid.to_string(),
+            chat_tree,
+        };
+        self.outgoing.send_response(request_id, response).await;
+    }
+
+    async fn thread_chat_tree_set_current(
+        &mut self,
+        request_id: ConnectionRequestId,
+        params: ThreadChatTreeSetCurrentParams,
+    ) {
+        let thread_uuid = match ThreadId::from_string(&params.thread_id) {
+            Ok(id) => id,
+            Err(err) => {
+                self.send_invalid_request_error(request_id, format!("invalid thread id: {err}"))
+                    .await;
+                return;
+            }
+        };
+
+        let thread = match self.thread_manager.get_thread(thread_uuid).await {
+            Ok(thread) => thread,
+            Err(_) => {
+                self.send_invalid_request_error(
+                    request_id,
+                    format!("thread not loaded: {thread_uuid}"),
+                )
+                .await;
+                return;
+            }
+        };
+
+        if let Err(err) = thread.set_current_chat_tree_node(&params.node_id).await {
+            self.send_invalid_request_error(request_id, err).await;
+            return;
+        }
+
+        let response = ThreadChatTreeSetCurrentResponse {
+            thread_id: thread_uuid.to_string(),
+            current_node_id: params.node_id,
+        };
         self.outgoing.send_response(request_id, response).await;
     }
 
@@ -3206,7 +3316,7 @@ impl CodexMessageProcessor {
         };
         match read_rollout_items_from_rollout(rollout_path).await {
             Ok(items) => {
-                thread.turns = build_turns_from_rollout_items(&items);
+                thread.turns = build_projected_turns_from_rollout_items(&items, None);
                 Some(thread)
             }
             Err(err) => {
@@ -3216,6 +3326,38 @@ impl CodexMessageProcessor {
                         "failed to load rollout `{}` for thread {thread_id}: {err}",
                         rollout_path.display()
                     ),
+                )
+                .await;
+                None
+            }
+        }
+    }
+
+    async fn resolve_thread_rollout_path(
+        &self,
+        request_id: ConnectionRequestId,
+        thread_id: ThreadId,
+    ) -> Option<PathBuf> {
+        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+            && let Some(rollout_path) = thread.rollout_path()
+        {
+            return Some(rollout_path);
+        }
+
+        match find_thread_path_by_id_str(&self.config.codex_home, &thread_id.to_string()).await {
+            Ok(Some(path)) => Some(path),
+            Ok(None) => {
+                self.send_invalid_request_error(
+                    request_id,
+                    format!("no rollout found for thread id {thread_id}"),
+                )
+                .await;
+                None
+            }
+            Err(err) => {
+                self.send_invalid_request_error(
+                    request_id,
+                    format!("failed to locate thread id {thread_id}: {err}"),
                 )
                 .await;
                 None
@@ -6231,9 +6373,14 @@ async fn handle_pending_thread_resume_request(
     outgoing: &Arc<OutgoingMessageSender>,
     pending: crate::thread_state::PendingThreadResumeRequest,
 ) {
-    let active_turn = {
+    let (active_turn, listener_thread) = {
         let state = thread_state.lock().await;
-        state.active_turn_snapshot()
+        (state.active_turn_snapshot(), state.listener_thread())
+    };
+    let current_node_id = if let Some(thread) = listener_thread {
+        thread.current_chat_tree_node_id().await
+    } else {
+        None
     };
 
     let request_id = pending.request_id;
@@ -6242,6 +6389,7 @@ async fn handle_pending_thread_resume_request(
         conversation_id,
         pending.rollout_path.as_path(),
         pending.config_snapshot.model_provider_id.as_str(),
+        current_node_id.as_deref(),
         active_turn.as_ref(),
     )
     .await
@@ -6291,6 +6439,7 @@ async fn load_thread_for_running_resume_response(
     conversation_id: ThreadId,
     rollout_path: &Path,
     fallback_provider: &str,
+    current_node_id: Option<&str>,
     active_turn: Option<&Turn>,
 ) -> std::result::Result<Thread, String> {
     let mut thread = read_summary_from_rollout(rollout_path, fallback_provider)
@@ -6305,7 +6454,7 @@ async fn load_thread_for_running_resume_response(
 
     let mut turns = read_rollout_items_from_rollout(rollout_path)
         .await
-        .map(|items| build_turns_from_rollout_items(&items))
+        .map(|items| build_projected_turns_from_rollout_items(&items, current_node_id))
         .map_err(|err| {
             format!(
                 "failed to load rollout `{}` for thread {conversation_id}: {err}",

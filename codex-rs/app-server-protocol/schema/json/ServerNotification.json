@@ -580,6 +580,29 @@
       ],
       "type": "object"
     },
+    "ChatTreeTurnInfo": {
+      "properties": {
+        "node_id": {
+          "type": "string"
+        },
+        "parent_node_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "node_id"
+      ],
+      "type": "object"
+    },
     "CodexErrorInfo": {
       "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
       "oneOf": [
@@ -1481,6 +1504,16 @@
         {
           "description": "Agent has completed all actions. v1 wire format uses `task_complete`; accept `turn_complete` for v2 interop.",
           "properties": {
+            "chat_tree": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ChatTreeTurnInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "last_agent_message": {
               "type": [
                 "string",
@@ -1503,6 +1536,27 @@
             "type"
           ],
           "title": "TaskCompleteEventMsg",
+          "type": "object"
+        },
+        {
+          "description": "Existing chat-tree node metadata was updated after turn completion.",
+          "properties": {
+            "chat_tree": {
+              "$ref": "#/definitions/ChatTreeTurnInfo"
+            },
+            "type": {
+              "enum": [
+                "chat_tree_node_updated"
+              ],
+              "title": "ChatTreeNodeUpdatedEventMsgType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "chat_tree",
+            "type"
+          ],
+          "title": "ChatTreeNodeUpdatedEventMsg",
           "type": "object"
         },
         {
@@ -3081,6 +3135,16 @@
         },
         {
           "properties": {
+            "chat_tree": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ChatTreeTurnInfo"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "reason": {
               "$ref": "#/definitions/TurnAbortReason"
             },
