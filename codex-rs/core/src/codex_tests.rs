@@ -223,6 +223,7 @@ async fn interrupting_regular_turn_waiting_on_startup_prewarm_emits_turn_aborted
         EventMsg::TurnAborted(crate::protocol::TurnAbortedEvent {
             turn_id: Some(turn_id),
             reason: TurnAbortReason::Interrupted,
+            ..
         }) if turn_id == tc.sub_id
     ));
 }
@@ -1150,6 +1151,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
             codex_protocol::protocol::TurnCompleteEvent {
                 turn_id,
                 last_agent_message: None,
+                chat_tree: None,
             },
         )),
     ];
@@ -1324,6 +1326,7 @@ async fn thread_rollback_recomputes_previous_turn_settings_and_reference_context
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: first_turn_id,
             last_agent_message: None,
+            chat_tree: None,
         })),
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
@@ -1346,6 +1349,7 @@ async fn thread_rollback_recomputes_previous_turn_settings_and_reference_context
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: rolled_back_turn_id,
             last_agent_message: None,
+            chat_tree: None,
         })),
     ])
     .await;
@@ -1420,6 +1424,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: first_turn_id,
             last_agent_message: None,
+            chat_tree: None,
         })),
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
@@ -1435,6 +1440,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: compact_turn_id,
             last_agent_message: None,
+            chat_tree: None,
         })),
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
@@ -1459,6 +1465,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: rolled_back_turn_id,
             last_agent_message: None,
+            chat_tree: None,
         })),
     ])
     .await;
@@ -1502,6 +1509,7 @@ async fn thread_rollback_persists_marker_and_replays_cumulatively() {
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-1".to_string(),
             last_agent_message: None,
+            chat_tree: None,
         })),
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
@@ -1522,6 +1530,7 @@ async fn thread_rollback_persists_marker_and_replays_cumulatively() {
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-2".to_string(),
             last_agent_message: None,
+            chat_tree: None,
         })),
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
@@ -1542,6 +1551,7 @@ async fn thread_rollback_persists_marker_and_replays_cumulatively() {
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: "turn-3".to_string(),
             last_agent_message: None,
+            chat_tree: None,
         })),
     ])
     .await;
@@ -4298,6 +4308,7 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
         EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id,
             last_agent_message: None,
+            ..
         }) if turn_id == tc.sub_id
     ));
 }

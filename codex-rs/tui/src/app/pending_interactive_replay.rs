@@ -620,6 +620,7 @@ mod tests {
             msg: EventMsg::TurnAborted(codex_protocol::protocol::TurnAbortedEvent {
                 turn_id: Some("turn-1".to_string()),
                 reason: TurnAbortReason::Replaced,
+                chat_tree: None,
             }),
         });
 

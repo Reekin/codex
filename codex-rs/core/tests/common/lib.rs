@@ -2,7 +2,6 @@
 
 use anyhow::Context as _;
 use anyhow::ensure;
-use codex_utils_cargo_bin::CargoBinError;
 use ctor::ctor;
 use tempfile::TempDir;
 
@@ -13,6 +12,8 @@ use codex_core::config::ConfigOverrides;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use regex_lite::Regex;
 use std::path::PathBuf;
+use std::process::Command;
+use std::sync::OnceLock;
 
 pub mod apps_test_server;
 pub mod context_snapshot;
@@ -283,8 +284,45 @@ pub fn format_with_current_shell_display_non_login(command: &str) -> String {
         .expect("serialize current shell command without login")
 }
 
-pub fn stdio_server_bin() -> Result<String, CargoBinError> {
-    codex_utils_cargo_bin::cargo_bin("test_stdio_server").map(|p| p.to_string_lossy().to_string())
+fn build_workspace_bin(bin: &str, package: &str) -> anyhow::Result<PathBuf> {
+    let codex_rs_root = codex_utils_cargo_bin::repo_root()
+        .context("failed to resolve repo root")?
+        .join("codex-rs");
+    let status = Command::new("cargo")
+        .current_dir(&codex_rs_root)
+        .args(["build", "-p", package, "--bin", bin])
+        .status()
+        .with_context(|| format!("failed to build {bin} from {package}"))?;
+    ensure!(status.success(), "cargo build failed for {package}::{bin}");
+    codex_utils_cargo_bin::cargo_bin(bin)
+        .with_context(|| format!("failed to resolve {bin} after building {package}"))
+}
+
+fn resolve_workspace_bin(
+    cache: &OnceLock<Result<PathBuf, String>>,
+    bin: &str,
+    package: &str,
+) -> anyhow::Result<PathBuf> {
+    match cache.get_or_init(|| {
+        codex_utils_cargo_bin::cargo_bin(bin)
+            .map_err(anyhow::Error::from)
+            .or_else(|_| build_workspace_bin(bin, package))
+            .map_err(|err| err.to_string())
+    }) {
+        Ok(path) => Ok(path.clone()),
+        Err(err) => Err(anyhow::anyhow!("{err}")),
+    }
+}
+
+pub fn codex_cli_bin() -> anyhow::Result<PathBuf> {
+    static CACHE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    resolve_workspace_bin(&CACHE, "codex", "codex-cli")
+}
+
+pub fn stdio_server_bin() -> anyhow::Result<String> {
+    static CACHE: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    resolve_workspace_bin(&CACHE, "test_stdio_server", "codex-rmcp-client")
+        .map(|path| path.to_string_lossy().to_string())
 }
 
 pub mod fs_wait {

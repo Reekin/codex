@@ -55,6 +55,8 @@ use codex_app_server_protocol::ReviewStartParams;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::ThreadArchiveParams;
+use codex_app_server_protocol::ThreadChatTreeReadParams;
+use codex_app_server_protocol::ThreadChatTreeSetCurrentParams;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadListParams;
@@ -433,6 +435,25 @@ impl McpProcess {
     ) -> anyhow::Result<i64> {
         let params = Some(serde_json::to_value(params)?);
         self.send_request("thread/read", params).await
+    }
+
+    /// Send a `thread/chatTree/read` JSON-RPC request.
+    pub async fn send_thread_chat_tree_read_request(
+        &mut self,
+        params: ThreadChatTreeReadParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/chatTree/read", params).await
+    }
+
+    /// Send a `thread/chatTree/current/set` JSON-RPC request.
+    pub async fn send_thread_chat_tree_set_current_request(
+        &mut self,
+        params: ThreadChatTreeSetCurrentParams,
+    ) -> anyhow::Result<i64> {
+        let params = Some(serde_json::to_value(params)?);
+        self.send_request("thread/chatTree/current/set", params)
+            .await
     }
 
     /// Send a `model/list` JSON-RPC request.

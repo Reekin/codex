@@ -110,6 +110,11 @@ impl App {
         tui: &mut tui::Tui,
         event: TuiEvent,
     ) -> Result<bool> {
+        if !matches!(self.overlay, Some(Overlay::Transcript(_))) {
+            self.overlay_forward_event(tui, event)?;
+            return Ok(true);
+        }
+
         if self.backtrack.overlay_preview_active {
             match event {
                 TuiEvent::Key(KeyEvent {
@@ -393,7 +398,11 @@ impl App {
         if let Some(overlay) = &mut self.overlay {
             overlay.handle_event(tui, event)?;
             if overlay.is_done() {
+                let selected_chat_tree_node = overlay.take_chat_tree_selection();
                 self.close_transcript_overlay(tui);
+                if let Some(node_id) = selected_chat_tree_node {
+                    self.chat_widget.set_current_chat_tree_node(node_id);
+                }
                 tui.frame_requester().schedule_frame();
             }
         }

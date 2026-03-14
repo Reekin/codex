@@ -26,7 +26,7 @@ pub(crate) struct PendingThreadResumeRequest {
     pub(crate) request_id: ConnectionRequestId,
     pub(crate) rollout_path: PathBuf,
     pub(crate) config_snapshot: ThreadConfigSnapshot,
-    pub(crate) thread_summary: codex_app_server_protocol::Thread,
+    pub(crate) _thread_summary: codex_app_server_protocol::Thread,
 }
 
 // ThreadListenerCommand is used to perform operations in the context of the thread listener, for serialization purposes.
@@ -106,6 +106,10 @@ impl ThreadState {
 
     pub(crate) fn active_turn_snapshot(&self) -> Option<Turn> {
         self.current_turn_history.active_turn_snapshot()
+    }
+
+    pub(crate) fn listener_thread(&self) -> Option<Arc<CodexThread>> {
+        self.listener_thread.as_ref().and_then(Weak::upgrade)
     }
 
     pub(crate) fn track_current_turn_event(&mut self, event: &EventMsg) {

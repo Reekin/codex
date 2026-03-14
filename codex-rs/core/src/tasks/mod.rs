@@ -28,6 +28,7 @@ use crate::hook_runtime::inspect_pending_input;
 use crate::hook_runtime::record_additional_contexts;
 use crate::hook_runtime::record_pending_input;
 use crate::models_manager::manager::ModelsManager;
+use crate::protocol::ChatTreeNodeUpdatedEvent;
 use crate::protocol::EventMsg;
 use crate::protocol::TokenUsage;
 use crate::protocol::TurnAbortReason;
@@ -45,6 +46,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SessionSource;
 use codex_protocol::user_input::UserInput;
 
 use crate::features::Feature;
@@ -59,7 +61,6 @@ pub(crate) use user_shell::execute_user_shell_command;
 
 const GRACEFULL_INTERRUPTION_TIMEOUT_MS: u64 = 100;
 const TURN_ABORTED_INTERRUPTED_GUIDANCE: &str = "The user interrupted the previous turn on purpose. Any running unified exec processes may still be running in the background. If any tools/commands were aborted, they may have partially executed; verify current state before retrying.";
-
 fn emit_turn_network_proxy_metric(
     session_telemetry: &SessionTelemetry,
     network_proxy_active: bool,
@@ -75,6 +76,31 @@ fn emit_turn_network_proxy_metric(
         /*inc*/ 1,
         &[("active", active), tmp_mem],
     );
+}
+
+fn summarize_for_chat_tree(message: Option<&str>, fallback: &str) -> String {
+    let trimmed = message
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or(fallback);
+    let line = trimmed
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or(fallback);
+    let mut summary = line.chars().take(96).collect::<String>();
+    if line.chars().count() > 96 {
+        summary.push_str("...");
+    }
+    summary
+}
+
+fn abort_reason_summary(reason: &TurnAbortReason) -> &'static str {
+    match reason {
+        TurnAbortReason::Interrupted => "turn interrupted",
+        TurnAbortReason::Replaced => "turn replaced",
+        TurnAbortReason::ReviewEnded => "turn review ended",
+    }
 }
 
 /// Thin wrapper that exposes the parts of [`Session`] task runners need.
@@ -355,11 +381,25 @@ impl Session {
                 &[("token_type", "reasoning_output"), tmp_mem],
             );
         }
+        let chat_tree = if matches!(turn_context.session_source, SessionSource::SubAgent(_)) {
+            None
+        } else {
+            self.finalize_chat_tree_node(&turn_context.sub_id, None)
+                .await
+        };
         let event = EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: turn_context.sub_id.clone(),
             last_agent_message,
+            chat_tree: chat_tree.clone(),
         });
         self.send_event(turn_context.as_ref(), event).await;
+        if let Some(chat_tree) = chat_tree {
+            self.send_event(
+                turn_context.as_ref(),
+                EventMsg::ChatTreeNodeUpdated(ChatTreeNodeUpdatedEvent { chat_tree }),
+            )
+            .await;
+        }
     }
 
     async fn register_new_active_task(
@@ -446,14 +486,49 @@ impl Session {
             self.flush_rollout().await;
         }
 
+        let chat_tree = if matches!(task.turn_context.session_source, SessionSource::SubAgent(_)) {
+            None
+        } else {
+            let chat_tree_summary = summarize_for_chat_tree(None, abort_reason_summary(&reason));
+            self.finalize_chat_tree_node(&task.turn_context.sub_id, Some(chat_tree_summary))
+                .await
+        };
+
         let event = EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some(task.turn_context.sub_id.clone()),
             reason,
+            chat_tree: chat_tree.clone(),
         });
         self.send_event(task.turn_context.as_ref(), event).await;
+        if let Some(chat_tree) = chat_tree {
+            self.send_event(
+                task.turn_context.as_ref(),
+                EventMsg::ChatTreeNodeUpdated(ChatTreeNodeUpdatedEvent { chat_tree }),
+            )
+            .await;
+        }
     }
 }
 
 #[cfg(test)]
-#[path = "mod_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    include!("mod_tests.rs");
+
+    #[test]
+    fn summarize_for_chat_tree_limits_length() {
+        let long = "a".repeat(120);
+
+        let summary = summarize_for_chat_tree(Some(long.as_str()), "fallback");
+
+        std::assert_eq!(summary.len(), 99);
+        std::assert_eq!(summary.chars().skip(96).collect::<String>(), "...");
+    }
+
+    #[test]
+    fn summarize_for_chat_tree_allows_empty_without_fallback() {
+        let summary = summarize_for_chat_tree(None, "");
+
+        std::assert_eq!(summary, "");
+    }
+}

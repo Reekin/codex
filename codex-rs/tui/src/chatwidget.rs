@@ -101,6 +101,8 @@ use codex_protocol::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_protocol::protocol::AgentReasoningRawContentEvent;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::BackgroundEventEvent;
+use codex_protocol::protocol::ChatTreeNodeUpdatedEvent;
+use codex_protocol::protocol::ChatTreeTurnInfo;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
 use codex_protocol::protocol::CreditsSnapshot;
@@ -318,6 +320,20 @@ struct RunningCommand {
     command: Vec<String>,
     parsed_cmd: Vec<ParsedCommand>,
     source: ExecCommandSource,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ChatTreeNodeUi {
+    parent_node_id: Option<String>,
+    summary: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChatTreeOverlayEntry {
+    pub(crate) node_id: String,
+    pub(crate) depth: usize,
+    pub(crate) summary: String,
+    pub(crate) is_current: bool,
 }
 
 struct UnifiedExecProcessSummary {
@@ -717,6 +733,9 @@ pub(crate) struct ChatWidget {
     thread_id: Option<ThreadId>,
     thread_name: Option<String>,
     forked_from: Option<ThreadId>,
+    chat_tree_nodes: HashMap<String, ChatTreeNodeUi>,
+    chat_tree_node_order: Vec<String>,
+    chat_tree_current_node_id: Option<String>,
     frame_requester: FrameRequester,
     // Whether to include the initial welcome banner on session configured
     show_welcome_banner: bool,
@@ -1716,8 +1735,14 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_task_complete(&mut self, last_agent_message: Option<String>, from_replay: bool) {
+    fn on_task_complete(
+        &mut self,
+        last_agent_message: Option<String>,
+        chat_tree: Option<ChatTreeTurnInfo>,
+        from_replay: bool,
+    ) {
         self.submit_pending_steers_after_interrupt = false;
+        self.on_chat_tree_turn_complete(chat_tree);
         if let Some(message) = last_agent_message.as_ref()
             && !message.trim().is_empty()
         {
@@ -1786,6 +1811,75 @@ impl ChatWidget {
         });
 
         self.maybe_show_pending_rate_limit_prompt();
+    }
+
+    fn on_chat_tree_turn_complete(&mut self, chat_tree: Option<ChatTreeTurnInfo>) {
+        let Some(chat_tree) = chat_tree else {
+            return;
+        };
+
+        let node_id = chat_tree.node_id.clone();
+        let node = self.chat_tree_nodes.entry(node_id.clone()).or_default();
+        node.parent_node_id = chat_tree.parent_node_id;
+        if let Some(summary) = chat_tree.summary {
+            node.summary = Some(summary);
+        }
+
+        if !self.chat_tree_node_order.contains(&node_id) {
+            self.chat_tree_node_order.push(node_id.clone());
+        }
+
+        self.chat_tree_current_node_id = Some(node_id);
+    }
+
+    fn on_chat_tree_node_updated(&mut self, chat_tree: ChatTreeTurnInfo) {
+        let node_id = chat_tree.node_id.clone();
+        let node = self.chat_tree_nodes.entry(node_id.clone()).or_default();
+        node.parent_node_id = chat_tree.parent_node_id;
+        if let Some(summary) = chat_tree.summary {
+            node.summary = Some(summary);
+        }
+
+        if !self.chat_tree_node_order.contains(&node_id) {
+            self.chat_tree_node_order.push(node_id);
+        }
+    }
+
+    fn on_chat_tree_turn_started(&mut self, turn_id: &str) {
+        let node_id = turn_id.to_string();
+        if self.chat_tree_nodes.contains_key(&node_id) {
+            self.chat_tree_current_node_id = Some(node_id);
+            return;
+        }
+        let parent_node_id = self.chat_tree_current_node_id.clone();
+        self.chat_tree_nodes.insert(
+            node_id.clone(),
+            ChatTreeNodeUi {
+                parent_node_id,
+                summary: None,
+            },
+        );
+        self.chat_tree_node_order.push(node_id.clone());
+        self.chat_tree_current_node_id = Some(node_id);
+    }
+
+    fn on_chat_tree_turn_aborted(&mut self, turn_id: Option<String>, reason: TurnAbortReason) {
+        let Some(node_id) = turn_id else {
+            return;
+        };
+        let summary = match reason {
+            TurnAbortReason::Interrupted => "turn interrupted",
+            TurnAbortReason::Replaced => "turn replaced",
+            TurnAbortReason::ReviewEnded => "turn review ended",
+        };
+        let node = self.chat_tree_nodes.entry(node_id.clone()).or_default();
+        if node.summary.is_none() {
+            node.summary = Some(summary.to_string());
+        }
+        if !self.chat_tree_node_order.contains(&node_id) {
+            self.chat_tree_node_order.push(node_id.clone());
+        }
+        self.chat_tree_current_node_id = Some(node_id);
     }
 
     fn maybe_prompt_plan_implementation(&mut self) {
@@ -3622,6 +3716,9 @@ impl ChatWidget {
             thread_id: None,
             thread_name: None,
             forked_from: None,
+            chat_tree_nodes: HashMap::new(),
+            chat_tree_node_order: Vec::new(),
+            chat_tree_current_node_id: None,
             queued_user_messages: VecDeque::new(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
@@ -3810,6 +3907,9 @@ impl ChatWidget {
             thread_id: None,
             thread_name: None,
             forked_from: None,
+            chat_tree_nodes: HashMap::new(),
+            chat_tree_node_order: Vec::new(),
+            chat_tree_current_node_id: None,
             saw_plan_update_this_turn: false,
             saw_plan_item_this_turn: false,
             plan_delta_buffer: String::new(),
@@ -3990,6 +4090,9 @@ impl ChatWidget {
             thread_id: None,
             thread_name: None,
             forked_from: None,
+            chat_tree_nodes: HashMap::new(),
+            chat_tree_node_order: Vec::new(),
+            chat_tree_current_node_id: None,
             queued_user_messages: VecDeque::new(),
             pending_steers: VecDeque::new(),
             submit_pending_steers_after_interrupt: false,
@@ -4335,6 +4438,9 @@ impl ChatWidget {
             }
             SlashCommand::Fork => {
                 self.app_event_tx.send(AppEvent::ForkCurrentSession);
+            }
+            SlashCommand::Chattree => {
+                self.app_event_tx.send(AppEvent::OpenChatTree);
             }
             SlashCommand::Init => {
                 let init_target = self.config.cwd.join(DEFAULT_PROJECT_DOC_FILENAME);
@@ -5270,14 +5376,21 @@ impl ChatWidget {
             }
             EventMsg::AgentReasoningSectionBreak(_) => self.on_reasoning_section_break(),
             EventMsg::TurnStarted(event) => {
+                self.on_chat_tree_turn_started(&event.turn_id);
                 if !is_resume_initial_replay {
                     self.apply_turn_started_context_window(event.model_context_window);
                     self.on_task_started();
                 }
             }
             EventMsg::TurnComplete(TurnCompleteEvent {
-                last_agent_message, ..
-            }) => self.on_task_complete(last_agent_message, from_replay),
+                last_agent_message,
+                chat_tree,
+                ..
+            }) => self.on_task_complete(last_agent_message, chat_tree, from_replay),
+            EventMsg::ChatTreeNodeUpdated(ChatTreeNodeUpdatedEvent { chat_tree }) => {
+                self.on_chat_tree_node_updated(chat_tree);
+                self.request_redraw();
+            }
             EventMsg::TokenCount(ev) => {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);
@@ -5306,20 +5419,23 @@ impl ChatWidget {
             }
             EventMsg::McpStartupUpdate(ev) => self.on_mcp_startup_update(ev),
             EventMsg::McpStartupComplete(ev) => self.on_mcp_startup_complete(ev),
-            EventMsg::TurnAborted(ev) => match ev.reason {
-                TurnAbortReason::Interrupted => {
-                    self.on_interrupted_turn(ev.reason);
+            EventMsg::TurnAborted(ev) => {
+                self.on_chat_tree_turn_aborted(ev.turn_id.clone(), ev.reason.clone());
+                match ev.reason {
+                    TurnAbortReason::Interrupted => {
+                        self.on_interrupted_turn(ev.reason);
+                    }
+                    TurnAbortReason::Replaced => {
+                        self.submit_pending_steers_after_interrupt = false;
+                        self.pending_steers.clear();
+                        self.refresh_pending_input_preview();
+                        self.on_error("Turn aborted: replaced by a new task".to_owned())
+                    }
+                    TurnAbortReason::ReviewEnded => {
+                        self.on_interrupted_turn(ev.reason);
+                    }
                 }
-                TurnAbortReason::Replaced => {
-                    self.submit_pending_steers_after_interrupt = false;
-                    self.pending_steers.clear();
-                    self.refresh_pending_input_preview();
-                    self.on_error("Turn aborted: replaced by a new task".to_owned())
-                }
-                TurnAbortReason::ReviewEnded => {
-                    self.on_interrupted_turn(ev.reason);
-                }
-            },
+            }
             EventMsg::PlanUpdate(update) => self.on_plan_update(update),
             EventMsg::ExecApprovalRequest(ev) => {
                 // For replayed events, synthesize an empty id (these should not occur).
@@ -9171,6 +9287,97 @@ impl ChatWidget {
 
     pub(crate) fn thread_name(&self) -> Option<String> {
         self.thread_name.clone()
+    }
+
+    pub(crate) fn chat_tree_overlay_entries(&self) -> Vec<ChatTreeOverlayEntry> {
+        let mut children_by_parent: HashMap<Option<String>, Vec<String>> = HashMap::new();
+        for node_id in &self.chat_tree_node_order {
+            let Some(node) = self.chat_tree_nodes.get(node_id) else {
+                continue;
+            };
+            let parent_node_id = node
+                .parent_node_id
+                .clone()
+                .filter(|parent_id| self.chat_tree_nodes.contains_key(parent_id));
+            children_by_parent
+                .entry(parent_node_id)
+                .or_default()
+                .push(node_id.clone());
+        }
+
+        let mut entries = Vec::new();
+        let mut visited = HashSet::new();
+        let mut stack = children_by_parent
+            .get(&None)
+            .into_iter()
+            .flatten()
+            .rev()
+            .map(|node_id| (node_id.clone(), 0usize))
+            .collect::<Vec<_>>();
+
+        while let Some((node_id, depth)) = stack.pop() {
+            if !visited.insert(node_id.clone()) {
+                continue;
+            }
+
+            let Some(node) = self.chat_tree_nodes.get(&node_id) else {
+                continue;
+            };
+
+            entries.push(ChatTreeOverlayEntry {
+                node_id: node_id.clone(),
+                depth,
+                summary: node
+                    .summary
+                    .clone()
+                    .unwrap_or_else(|| "(pending summary)".to_string()),
+                is_current: self.chat_tree_current_node_id.as_ref() == Some(&node_id),
+            });
+
+            if let Some(children) = children_by_parent.get(&Some(node_id.clone())) {
+                stack.extend(
+                    children
+                        .iter()
+                        .rev()
+                        .map(|child_id| (child_id.clone(), depth + 1)),
+                );
+            }
+        }
+
+        for node_id in &self.chat_tree_node_order {
+            if visited.contains(node_id) {
+                continue;
+            }
+            let Some(node) = self.chat_tree_nodes.get(node_id) else {
+                continue;
+            };
+            entries.push(ChatTreeOverlayEntry {
+                node_id: node_id.clone(),
+                depth: 0,
+                summary: node
+                    .summary
+                    .clone()
+                    .unwrap_or_else(|| "(pending summary)".to_string()),
+                is_current: self.chat_tree_current_node_id.as_ref() == Some(node_id),
+            });
+        }
+
+        entries
+    }
+
+    pub(crate) fn set_current_chat_tree_node(&mut self, node_id: String) {
+        if !self.chat_tree_nodes.contains_key(&node_id) {
+            self.add_error_message(format!("Unknown chat-tree node: {node_id}"));
+            return;
+        }
+        if self.bottom_pane.is_task_running() {
+            self.add_error_message(
+                "cannot switch chat-tree node while a task is running".to_string(),
+            );
+            return;
+        }
+        self.chat_tree_current_node_id = Some(node_id.clone());
+        self.submit_op(Op::SetCurrentChatTreeNode { node_id });
     }
 
     /// Returns the current thread's precomputed rollout path.

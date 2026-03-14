@@ -133,6 +133,8 @@ Example with notification opt-out:
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
 - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
 - `thread/metadata/update` — patch stored thread metadata in sqlite; currently supports updating persisted `gitInfo` fields and returns the refreshed `thread`.
+- `thread/chatTree/read` — read the stored chat-tree metadata for a thread, including `currentNodeId` and the known nodes (`nodeId`, `parentNodeId`, `summary`, `turnId`, `order`).
+- `thread/chatTree/current/set` — switch the in-memory current chat-tree node for a loaded thread. Subsequent `thread/read` and `thread/resume` calls project turns onto that branch.
 - `thread/status/changed` — notification emitted when a loaded thread’s status changes (`threadId` + new `status`).
 - `thread/archive` — move a thread’s rollout file into the archived directory; returns `{}` on success and emits `thread/archived`.
 - `thread/unsubscribe` — unsubscribe this connection from thread turn/item events. If this was the last subscriber, the server shuts down and unloads the thread, then emits `thread/closed`.
@@ -329,7 +331,7 @@ If this was the last subscriber, the server unloads the thread and emits `thread
 
 ### Example: Read a thread
 
-Use `thread/read` to fetch a stored thread by id without resuming it. Pass `includeTurns` when you want the rollout history loaded into `thread.turns`. The returned thread includes `agentNickname` and `agentRole` for AgentControl-spawned thread sub-agents when available.
+Use `thread/read` to fetch a stored thread by id without resuming it. Pass `includeTurns` when you want the rollout history loaded into `thread.turns`. The returned thread includes `agentNickname` and `agentRole` for AgentControl-spawned thread sub-agents when available. For loaded threads with chat-tree branching enabled, `includeTurns` returns only the turns visible from the currently selected node.
 
 ```json
 { "method": "thread/read", "id": 22, "params": { "threadId": "thr_123" } }
@@ -370,6 +372,37 @@ Use `thread/metadata/update` to patch sqlite-backed metadata for a thread withou
         "id": "thr_123",
         "gitInfo": null
     }
+} }
+```
+
+### Example: Inspect and switch chat-tree branches
+
+Use `thread/chatTree/read` to fetch branch metadata for a thread without mutating its state:
+
+```json
+{ "method": "thread/chatTree/read", "id": 26, "params": { "threadId": "thr_123" } }
+{ "id": 26, "result": {
+    "threadId": "thr_123",
+    "chatTree": {
+        "currentNodeId": "turn_b",
+        "nodes": [
+            { "nodeId": "turn_a", "parentNodeId": null, "summary": "Initial path", "turnId": "turn_a", "order": 0 },
+            { "nodeId": "turn_b", "parentNodeId": "turn_a", "summary": "Current branch", "turnId": "turn_b", "order": 1 }
+        ]
+    }
+} }
+```
+
+Use `thread/chatTree/current/set` to switch the active branch for a loaded thread. After this succeeds, subsequent `thread/read` or `thread/resume` responses will project `thread.turns` to the selected branch until the current node changes again.
+
+```json
+{ "method": "thread/chatTree/current/set", "id": 27, "params": {
+    "threadId": "thr_123",
+    "nodeId": "turn_a"
+} }
+{ "id": 27, "result": {
+    "threadId": "thr_123",
+    "currentNodeId": "turn_a"
 } }
 ```
 

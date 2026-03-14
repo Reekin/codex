@@ -236,6 +236,8 @@ use crate::protocol::AgentReasoningSectionBreakEvent;
 use crate::protocol::ApplyPatchApprovalRequestEvent;
 use crate::protocol::AskForApproval;
 use crate::protocol::BackgroundEventEvent;
+use crate::protocol::ChatTreeNodeUpdatedEvent;
+use crate::protocol::ChatTreeTurnInfo;
 use crate::protocol::CompactedItem;
 use crate::protocol::DeprecationNoticeEvent;
 use crate::protocol::ErrorEvent;
@@ -2132,6 +2134,15 @@ impl Session {
                     .await;
                 }
 
+                if Self::rollout_contains_chat_tree_state(&rollout_items) {
+                    let initial_context = self.build_initial_context(&turn_context).await;
+                    let mut state = self.state.lock().await;
+                    state.restore_from_rollout(
+                        &rollout_items,
+                        &initial_context,
+                        turn_context.truncation_policy,
+                    );
+                }
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
                 if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
@@ -2148,6 +2159,15 @@ impl Session {
             InitialHistory::Forked(rollout_items) => {
                 self.apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
+                if Self::rollout_contains_chat_tree_state(&rollout_items) {
+                    let base_initial_context = self.build_initial_context(&turn_context).await;
+                    let mut state = self.state.lock().await;
+                    state.restore_from_rollout(
+                        &rollout_items,
+                        &base_initial_context,
+                        turn_context.truncation_policy,
+                    );
+                }
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
@@ -2167,6 +2187,10 @@ impl Session {
                     .await;
                 {
                     let mut state = self.state.lock().await;
+                    state.append_to_all_chat_tree_snapshots(
+                        &initial_context,
+                        turn_context.truncation_policy,
+                    );
                     state.set_reference_context_item(Some(turn_context.to_turn_context_item()));
                 }
 
@@ -2204,6 +2228,15 @@ impl Session {
         rollout_items.iter().rev().find_map(|item| match item {
             RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
             _ => None,
+        })
+    }
+
+    fn rollout_contains_chat_tree_state(rollout_items: &[RolloutItem]) -> bool {
+        rollout_items.iter().any(|item| match item {
+            RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => event.chat_tree.is_some(),
+            RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => event.chat_tree.is_some(),
+            RolloutItem::EventMsg(EventMsg::ChatTreeNodeUpdated(_)) => true,
+            _ => false,
         })
     }
 
@@ -3337,6 +3370,50 @@ impl Session {
         state.replace_history(items, reference_context_item);
     }
 
+    pub(crate) async fn create_chat_tree_child_node(
+        &self,
+        node_id: String,
+    ) -> Option<ChatTreeTurnInfo> {
+        let mut state = self.state.lock().await;
+        state.create_chat_tree_child_node(node_id)
+    }
+
+    pub(crate) async fn finalize_chat_tree_node(
+        &self,
+        node_id: &str,
+        summary: Option<String>,
+    ) -> Option<ChatTreeTurnInfo> {
+        let mut state = self.state.lock().await;
+        state.finalize_chat_tree_node(node_id, summary)
+    }
+
+    pub(crate) async fn set_current_chat_tree_node(
+        &self,
+        node_id: &str,
+    ) -> Result<ChatTreeTurnInfo, String> {
+        let mut state = self.state.lock().await;
+        state.set_current_chat_tree_node(node_id)
+    }
+
+    pub(crate) async fn set_current_chat_tree_node_and_emit(
+        &self,
+        event_id: String,
+        node_id: &str,
+    ) -> Result<(), String> {
+        let chat_tree = self.set_current_chat_tree_node(node_id).await?;
+        self.send_event_raw(Event {
+            id: event_id,
+            msg: EventMsg::ChatTreeNodeUpdated(ChatTreeNodeUpdatedEvent { chat_tree }),
+        })
+        .await;
+        Ok(())
+    }
+
+    pub(crate) async fn current_chat_tree_node_id(&self) -> Option<String> {
+        let state = self.state.lock().await;
+        state.current_chat_tree_node_id()
+    }
+
     pub(crate) async fn replace_compacted_history(
         &self,
         items: Vec<ResponseItem>,
@@ -4301,6 +4378,10 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     handlers::set_thread_name(&sess, sub.id.clone(), name).await;
                     false
                 }
+                Op::SetCurrentChatTreeNode { node_id } => {
+                    handlers::set_current_chat_tree_node(&sess, sub.id.clone(), node_id).await;
+                    false
+                }
                 Op::RunUserShellCommand { command } => {
                     handlers::run_user_shell_command(&sess, sub.id.clone(), command).await;
                     false
@@ -4516,9 +4597,7 @@ mod handlers {
         current_context.session_telemetry.user_prompt(&items);
 
         // Attempt to inject input into current task.
-        if let Err(SteerInputError::NoActiveTurn(items)) =
-            sess.steer_input(items, /*expected_turn_id*/ None).await
-        {
+        if let Err(SteerInputError::NoActiveTurn(items)) = sess.steer_input(items, None).await {
             sess.refresh_mcp_servers_if_requested(&current_context)
                 .await;
             sess.spawn_task(
@@ -5059,6 +5138,25 @@ mod handlers {
         .await;
     }
 
+    pub async fn set_current_chat_tree_node(sess: &Arc<Session>, sub_id: String, node_id: String) {
+        match sess
+            .set_current_chat_tree_node_and_emit(sub_id.clone(), &node_id)
+            .await
+        {
+            Ok(()) => {}
+            Err(err) => {
+                sess.send_event_raw(Event {
+                    id: sub_id,
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: err,
+                        codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    }),
+                })
+                .await;
+            }
+        }
+    }
+
     pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
         sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
         let _ = sess.conversation.shutdown().await;
@@ -5390,6 +5488,14 @@ pub(crate) async fn run_turn(
 
     sess.record_context_updates_and_set_reference_context_item(turn_context.as_ref())
         .await;
+    if !matches!(
+        turn_context.session_source,
+        codex_protocol::protocol::SessionSource::SubAgent(_)
+    ) {
+        let _ = sess
+            .create_chat_tree_child_node(turn_context.sub_id.clone())
+            .await;
+    }
 
     let loaded_plugins = sess
         .services
@@ -6671,7 +6777,8 @@ fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         | EventMsg::CollabCloseBegin(_)
         | EventMsg::CollabCloseEnd(_)
         | EventMsg::CollabResumeBegin(_)
-        | EventMsg::CollabResumeEnd(_) => None,
+        | EventMsg::CollabResumeEnd(_)
+        | EventMsg::ChatTreeNodeUpdated(_) => None,
     }
 }
 

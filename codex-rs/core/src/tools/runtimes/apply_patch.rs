@@ -53,6 +53,26 @@ impl ApplyPatchRuntime {
         Self
     }
 
+    fn child_env() -> HashMap<String, String> {
+        #[cfg(target_os = "windows")]
+        {
+            let mut env = HashMap::new();
+            for key in ["TEMP", "TMP", "TMPDIR"] {
+                if let Some(value) = std::env::var_os(key)
+                    && !value.is_empty()
+                {
+                    env.insert(key.to_string(), value.to_string_lossy().to_string());
+                }
+            }
+            env
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            HashMap::new()
+        }
+    }
+
     fn build_guardian_review_request(
         req: &ApplyPatchRequest,
         call_id: &str,
@@ -94,7 +114,9 @@ impl ApplyPatchRuntime {
             cwd: req.action.cwd.clone(),
             expiration: req.timeout_ms.into(),
             // Run apply_patch with a minimal environment for determinism and to avoid leaks.
-            env: HashMap::new(),
+            // On Windows, preserve temp-directory variables so self-invoked child processes
+            // do not fall back to system locations like `C:\Windows`.
+            env: Self::child_env(),
             sandbox_permissions: req.sandbox_permissions,
             additional_permissions: req.additional_permissions.clone(),
             justification: None,

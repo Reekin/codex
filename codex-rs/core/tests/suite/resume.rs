@@ -111,6 +111,7 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
                     EventMsg::AgentMessage(_),
                     EventMsg::TokenCount(_),
                     EventMsg::TurnComplete(_),
+                    EventMsg::ChatTreeNodeUpdated(_),
                 ]
             )
         },
@@ -128,6 +129,7 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
             EventMsg::AgentMessage(assistant_message),
             EventMsg::TokenCount(_),
             EventMsg::TurnComplete(completed),
+            EventMsg::ChatTreeNodeUpdated(chat_tree_updated),
         ] => {
             assert_eq!(first_user.message, "Record some messages");
             assert_eq!(first_user.text_elements, text_elements);
@@ -136,6 +138,10 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
             assert_eq!(
                 completed.last_agent_message.as_deref(),
                 Some("Completed first turn")
+            );
+            assert_eq!(
+                chat_tree_updated.chat_tree.node_id, completed.turn_id,
+                "chat-tree update should reference the resumed turn",
             );
         }
         other => panic!("unexpected initial messages after resume: {other:#?}"),
@@ -198,6 +204,7 @@ async fn resume_includes_initial_messages_from_reasoning_events() -> Result<()> 
                     EventMsg::AgentMessage(_),
                     EventMsg::TokenCount(_),
                     EventMsg::TurnComplete(_),
+                    EventMsg::ChatTreeNodeUpdated(_),
                 ]
             )
         },
@@ -217,6 +224,7 @@ async fn resume_includes_initial_messages_from_reasoning_events() -> Result<()> 
             EventMsg::AgentMessage(assistant_message),
             EventMsg::TokenCount(_),
             EventMsg::TurnComplete(completed),
+            EventMsg::ChatTreeNodeUpdated(chat_tree_updated),
         ] => {
             assert_eq!(first_user.message, "Record reasoning messages");
             assert_eq!(reasoning.text, "Summarized step");
@@ -226,6 +234,10 @@ async fn resume_includes_initial_messages_from_reasoning_events() -> Result<()> 
             assert_eq!(
                 completed.last_agent_message.as_deref(),
                 Some("Completed reasoning turn")
+            );
+            assert_eq!(
+                chat_tree_updated.chat_tree.node_id, completed.turn_id,
+                "chat-tree update should reference the resumed turn",
             );
         }
         other => panic!("unexpected initial messages after resume: {other:#?}"),
