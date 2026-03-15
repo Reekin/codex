@@ -2,7 +2,7 @@
 
 Demo video: [`docs/assets/chat-tree-demo.mp4`](docs/assets/chat-tree-demo.mp4)
 
-This branch is intended to be used together with [`Reekin/codex`](https://github.com/Reekin/codex).
+This branch is suggested to be used together with [`Reekin/CodexMonitor`](https://github.com/Reekin/CodexMonitor/tree/feat/chattree-integration).
 
 ## Development Goal
 
