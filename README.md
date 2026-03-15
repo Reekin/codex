@@ -1,60 +1,52 @@
-<p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Feature: Chat Tree
 
----
+Demo video: [`docs/assets/chat-tree-demo.mp4`](docs/assets/chat-tree-demo.mp4)
 
-## Quickstart
+This branch is intended to be used together with [`Reekin/codex`](https://github.com/Reekin/codex).
 
-### Installing and running Codex CLI
+## Development Goal
 
-Install globally with your preferred package manager:
+Support tree-structured context management.
 
-```shell
-# Install using npm
-npm install -g @openai/codex
+## Behavior
+
+The app stores conversation history as a tree.
+
+Each time the user sends a prompt, create a new node after the current node, then set that new node as the current node.
+
+Whenever history is assembled for an LLM request, include only this node and all of its parent nodes recursively.
+
+- Node content: from the user prompt at this node through the end of that turn, whether interrupted or completed.
+
+In a conversation, users can open the chat tree UI with `/chattree`.
+
+The chat tree UI displays all nodes, and users can use arrow keys to choose a different node as the current node.
+
+Chat tree illustration:
+
+```text
+[ ]1. Understand current project state
+    [ ]2. Discuss the feature approach and break it into steps
+        [ ]3. Request implementation of feature step 1
+         |  [ ]4. During agent output, notice unclear requirements and add clarification
+         |      [ ]5. During testing, find unexpected behavior and discuss + fix
+         |          [ ]6. Discuss test feedback after the fix
+         |              [ ]7. Continue fixing newly found bugs
+        [ ]8. Request implementation of feature step 2
+            [ ]9. During testing, find unexpected behavior and discuss + fix
+>            |  [*]12. Keep digging into root cause and analyze the error
+            [ ]10. Suddenly realize step 1.5 is also required and discuss approach
+                [ ]11. Request implementation of step 1.5
+
+Press ↑ ↓ to select nodes; Press space to mark the node as CURRENT NODE;
 ```
 
-```shell
-# Install using Homebrew
-brew install --cask codex
+Notes:
+
+- `[*]` indicates the current node, and it moves as you navigate with `↑` and `↓`.
+- Numbering is included only to illustrate real chronological order in conversation and is not shown in the actual UI.
+- Example order:
+
+```text
+1-2-3-4-5-6-7-(set current node from 7 to 2 in chat tree)-8-9-(set current node from 9 to 8 in chat tree)-10-11-(set current node from 11 to 8 in chat tree)-12
 ```
-
-Then simply run `codex` to get started.
-
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
-
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
-
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
-
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
-
-</details>
-
-### Using Codex with your ChatGPT plan
-
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Team, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
-
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
-
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
-
-This repository is licensed under the [Apache-2.0 License](LICENSE).
