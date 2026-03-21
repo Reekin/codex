@@ -8,54 +8,15 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::ev_response_created;
-use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
-use core_test_support::test_codex::TestCodex;
-use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
-use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
-use tempfile::TempDir;
-use wiremock::MockServer;
-
-async fn resume_until_initial_messages(
-    builder: &mut TestCodexBuilder,
-    server: &MockServer,
-    home: Arc<TempDir>,
-    rollout_path: PathBuf,
-    predicate: impl Fn(&[EventMsg]) -> bool,
-) -> Result<TestCodex> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    let poll_interval = Duration::from_millis(10);
-    let mut last_initial_messages = "<missing initial messages>".to_string();
-
-    loop {
-        let resumed = builder
-            .resume(server, Arc::clone(&home), rollout_path.clone())
-            .await?;
-        if let Some(initial_messages) = resumed.session_configured.initial_messages.as_ref() {
-            if predicate(initial_messages) {
-                return Ok(resumed);
-            }
-            last_initial_messages = format!("{initial_messages:#?}");
-        }
-
-        if tokio::time::Instant::now() >= deadline {
-            panic!(
-                "timed out waiting for rollout resume messages to stabilize: {last_initial_messages}"
-            );
-        }
-
-        drop(resumed);
-        tokio::time::sleep(poll_interval).await;
-    }
-}
+use wiremock::matchers::body_string_contains;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
@@ -72,12 +33,22 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
         .clone()
         .expect("rollout path");
 
-    let initial_sse = sse(vec![
-        ev_response_created("resp-initial"),
-        ev_assistant_message("msg-1", "Completed first turn"),
-        ev_completed("resp-initial"),
-    ]);
-    mount_sse_once(&server, initial_sse).await;
+    let initial_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-initial"),
+                ev_assistant_message("msg-1", "Completed first turn"),
+                ev_completed("resp-initial"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-summary"),
+                ev_assistant_message("msg-summary", "record messages summary"),
+                ev_completed("resp-summary"),
+            ]),
+        ],
+    )
+    .await;
 
     let text_elements = vec![TextElement::new(
         ByteRange { start: 0, end: 6 },
@@ -95,28 +66,16 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
         .await?;
 
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    wait_for_event(&codex, |event| {
+        matches!(
+            event,
+            EventMsg::ChatTreeNodeUpdated(update)
+                if update.chat_tree.summary.as_deref() == Some("record messages summary")
+        )
+    })
+    .await;
 
-    let resumed = resume_until_initial_messages(
-        &mut builder,
-        &server,
-        home,
-        rollout_path,
-        |initial_messages| {
-            matches!(
-                initial_messages,
-                [
-                    EventMsg::TurnStarted(_),
-                    EventMsg::UserMessage(_),
-                    EventMsg::TokenCount(_),
-                    EventMsg::AgentMessage(_),
-                    EventMsg::TokenCount(_),
-                    EventMsg::TurnComplete(_),
-                    EventMsg::ChatTreeNodeUpdated(_),
-                ]
-            )
-        },
-    )
-    .await?;
+    let resumed = builder.resume(&server, home, rollout_path).await?;
     let initial_messages = resumed
         .session_configured
         .initial_messages
@@ -143,9 +102,14 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
                 chat_tree_updated.chat_tree.node_id, completed.turn_id,
                 "chat-tree update should reference the resumed turn",
             );
+            assert_eq!(
+                chat_tree_updated.chat_tree.summary.as_deref(),
+                Some("record messages summary"),
+            );
         }
         other => panic!("unexpected initial messages after resume: {other:#?}"),
     }
+    assert_eq!(initial_mock.requests().len(), 2);
 
     Ok(())
 }
@@ -167,13 +131,23 @@ async fn resume_includes_initial_messages_from_reasoning_events() -> Result<()> 
         .clone()
         .expect("rollout path");
 
-    let initial_sse = sse(vec![
-        ev_response_created("resp-initial"),
-        ev_reasoning_item("reason-1", &["Summarized step"], &["raw detail"]),
-        ev_assistant_message("msg-1", "Completed reasoning turn"),
-        ev_completed("resp-initial"),
-    ]);
-    mount_sse_once(&server, initial_sse).await;
+    let initial_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-initial"),
+                ev_reasoning_item("reason-1", &["Summarized step"], &["raw detail"]),
+                ev_assistant_message("msg-1", "Completed reasoning turn"),
+                ev_completed("resp-initial"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-summary"),
+                ev_assistant_message("msg-summary", "reasoning summary label"),
+                ev_completed("resp-summary"),
+            ]),
+        ],
+    )
+    .await;
 
     codex
         .submit(Op::UserInput {
@@ -186,30 +160,16 @@ async fn resume_includes_initial_messages_from_reasoning_events() -> Result<()> 
         .await?;
 
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    wait_for_event(&codex, |event| {
+        matches!(
+            event,
+            EventMsg::ChatTreeNodeUpdated(update)
+                if update.chat_tree.summary.as_deref() == Some("reasoning summary label")
+        )
+    })
+    .await;
 
-    let resumed = resume_until_initial_messages(
-        &mut builder,
-        &server,
-        home,
-        rollout_path,
-        |initial_messages| {
-            matches!(
-                initial_messages,
-                [
-                    EventMsg::TurnStarted(_),
-                    EventMsg::UserMessage(_),
-                    EventMsg::TokenCount(_),
-                    EventMsg::AgentReasoning(_),
-                    EventMsg::AgentReasoningRawContent(_),
-                    EventMsg::AgentMessage(_),
-                    EventMsg::TokenCount(_),
-                    EventMsg::TurnComplete(_),
-                    EventMsg::ChatTreeNodeUpdated(_),
-                ]
-            )
-        },
-    )
-    .await?;
+    let resumed = builder.resume(&server, home, rollout_path).await?;
     let initial_messages = resumed
         .session_configured
         .initial_messages
@@ -239,9 +199,69 @@ async fn resume_includes_initial_messages_from_reasoning_events() -> Result<()> 
                 chat_tree_updated.chat_tree.node_id, completed.turn_id,
                 "chat-tree update should reference the resumed turn",
             );
+            assert_eq!(
+                chat_tree_updated.chat_tree.summary.as_deref(),
+                Some("reasoning summary label"),
+            );
         }
         other => panic!("unexpected initial messages after resume: {other:#?}"),
     }
+    assert_eq!(initial_mock.requests().len(), 2);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turn_completion_emits_async_chat_tree_summary_update() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let initial = test_codex().build(&server).await?;
+    let codex = Arc::clone(&initial.codex);
+
+    let requests = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-initial"),
+                ev_assistant_message("msg-1", "Completed first turn"),
+                ev_completed("resp-initial"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-summary"),
+                ev_assistant_message("msg-summary", "branch label"),
+                ev_completed("resp-summary"),
+            ]),
+        ],
+    )
+    .await;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "Record some messages".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+        })
+        .await?;
+
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let chat_tree_updated = wait_for_event(&codex, |event| {
+        matches!(
+            event,
+            EventMsg::ChatTreeNodeUpdated(update)
+                if update.chat_tree.summary.as_deref() == Some("branch label")
+        )
+    })
+    .await;
+    match chat_tree_updated {
+        EventMsg::ChatTreeNodeUpdated(update) => {
+            assert_eq!(update.chat_tree.summary.as_deref(), Some("branch label"));
+        }
+        other => panic!("unexpected event: {other:#?}"),
+    }
+    assert_eq!(requests.requests().len(), 2);
 
     Ok(())
 }
@@ -263,12 +283,25 @@ async fn resume_switches_models_preserves_base_instructions() -> Result<()> {
         .clone()
         .expect("rollout path");
 
-    let initial_sse = sse(vec![
-        ev_response_created("resp-initial"),
-        ev_assistant_message("msg-1", "Completed first turn"),
-        ev_completed("resp-initial"),
-    ]);
-    let initial_mock = mount_sse_once(&server, initial_sse).await;
+    let _initial_summary_mock = core_test_support::responses::mount_sse_once_match(
+        &server,
+        body_string_contains("Summarize this turn for a chat tree node."),
+        sse(vec![
+            ev_response_created("resp-summary"),
+            ev_assistant_message("msg-summary", "initial summary"),
+            ev_completed("resp-summary"),
+        ]),
+    )
+    .await;
+    let initial_mock = core_test_support::responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-initial"),
+            ev_assistant_message("msg-1", "Completed first turn"),
+            ev_completed("resp-initial"),
+        ]),
+    )
+    .await;
 
     codex
         .submit(Op::UserInput {
@@ -288,6 +321,26 @@ async fn resume_switches_models_preserves_base_instructions() -> Result<()> {
         .unwrap_or_default()
         .to_string();
 
+    let _resumed_summary_mock_1 = core_test_support::responses::mount_sse_once_match(
+        &server,
+        body_string_contains("Summarize this turn for a chat tree node."),
+        sse(vec![
+            ev_response_created("resp-resume-summary-1"),
+            ev_assistant_message("msg-resume-summary-1", "resume summary one"),
+            ev_completed("resp-resume-summary-1"),
+        ]),
+    )
+    .await;
+    let _resumed_summary_mock_2 = core_test_support::responses::mount_sse_once_match(
+        &server,
+        body_string_contains("Summarize this turn for a chat tree node."),
+        sse(vec![
+            ev_response_created("resp-resume-summary-2"),
+            ev_assistant_message("msg-resume-summary-2", "resume summary two"),
+            ev_completed("resp-resume-summary-2"),
+        ]),
+    )
+    .await;
     let resumed_mock = mount_sse_sequence(
         &server,
         vec![
@@ -386,7 +439,17 @@ async fn resume_model_switch_is_not_duplicated_after_pre_turn_override() -> Resu
         .clone()
         .expect("rollout path");
 
-    let initial_mock = mount_sse_once(
+    let _initial_summary_mock = core_test_support::responses::mount_sse_once_match(
+        &server,
+        body_string_contains("Summarize this turn for a chat tree node."),
+        sse(vec![
+            ev_response_created("resp-summary"),
+            ev_assistant_message("msg-summary", "initial summary"),
+            ev_completed("resp-summary"),
+        ]),
+    )
+    .await;
+    let initial_mock = core_test_support::responses::mount_sse_once(
         &server,
         sse(vec![
             ev_response_created("resp-initial"),
@@ -407,7 +470,17 @@ async fn resume_model_switch_is_not_duplicated_after_pre_turn_override() -> Resu
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
     let _ = initial_mock.single_request();
 
-    let resumed_mock = mount_sse_once(
+    let _resumed_summary_mock = core_test_support::responses::mount_sse_once_match(
+        &server,
+        body_string_contains("Summarize this turn for a chat tree node."),
+        sse(vec![
+            ev_response_created("resp-resume-summary"),
+            ev_assistant_message("msg-resume-summary", "resume summary"),
+            ev_completed("resp-resume-summary"),
+        ]),
+    )
+    .await;
+    let resumed_mock = core_test_support::responses::mount_sse_once(
         &server,
         sse(vec![
             ev_response_created("resp-resume"),

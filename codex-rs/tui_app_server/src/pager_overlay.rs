@@ -31,6 +31,7 @@ use crate::tui;
 use crate::tui::TuiEvent;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::KeyEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::buffer::Cell;
 use ratatui::layout::Rect;
@@ -44,10 +45,12 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
+use textwrap::wrap;
 
 pub(crate) enum Overlay {
     Transcript(TranscriptOverlay),
     Static(StaticOverlay),
+    ChatTree(ChatTreeOverlay),
 }
 
 impl Overlay {
@@ -66,10 +69,15 @@ impl Overlay {
         Self::Static(StaticOverlay::with_renderables(renderables, title))
     }
 
+    pub(crate) fn new_chat_tree(entries: Vec<(String, usize, String, bool)>) -> Self {
+        Self::ChatTree(ChatTreeOverlay::new(entries))
+    }
+
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         match self {
             Overlay::Transcript(o) => o.handle_event(tui, event),
             Overlay::Static(o) => o.handle_event(tui, event),
+            Overlay::ChatTree(o) => o.handle_event(tui, event),
         }
     }
 
@@ -77,6 +85,14 @@ impl Overlay {
         match self {
             Overlay::Transcript(o) => o.is_done(),
             Overlay::Static(o) => o.is_done(),
+            Overlay::ChatTree(o) => o.is_done(),
+        }
+    }
+
+    pub(crate) fn take_chat_tree_selection(&mut self) -> Option<String> {
+        match self {
+            Overlay::ChatTree(overlay) => overlay.take_selected_node_id(),
+            _ => None,
         }
     }
 }
@@ -754,6 +770,210 @@ impl StaticOverlay {
     }
 }
 
+struct ChatTreeOverlayNode {
+    node_id: String,
+    depth: usize,
+    summary: String,
+}
+
+pub(crate) struct ChatTreeOverlay {
+    nodes: Vec<ChatTreeOverlayNode>,
+    current_node_id: Option<String>,
+    selected_idx: usize,
+    scroll_offset: usize,
+    selected_node_id: Option<String>,
+    is_done: bool,
+}
+
+impl ChatTreeOverlay {
+    pub(crate) fn new(entries: Vec<(String, usize, String, bool)>) -> Self {
+        let current_idx = entries.iter().position(|(_, _, _, is_current)| *is_current);
+        let selected_idx = current_idx.unwrap_or(entries.len().saturating_sub(1));
+        let current_node_id =
+            current_idx.and_then(|idx| entries.get(idx).map(|(id, _, _, _)| id.clone()));
+        let nodes = entries
+            .into_iter()
+            .map(|(node_id, depth, summary, _)| ChatTreeOverlayNode {
+                node_id,
+                depth,
+                summary,
+            })
+            .collect();
+        Self {
+            nodes,
+            current_node_id,
+            selected_idx,
+            scroll_offset: 0,
+            selected_node_id: None,
+            is_done: false,
+        }
+    }
+
+    fn handle_key_event(&mut self, key_event: KeyEvent) -> bool {
+        let is_esc = key_event.code == KeyCode::Esc
+            && (key_event.kind == KeyEventKind::Press || key_event.kind == KeyEventKind::Repeat);
+        if self.nodes.is_empty() {
+            if KEY_Q.is_press(key_event) || is_esc || KEY_CTRL_C.is_press(key_event) {
+                self.is_done = true;
+                return true;
+            }
+            return false;
+        }
+
+        match key_event {
+            e if KEY_UP.is_press(e) || KEY_K.is_press(e) => {
+                self.selected_idx = self.selected_idx.saturating_sub(1);
+                true
+            }
+            e if KEY_DOWN.is_press(e) || KEY_J.is_press(e) => {
+                self.selected_idx = self
+                    .selected_idx
+                    .saturating_add(1)
+                    .min(self.nodes.len().saturating_sub(1));
+                true
+            }
+            e if KEY_SPACE.is_press(e) => {
+                if let Some(node) = self.nodes.get(self.selected_idx) {
+                    self.current_node_id = Some(node.node_id.clone());
+                    self.selected_node_id = Some(node.node_id.clone());
+                }
+                self.is_done = true;
+                true
+            }
+            e if KEY_Q.is_press(e) || KEY_ESC.is_press(e) || KEY_CTRL_C.is_press(e) => {
+                self.is_done = true;
+                true
+            }
+            _ if is_esc => {
+                self.is_done = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn render_hints(&self, area: Rect, buf: &mut Buffer) {
+        let line1 = Rect::new(area.x, area.y, area.width, 1);
+        let line2 = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
+        let pairs1: Vec<(&[KeyBinding], &str)> = vec![(&[KEY_UP, KEY_DOWN], "to select")];
+        let pairs2: Vec<(&[KeyBinding], &str)> =
+            vec![(&[KEY_SPACE], "set current"), (&[KEY_Q, KEY_ESC], "close")];
+        render_key_hints(line1, buf, &pairs1);
+        render_key_hints(line2, buf, &pairs2);
+    }
+
+    fn renderable_lines(&self, width: u16) -> Vec<Vec<String>> {
+        let wrap_width = usize::from(width.max(1));
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(idx, node)| {
+                let is_selected = idx == self.selected_idx;
+                let is_current = self.current_node_id.as_ref() == Some(&node.node_id);
+                let pointer = if is_selected { ">" } else { " " };
+                let marker = if is_current { "[*]" } else { "[ ]" };
+                let indent = "  ".repeat(node.depth);
+                let first_prefix = format!("{pointer} {indent}{marker} ");
+                let subsequent_prefix =
+                    format!("  {indent}{} ", " ".repeat(marker.chars().count()));
+                let content_width = wrap_width
+                    .saturating_sub(first_prefix.chars().count())
+                    .max(1);
+                let wrapped = wrap(node.summary.as_str(), content_width);
+                if wrapped.is_empty() {
+                    vec![first_prefix]
+                } else {
+                    let mut lines = Vec::with_capacity(wrapped.len());
+                    for (line_idx, chunk) in wrapped.iter().enumerate() {
+                        let prefix = if line_idx == 0 {
+                            &first_prefix
+                        } else {
+                            &subsequent_prefix
+                        };
+                        lines.push(format!("{prefix}{chunk}"));
+                    }
+                    lines
+                }
+            })
+            .collect()
+    }
+
+    fn render_content(&mut self, area: Rect, buf: &mut Buffer) {
+        let lines = self.renderable_lines(area.width);
+        let total_height = lines.iter().map(Vec::len).sum::<usize>();
+        self.scroll_offset = self
+            .scroll_offset
+            .min(total_height.saturating_sub(area.height as usize));
+
+        let mut flat_index = 0usize;
+        let mut y = area.y;
+        for chunk_lines in lines {
+            for line in chunk_lines {
+                if flat_index < self.scroll_offset {
+                    flat_index += 1;
+                    continue;
+                }
+                if y >= area.bottom() {
+                    return;
+                }
+                Paragraph::new(Line::from(line)).render(Rect::new(area.x, y, area.width, 1), buf);
+                y += 1;
+                flat_index += 1;
+            }
+        }
+    }
+
+    pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
+        match event {
+            TuiEvent::Key(key_event) => {
+                if self.handle_key_event(key_event) {
+                    tui.frame_requester().schedule_frame();
+                }
+            }
+            TuiEvent::Draw => {
+                tui.draw(u16::MAX, |frame| self.render(frame.area(), frame.buffer))?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    pub(crate) fn is_done(&self) -> bool {
+        self.is_done
+    }
+
+    pub(crate) fn take_selected_node_id(&mut self) -> Option<String> {
+        self.selected_node_id.take()
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer) {
+        Clear.render(area, buf);
+        Span::from("~".repeat(area.width as usize))
+            .dim()
+            .render_ref(area, buf);
+        " Chat Tree".bold().render_ref(area, buf);
+
+        let hints_area = Rect::new(area.x, area.y.saturating_add(1), area.width, 2);
+        self.render_hints(hints_area, buf);
+
+        let content_area = Rect::new(
+            area.x,
+            area.y.saturating_add(3),
+            area.width,
+            area.height.saturating_sub(4),
+        );
+        self.render_content(content_area, buf);
+
+        let footer_area = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1);
+        Paragraph::new(Line::from(vec![
+            "Current node shown as ".dim(),
+            "[*]".bold(),
+            "  Press Space to switch.".dim(),
+        ]))
+        .render(footer_area, buf);
+    }
+}
+
 impl StaticOverlay {
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         match event {
@@ -1294,5 +1514,31 @@ mod tests {
             pv.is_scrolled_to_bottom(),
             "expected view to report at bottom after scrolling to end"
         );
+    }
+
+    #[test]
+    fn chat_tree_overlay_space_selects_current_node_and_closes() {
+        let mut overlay = ChatTreeOverlay::new(vec![
+            ("node-1".to_string(), 0, "first".to_string(), true),
+            ("node-2".to_string(), 1, "second".to_string(), false),
+        ]);
+
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Down));
+        overlay.handle_key_event(KeyEvent::from(KeyCode::Char(' ')));
+
+        assert!(overlay.is_done());
+        assert_eq!(overlay.take_selected_node_id(), Some("node-2".to_string()));
+    }
+
+    #[test]
+    fn chat_tree_overlay_esc_closes_without_selection() {
+        let mut overlay =
+            ChatTreeOverlay::new(vec![("node-1".to_string(), 0, "first".to_string(), true)]);
+
+        let changed = overlay.handle_key_event(KeyEvent::from(KeyCode::Esc));
+
+        assert!(changed);
+        assert!(overlay.is_done());
+        assert_eq!(overlay.take_selected_node_id(), None);
     }
 }

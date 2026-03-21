@@ -379,6 +379,7 @@ async fn run_codex_tool_session_inner(
                     | EventMsg::ModelReroute(_)
                     | EventMsg::ThreadRolledBack(_)
                     | EventMsg::ChatTreeNodeUpdated(_)
+                    | EventMsg::ChatTreeCurrentNodeChanged(_)
                     | EventMsg::CollabAgentSpawnBegin(_)
                     | EventMsg::CollabAgentSpawnEnd(_)
                     | EventMsg::CollabAgentInteractionBegin(_)

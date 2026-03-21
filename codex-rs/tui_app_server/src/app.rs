@@ -107,6 +107,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
@@ -2560,6 +2561,41 @@ impl App {
         Ok(())
     }
 
+    async fn refresh_active_thread_after_chat_tree_switch(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        let thread = app_server
+            .thread_read(thread_id, /*include_turns*/ true)
+            .await?;
+        let Some(channel) = self.thread_event_channels.get(&thread_id) else {
+            self.chat_widget.add_error_message(format!(
+                "Failed to refresh chat-tree transcript for thread {thread_id}."
+            ));
+            return Ok(());
+        };
+
+        let input_state = self.chat_widget.capture_thread_input_state();
+        let snapshot = {
+            let mut store = channel.store.lock().await;
+            store.input_state = input_state;
+            store.set_turns(thread.turns);
+            store.rebase_buffer_after_session_refresh();
+            store.snapshot()
+        };
+
+        let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
+        self.chat_widget = ChatWidget::new_with_app_event(init);
+        self.sync_active_agent_label();
+        self.reset_for_thread_switch(tui)?;
+        self.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
+        self.drain_active_thread_events(tui).await?;
+
+        Ok(())
+    }
+
     fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
         self.overlay = None;
         self.transcript_cells.clear();
@@ -3342,6 +3378,120 @@ impl App {
 
                 // Leaving alt-screen may blank the inline viewport; force a redraw either way.
                 tui.frame_requester().schedule_frame();
+            }
+            AppEvent::OpenChatTree => {
+                let Some(thread_id) = self.active_thread_id else {
+                    self.chat_widget
+                        .add_error_message("No active thread is available.".to_string());
+                    return Ok(AppRunControl::Continue);
+                };
+
+                match app_server.thread_chat_tree_read(thread_id).await {
+                    Ok(response) => {
+                        let chat_tree = response.chat_tree;
+                        let current_node_id = chat_tree.current_node_id.clone();
+                        let nodes_by_id = chat_tree
+                            .nodes
+                            .into_iter()
+                            .map(|node| (node.node_id.clone(), node))
+                            .collect::<HashMap<_, _>>();
+                        let mut children_by_parent: HashMap<Option<String>, Vec<String>> =
+                            HashMap::new();
+                        for node in nodes_by_id.values() {
+                            let parent_node_id = node
+                                .parent_node_id
+                                .clone()
+                                .filter(|parent_id| nodes_by_id.contains_key(parent_id));
+                            children_by_parent
+                                .entry(parent_node_id)
+                                .or_default()
+                                .push(node.node_id.clone());
+                        }
+                        for child_ids in children_by_parent.values_mut() {
+                            child_ids.sort_by_key(|child_id| {
+                                nodes_by_id
+                                    .get(child_id)
+                                    .map(|node| node.order)
+                                    .unwrap_or(u32::MAX)
+                            });
+                        }
+
+                        let mut entries = Vec::new();
+                        let mut visited = HashSet::new();
+                        let mut stack = children_by_parent
+                            .get(&None)
+                            .into_iter()
+                            .flatten()
+                            .rev()
+                            .map(|node_id| (node_id.clone(), 0usize))
+                            .collect::<Vec<_>>();
+
+                        while let Some((node_id, depth)) = stack.pop() {
+                            if !visited.insert(node_id.clone()) {
+                                continue;
+                            }
+                            let Some(node) = nodes_by_id.get(&node_id) else {
+                                continue;
+                            };
+                            entries.push((
+                                node_id.clone(),
+                                depth,
+                                node.summary
+                                    .clone()
+                                    .unwrap_or_else(|| "(pending summary)".to_string()),
+                                current_node_id.as_ref() == Some(&node_id),
+                            ));
+                            if let Some(children) = children_by_parent.get(&Some(node_id.clone())) {
+                                stack.extend(
+                                    children
+                                        .iter()
+                                        .rev()
+                                        .map(|child_id| (child_id.clone(), depth + 1)),
+                                );
+                            }
+                        }
+
+                        let mut remaining_node_ids =
+                            nodes_by_id.keys().cloned().collect::<Vec<_>>();
+                        remaining_node_ids.sort_by_key(|node_id| {
+                            nodes_by_id
+                                .get(node_id)
+                                .map(|node| node.order)
+                                .unwrap_or(u32::MAX)
+                        });
+                        for node_id in remaining_node_ids {
+                            if visited.contains(&node_id) {
+                                continue;
+                            }
+                            let Some(node) = nodes_by_id.get(&node_id) else {
+                                continue;
+                            };
+                            entries.push((
+                                node_id.clone(),
+                                0,
+                                node.summary
+                                    .clone()
+                                    .unwrap_or_else(|| "(pending summary)".to_string()),
+                                current_node_id.as_ref() == Some(&node_id),
+                            ));
+                        }
+
+                        if entries.is_empty() {
+                            self.chat_widget.add_info_message(
+                                "Chat tree is empty. Send a prompt first.".to_string(),
+                                None,
+                            );
+                        } else {
+                            let _ = tui.enter_alt_screen();
+                            self.overlay = Some(Overlay::new_chat_tree(entries));
+                            tui.frame_requester().schedule_frame();
+                        }
+                    }
+                    Err(err) => {
+                        self.chat_widget
+                            .add_error_message(format!("Failed to load chat tree: {err}"));
+                    }
+                }
             }
             AppEvent::ForkCurrentSession => {
                 self.session_telemetry.counter(
@@ -4317,6 +4467,22 @@ impl App {
             }
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread(tui, app_server, thread_id).await?;
+            }
+            AppEvent::SetCurrentChatTreeNode { thread_id, node_id } => {
+                if self.active_thread_id != Some(thread_id) {
+                    self.chat_widget.add_error_message(format!(
+                        "Cannot switch chat-tree node for inactive thread {thread_id}."
+                    ));
+                } else if let Err(err) = app_server
+                    .thread_chat_tree_set_current(thread_id, node_id)
+                    .await
+                {
+                    self.chat_widget
+                        .add_error_message(format!("Failed to switch chat-tree node: {err}"));
+                } else {
+                    self.refresh_active_thread_after_chat_tree_switch(tui, app_server, thread_id)
+                        .await?;
+                }
             }
             AppEvent::OpenSkillsList => {
                 self.chat_widget.open_skills_list();

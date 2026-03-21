@@ -20,6 +20,10 @@ use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadBackgroundTerminalsCleanParams;
 use codex_app_server_protocol::ThreadBackgroundTerminalsCleanResponse;
+use codex_app_server_protocol::ThreadChatTreeReadParams;
+use codex_app_server_protocol::ThreadChatTreeReadResponse;
+use codex_app_server_protocol::ThreadChatTreeSetCurrentParams;
+use codex_app_server_protocol::ThreadChatTreeSetCurrentResponse;
 use codex_app_server_protocol::ThreadCompactStartParams;
 use codex_app_server_protocol::ThreadCompactStartResponse;
 use codex_app_server_protocol::ThreadForkParams;
@@ -358,6 +362,40 @@ impl AppServerSession {
             .await
             .wrap_err("thread/read failed during TUI session lookup")?;
         Ok(response.thread)
+    }
+
+    pub(crate) async fn thread_chat_tree_read(
+        &mut self,
+        thread_id: ThreadId,
+    ) -> Result<ThreadChatTreeReadResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ThreadChatTreeRead {
+                request_id,
+                params: ThreadChatTreeReadParams {
+                    thread_id: thread_id.to_string(),
+                },
+            })
+            .await
+            .wrap_err("thread/chatTree/read failed during TUI session lookup")
+    }
+
+    pub(crate) async fn thread_chat_tree_set_current(
+        &mut self,
+        thread_id: ThreadId,
+        node_id: String,
+    ) -> Result<ThreadChatTreeSetCurrentResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ThreadChatTreeSetCurrent {
+                request_id,
+                params: ThreadChatTreeSetCurrentParams {
+                    thread_id: thread_id.to_string(),
+                    node_id,
+                },
+            })
+            .await
+            .wrap_err("thread/chatTree/current/set failed during TUI session update")
     }
 
     #[allow(clippy::too_many_arguments)]

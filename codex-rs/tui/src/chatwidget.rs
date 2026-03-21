@@ -101,6 +101,7 @@ use codex_protocol::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_protocol::protocol::AgentReasoningRawContentEvent;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::BackgroundEventEvent;
+use codex_protocol::protocol::ChatTreeCurrentNodeChangedEvent;
 use codex_protocol::protocol::ChatTreeNodeUpdatedEvent;
 use codex_protocol::protocol::ChatTreeTurnInfo;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -1843,6 +1844,10 @@ impl ChatWidget {
         if !self.chat_tree_node_order.contains(&node_id) {
             self.chat_tree_node_order.push(node_id);
         }
+    }
+
+    fn on_chat_tree_current_node_changed(&mut self, node_id: String) {
+        self.chat_tree_current_node_id = Some(node_id);
     }
 
     fn on_chat_tree_turn_started(&mut self, turn_id: &str) {
@@ -5389,6 +5394,10 @@ impl ChatWidget {
             }) => self.on_task_complete(last_agent_message, chat_tree, from_replay),
             EventMsg::ChatTreeNodeUpdated(ChatTreeNodeUpdatedEvent { chat_tree }) => {
                 self.on_chat_tree_node_updated(chat_tree);
+                self.request_redraw();
+            }
+            EventMsg::ChatTreeCurrentNodeChanged(ChatTreeCurrentNodeChangedEvent { node_id }) => {
+                self.on_chat_tree_current_node_changed(node_id);
                 self.request_redraw();
             }
             EventMsg::TokenCount(ev) => {

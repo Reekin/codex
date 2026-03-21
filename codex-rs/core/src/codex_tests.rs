@@ -2565,6 +2565,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         pending_mcp_server_refresh_config: Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        chat_tree_summary_jobs: Mutex::new(HashMap::new()),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         js_repl,
@@ -2572,6 +2573,45 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     };
 
     (session, turn_context)
+}
+
+#[tokio::test]
+async fn abort_all_tasks_cancels_chat_tree_summary_jobs_without_active_turn() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let summary_job = session.register_chat_tree_summary_job("node-1").await;
+
+    assert!(!summary_job.is_cancelled());
+
+    Arc::new(session)
+        .abort_all_tasks(TurnAbortReason::Interrupted)
+        .await;
+
+    assert!(summary_job.is_cancelled());
+}
+
+#[tokio::test]
+async fn setting_current_chat_tree_node_cancels_chat_tree_summary_jobs() {
+    let (session, _turn_context) = make_session_and_context().await;
+    {
+        let mut state = session.state.lock().await;
+        state
+            .create_chat_tree_child_node("node-1".to_string())
+            .expect("should create initial chat-tree node");
+        state.finalize_chat_tree_node("node-1", Some("summary-1".to_string()));
+        state
+            .create_chat_tree_child_node("node-2".to_string())
+            .expect("should create second chat-tree node");
+        state.finalize_chat_tree_node("node-2", Some("summary-2".to_string()));
+    }
+    let summary_job = session.register_chat_tree_summary_job("node-1").await;
+
+    assert!(!summary_job.is_cancelled());
+
+    session
+        .set_current_chat_tree_node_and_emit("event-1".to_string(), "node-2")
+        .await
+        .expect("existing node should succeed");
+    assert!(summary_job.is_cancelled());
 }
 
 #[tokio::test]
@@ -3359,6 +3399,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         pending_mcp_server_refresh_config: Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        chat_tree_summary_jobs: Mutex::new(HashMap::new()),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         js_repl,

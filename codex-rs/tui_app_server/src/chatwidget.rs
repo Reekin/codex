@@ -1833,6 +1833,21 @@ impl ChatWidget {
         self.on_session_configured(thread_session_state_to_legacy_event(session));
     }
 
+    pub(crate) fn set_current_chat_tree_node(&mut self, node_id: String) {
+        let Some(thread_id) = self.thread_id else {
+            self.add_error_message("No active thread is available.".to_string());
+            return;
+        };
+        if self.bottom_pane.is_task_running() {
+            self.add_error_message(
+                "cannot switch chat-tree node while a task is running".to_string(),
+            );
+            return;
+        }
+        self.app_event_tx
+            .send(AppEvent::SetCurrentChatTreeNode { thread_id, node_id });
+    }
+
     fn emit_forked_thread_event(&self, forked_from_id: ThreadId) {
         let app_event_tx = self.app_event_tx.clone();
         let codex_home = self.config.codex_home.clone();
@@ -4568,6 +4583,9 @@ impl ChatWidget {
             SlashCommand::Fork => {
                 self.app_event_tx.send(AppEvent::ForkCurrentSession);
             }
+            SlashCommand::Chattree => {
+                self.app_event_tx.send(AppEvent::OpenChatTree);
+            }
             SlashCommand::Init => {
                 let init_target = self.config.cwd.join(DEFAULT_PROJECT_DOC_FILENAME);
                 if init_target.exists() {
@@ -6368,6 +6386,7 @@ impl ChatWidget {
             EventMsg::TurnComplete(TurnCompleteEvent {
                 last_agent_message, ..
             }) => self.on_task_complete(last_agent_message, from_replay),
+            EventMsg::ChatTreeNodeUpdated(_) | EventMsg::ChatTreeCurrentNodeChanged(_) => {}
             EventMsg::TokenCount(ev) => {
                 self.set_token_info(ev.info);
                 self.on_rate_limit_snapshot(ev.rate_limits);

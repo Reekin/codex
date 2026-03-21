@@ -1181,6 +1181,9 @@ pub enum EventMsg {
     /// Existing chat-tree node metadata was updated after turn completion.
     ChatTreeNodeUpdated(ChatTreeNodeUpdatedEvent),
 
+    /// Current chat-tree selection changed to an existing node.
+    ChatTreeCurrentNodeChanged(ChatTreeCurrentNodeChangedEvent),
+
     /// Usage update for the current session, including totals and last turn.
     /// Optional means unknown — UIs should not display when `None`.
     TokenCount(TokenCountEvent),
@@ -1790,6 +1793,11 @@ pub struct TurnCompleteEvent {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ChatTreeNodeUpdatedEvent {
     pub chat_tree: ChatTreeTurnInfo,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ChatTreeCurrentNodeChangedEvent {
+    pub node_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]

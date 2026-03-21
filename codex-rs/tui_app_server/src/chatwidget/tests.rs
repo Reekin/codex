@@ -6856,6 +6856,30 @@ async fn slash_fork_requests_current_fork() {
 }
 
 #[tokio::test]
+async fn slash_chattree_opens_chat_tree_overlay() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Chattree);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenChatTree));
+}
+
+#[tokio::test]
+async fn set_current_chat_tree_node_emits_app_event() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.set_current_chat_tree_node("node-1".to_string());
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SetCurrentChatTreeNode { thread_id: received_thread_id, node_id })
+            if received_thread_id == thread_id && node_id == "node-1"
+    );
+}
+
+#[tokio::test]
 async fn slash_rollout_displays_current_path() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
     let rollout_path = PathBuf::from("/tmp/codex-test-rollout.jsonl");

@@ -9,6 +9,7 @@ use crate::codex::PreviousTurnSettings;
 use crate::codex::SessionConfiguration;
 use crate::compact;
 use crate::context_manager::ContextManager;
+use crate::protocol::ChatTreeCurrentNodeChangedEvent;
 use crate::protocol::ChatTreeTurnInfo;
 use crate::protocol::EventMsg;
 use crate::protocol::RateLimitSnapshot;
@@ -361,6 +362,13 @@ impl SessionState {
                     if let Some(summary) = &chat_tree_turn.summary {
                         let _ =
                             chat_tree.update_node_summary(&chat_tree_turn.node_id, summary.clone());
+                    }
+                }
+                RolloutItem::EventMsg(EventMsg::ChatTreeCurrentNodeChanged(
+                    ChatTreeCurrentNodeChangedEvent { node_id },
+                )) => {
+                    if let Ok(snapshot) = chat_tree.set_current_and_get_snapshot(node_id) {
+                        history = snapshot;
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {

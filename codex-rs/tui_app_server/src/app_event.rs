@@ -72,8 +72,15 @@ pub(crate) struct ConnectorsSnapshot {
 pub(crate) enum AppEvent {
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
+    /// Open the chat-tree overlay for branch navigation.
+    OpenChatTree,
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
+    /// Switch the current node for the given thread's chat tree.
+    SetCurrentChatTreeNode {
+        thread_id: ThreadId,
+        node_id: String,
+    },
 
     /// Submit an op to the specified thread, regardless of current focus.
     SubmitThreadOp {

@@ -68,6 +68,7 @@ use codex_protocol::protocol::AgentReasoningEvent;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::BackgroundEventEvent;
+use codex_protocol::protocol::ChatTreeCurrentNodeChangedEvent;
 use codex_protocol::protocol::ChatTreeNodeUpdatedEvent;
 use codex_protocol::protocol::ChatTreeTurnInfo;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -6327,6 +6328,45 @@ async fn chat_tree_node_updated_event_keeps_existing_current_node() {
     });
 
     assert_eq!(chat.chat_tree_current_node_id.as_deref(), Some("turn-2"));
+}
+
+#[tokio::test]
+async fn chat_tree_current_node_changed_event_updates_current_node() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event(Event {
+        id: "evt-1".to_string(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: None,
+            chat_tree: Some(ChatTreeTurnInfo {
+                node_id: "turn-1".to_string(),
+                parent_node_id: None,
+                summary: Some("first".to_string()),
+            }),
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "evt-2".to_string(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-2".to_string(),
+            last_agent_message: None,
+            chat_tree: Some(ChatTreeTurnInfo {
+                node_id: "turn-2".to_string(),
+                parent_node_id: Some("turn-1".to_string()),
+                summary: Some("second".to_string()),
+            }),
+        }),
+    });
+
+    chat.handle_codex_event(Event {
+        id: "evt-3".to_string(),
+        msg: EventMsg::ChatTreeCurrentNodeChanged(ChatTreeCurrentNodeChangedEvent {
+            node_id: "turn-1".to_string(),
+        }),
+    });
+
+    assert_eq!(chat.chat_tree_current_node_id.as_deref(), Some("turn-1"));
 }
 
 #[tokio::test]

@@ -1,5 +1,6 @@
 use super::*;
 use crate::codex::make_session_configuration_for_tests;
+use crate::protocol::ChatTreeCurrentNodeChangedEvent;
 use crate::protocol::EventMsg;
 use crate::protocol::RateLimitWindow;
 use crate::protocol::TurnCompleteEvent;
@@ -397,6 +398,65 @@ async fn restore_from_rollout_uses_persisted_parent_node_id() {
             assistant_message("turn-a-assistant"),
             user_message("turn-c-user"),
             assistant_message("turn-c-assistant"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn restore_from_rollout_replays_explicit_current_node_change() {
+    let session_configuration = make_session_configuration_for_tests().await;
+    let mut state = SessionState::new(session_configuration);
+    let policy = TruncationPolicy::Bytes(usize::MAX);
+
+    let turn_started = |turn_id: &str| {
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: turn_id.to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }))
+    };
+    let turn_complete = |turn_id: &str, parent_node_id: Option<&str>, summary: &str| {
+        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: turn_id.to_string(),
+            last_agent_message: None,
+            chat_tree: Some(ChatTreeTurnInfo {
+                node_id: turn_id.to_string(),
+                parent_node_id: parent_node_id.map(std::string::ToString::to_string),
+                summary: Some(summary.to_string()),
+            }),
+        }))
+    };
+
+    let rollout_items = vec![
+        turn_started("node-a"),
+        RolloutItem::ResponseItem(user_message("turn-a-user")),
+        RolloutItem::ResponseItem(assistant_message("turn-a-assistant")),
+        turn_complete("node-a", None, "summary-a"),
+        turn_started("node-b"),
+        RolloutItem::ResponseItem(user_message("turn-b-user")),
+        RolloutItem::ResponseItem(assistant_message("turn-b-assistant")),
+        turn_complete("node-b", Some("node-a"), "summary-b"),
+        turn_started("node-c"),
+        RolloutItem::ResponseItem(user_message("turn-c-user")),
+        RolloutItem::ResponseItem(assistant_message("turn-c-assistant")),
+        turn_complete("node-c", Some("node-a"), "summary-c"),
+        RolloutItem::EventMsg(EventMsg::ChatTreeCurrentNodeChanged(
+            ChatTreeCurrentNodeChangedEvent {
+                node_id: "node-b".to_string(),
+            },
+        )),
+    ];
+
+    state.restore_from_rollout(&rollout_items, &[], policy);
+
+    assert_eq!(state.current_chat_tree_node_id().as_deref(), Some("node-b"));
+    assert_eq!(
+        state.clone_history().raw_items(),
+        &[
+            user_message("turn-a-user"),
+            assistant_message("turn-a-assistant"),
+            user_message("turn-b-user"),
+            assistant_message("turn-b-assistant"),
         ]
     );
 }

@@ -236,7 +236,7 @@ use crate::protocol::AgentReasoningSectionBreakEvent;
 use crate::protocol::ApplyPatchApprovalRequestEvent;
 use crate::protocol::AskForApproval;
 use crate::protocol::BackgroundEventEvent;
-use crate::protocol::ChatTreeNodeUpdatedEvent;
+use crate::protocol::ChatTreeCurrentNodeChangedEvent;
 use crate::protocol::ChatTreeTurnInfo;
 use crate::protocol::CompactedItem;
 use crate::protocol::DeprecationNoticeEvent;
@@ -765,6 +765,7 @@ pub(crate) struct Session {
     pending_mcp_server_refresh_config: Mutex<Option<McpServerRefreshConfig>>,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+    chat_tree_summary_jobs: Mutex<HashMap<String, CancellationToken>>,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
@@ -1846,6 +1847,7 @@ impl Session {
             pending_mcp_server_refresh_config: Mutex::new(None),
             conversation: Arc::new(RealtimeConversationManager::new()),
             active_turn: Mutex::new(None),
+            chat_tree_summary_jobs: Mutex::new(HashMap::new()),
             guardian_review_session: GuardianReviewSessionManager::default(),
             services,
             js_repl,
@@ -2235,7 +2237,8 @@ impl Session {
         rollout_items.iter().any(|item| match item {
             RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => event.chat_tree.is_some(),
             RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => event.chat_tree.is_some(),
-            RolloutItem::EventMsg(EventMsg::ChatTreeNodeUpdated(_)) => true,
+            RolloutItem::EventMsg(EventMsg::ChatTreeNodeUpdated(_))
+            | RolloutItem::EventMsg(EventMsg::ChatTreeCurrentNodeChanged(_)) => true,
             _ => false,
         })
     }
@@ -2637,7 +2640,7 @@ impl Session {
         self.deliver_event_raw(event).await;
     }
 
-    async fn deliver_event_raw(&self, event: Event) {
+    pub(crate) async fn deliver_event_raw(&self, event: Event) {
         // Record the last known agent status.
         if let Some(status) = agent_status_from_event(&event.msg) {
             self.agent_status.send_replace(status);
@@ -3400,18 +3403,48 @@ impl Session {
         event_id: String,
         node_id: &str,
     ) -> Result<(), String> {
-        let chat_tree = self.set_current_chat_tree_node(node_id).await?;
-        self.send_event_raw(Event {
+        self.set_current_chat_tree_node(node_id).await?;
+        self.cancel_all_chat_tree_summary_jobs().await;
+        let event = Event {
             id: event_id,
-            msg: EventMsg::ChatTreeNodeUpdated(ChatTreeNodeUpdatedEvent { chat_tree }),
-        })
-        .await;
+            msg: EventMsg::ChatTreeCurrentNodeChanged(ChatTreeCurrentNodeChangedEvent {
+                node_id: node_id.to_string(),
+            }),
+        };
+        self.persist_rollout_items(&[RolloutItem::EventMsg(event.msg.clone())])
+            .await;
+        self.flush_rollout().await;
+        self.deliver_event_raw(event).await;
         Ok(())
     }
 
     pub(crate) async fn current_chat_tree_node_id(&self) -> Option<String> {
         let state = self.state.lock().await;
         state.current_chat_tree_node_id()
+    }
+
+    pub(crate) async fn register_chat_tree_summary_job(&self, node_id: &str) -> CancellationToken {
+        let cancellation_token = CancellationToken::new();
+        let mut jobs = self.chat_tree_summary_jobs.lock().await;
+        if let Some(existing) = jobs.insert(node_id.to_string(), cancellation_token.clone()) {
+            existing.cancel();
+        }
+        cancellation_token
+    }
+
+    pub(crate) async fn finish_chat_tree_summary_job(&self, node_id: &str) {
+        let mut jobs = self.chat_tree_summary_jobs.lock().await;
+        jobs.remove(node_id);
+    }
+
+    pub(crate) async fn cancel_all_chat_tree_summary_jobs(&self) {
+        let jobs = {
+            let mut jobs = self.chat_tree_summary_jobs.lock().await;
+            jobs.drain().map(|(_, token)| token).collect::<Vec<_>>()
+        };
+        for token in jobs {
+            token.cancel();
+        }
     }
 
     pub(crate) async fn replace_compacted_history(
@@ -5159,6 +5192,7 @@ mod handlers {
 
     pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
         sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        sess.cancel_all_chat_tree_summary_jobs().await;
         let _ = sess.conversation.shutdown().await;
         sess.services
             .unified_exec_manager
@@ -6778,7 +6812,8 @@ fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         | EventMsg::CollabCloseEnd(_)
         | EventMsg::CollabResumeBegin(_)
         | EventMsg::CollabResumeEnd(_)
-        | EventMsg::ChatTreeNodeUpdated(_) => None,
+        | EventMsg::ChatTreeNodeUpdated(_)
+        | EventMsg::ChatTreeCurrentNodeChanged(_) => None,
     }
 }
 
