@@ -726,14 +726,29 @@ async fn thread_resume_after_interrupted_branch_returns_interrupted_branch_turn(
             responses::ev_completed("resp-1"),
         ]),
         responses::sse(vec![
+            responses::ev_response_created("resp-1-summary"),
+            responses::ev_assistant_message("msg-1-summary", "summary 1"),
+            responses::ev_completed("resp-1-summary"),
+        ]),
+        responses::sse(vec![
             responses::ev_response_created("resp-2"),
             responses::ev_assistant_message("msg-2", "Done 2"),
             responses::ev_completed("resp-2"),
         ]),
         responses::sse(vec![
+            responses::ev_response_created("resp-2-summary"),
+            responses::ev_assistant_message("msg-2-summary", "summary 2"),
+            responses::ev_completed("resp-2-summary"),
+        ]),
+        responses::sse(vec![
             responses::ev_response_created("resp-3"),
             responses::ev_assistant_message("msg-3", "Done 3"),
             responses::ev_completed("resp-3"),
+        ]),
+        responses::sse(vec![
+            responses::ev_response_created("resp-3-summary"),
+            responses::ev_assistant_message("msg-3-summary", "summary 3"),
+            responses::ev_completed("resp-3-summary"),
         ]),
         create_shell_command_sse_response(shell_command.clone(), None, Some(10_000), "call_sleep")?,
     ])
