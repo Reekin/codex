@@ -932,6 +932,110 @@ stream_max_retries = 0
 }
 
 #[tokio::test]
+async fn thread_chat_tree_set_current_persists_and_notifies_after_restart() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let user_messages = |thread: &Thread| {
+        thread
+            .turns
+            .iter()
+            .flat_map(|turn| turn.items.iter())
+            .filter_map(|item| match item {
+                ThreadItem::UserMessage { content, .. } => Some(content),
+                _ => None,
+            })
+            .flat_map(|content| content.iter())
+            .filter_map(|input| match input {
+                UserInput::Text { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut primary = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, primary.initialize()).await??;
+
+    let start_id = primary
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("gpt-5.1-codex-max".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+
+    complete_turn(&mut primary, &thread.id, "root").await?;
+
+    let root_tree_read_id = primary
+        .send_thread_chat_tree_read_request(ThreadChatTreeReadParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    let root_tree_read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.read_stream_until_response_message(RequestId::Integer(root_tree_read_id)),
+    )
+    .await??;
+    let ThreadChatTreeReadResponse { chat_tree, .. } =
+        to_response::<ThreadChatTreeReadResponse>(root_tree_read_resp)?;
+    let root_node_id = chat_tree.current_node_id.expect("root node id");
+
+    complete_turn(&mut primary, &thread.id, "left").await?;
+
+    let set_current_id = primary
+        .send_thread_chat_tree_set_current_request(ThreadChatTreeSetCurrentParams {
+            thread_id: thread.id.clone(),
+            node_id: root_node_id.clone(),
+        })
+        .await?;
+    let set_current_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.read_stream_until_response_message(RequestId::Integer(set_current_id)),
+    )
+    .await??;
+    let ThreadChatTreeSetCurrentResponse {
+        current_node_id, ..
+    } = to_response::<ThreadChatTreeSetCurrentResponse>(set_current_resp)?;
+    assert_eq!(current_node_id, root_node_id);
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.read_stream_until_notification_message("thread/chatTree/current/changed"),
+    )
+    .await??;
+
+    drop(primary);
+
+    let mut secondary = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, secondary.initialize()).await??;
+
+    let resume_id = secondary
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        secondary.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let ThreadResumeResponse {
+        thread: resumed_thread,
+        ..
+    } = to_response::<ThreadResumeResponse>(resume_resp)?;
+    assert_eq!(user_messages(&resumed_thread), vec!["root".to_string()]);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_resume_rejects_history_when_thread_is_running() -> Result<()> {
     let server = responses::start_mock_server().await;
     let first_body = responses::sse(vec![
