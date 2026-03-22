@@ -81,6 +81,10 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         node_id: String,
     },
+    /// Refresh the active thread snapshot after a chat-tree update arrives.
+    RefreshActiveThreadSnapshot {
+        thread_id: ThreadId,
+    },
 
     /// Submit an op to the specified thread, regardless of current focus.
     SubmitThreadOp {

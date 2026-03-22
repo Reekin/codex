@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadChatTreeTurnInfo": {
+      "properties": {
+        "nodeId": {
+          "type": "string"
+        },
+        "parentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nodeId"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "chatTree": {
+      "$ref": "#/definitions/ThreadChatTreeTurnInfo"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "chatTree",
+    "threadId"
+  ],
+  "title": "ThreadChatTreeNodeUpdatedNotification",
+  "type": "object"
+}

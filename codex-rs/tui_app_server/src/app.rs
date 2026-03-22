@@ -2561,7 +2561,7 @@ impl App {
         Ok(())
     }
 
-    async fn refresh_active_thread_after_chat_tree_switch(
+    async fn refresh_active_thread_snapshot(
         &mut self,
         tui: &mut tui::Tui,
         app_server: &mut AppServerSession,
@@ -2592,6 +2592,7 @@ impl App {
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
         self.drain_active_thread_events(tui).await?;
+        self.refresh_pending_thread_approvals().await;
 
         Ok(())
     }
@@ -4480,7 +4481,13 @@ impl App {
                     self.chat_widget
                         .add_error_message(format!("Failed to switch chat-tree node: {err}"));
                 } else {
-                    self.refresh_active_thread_after_chat_tree_switch(tui, app_server, thread_id)
+                    self.refresh_active_thread_snapshot(tui, app_server, thread_id)
+                        .await?;
+                }
+            }
+            AppEvent::RefreshActiveThreadSnapshot { thread_id } => {
+                if self.active_thread_id == Some(thread_id) {
+                    self.refresh_active_thread_snapshot(tui, app_server, thread_id)
                         .await?;
                 }
             }

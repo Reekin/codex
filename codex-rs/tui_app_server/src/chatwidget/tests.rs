@@ -6880,6 +6880,56 @@ async fn set_current_chat_tree_node_emits_app_event() {
 }
 
 #[tokio::test]
+async fn chat_tree_node_updated_requests_active_thread_refresh() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.handle_server_notification(
+        ServerNotification::ThreadChatTreeNodeUpdated(
+            codex_app_server_protocol::ThreadChatTreeNodeUpdatedNotification {
+                thread_id: thread_id.to_string(),
+                chat_tree: codex_app_server_protocol::ThreadChatTreeTurnInfo {
+                    node_id: "node-1".to_string(),
+                    parent_node_id: None,
+                    summary: Some("summary".to_string()),
+                },
+            },
+        ),
+        None,
+    );
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::RefreshActiveThreadSnapshot { thread_id: received_thread_id })
+            if received_thread_id == thread_id
+    );
+}
+
+#[tokio::test]
+async fn chat_tree_current_node_changed_requests_active_thread_refresh() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+
+    chat.handle_server_notification(
+        ServerNotification::ThreadChatTreeCurrentNodeChanged(
+            codex_app_server_protocol::ThreadChatTreeCurrentNodeChangedNotification {
+                thread_id: thread_id.to_string(),
+                node_id: "node-2".to_string(),
+            },
+        ),
+        None,
+    );
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::RefreshActiveThreadSnapshot { thread_id: received_thread_id })
+            if received_thread_id == thread_id
+    );
+}
+
+#[tokio::test]
 async fn slash_rollout_displays_current_path() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
     let rollout_path = PathBuf::from("/tmp/codex-test-rollout.jsonl");

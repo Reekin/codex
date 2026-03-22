@@ -68,6 +68,8 @@ use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
+use codex_app_server_protocol::ThreadChatTreeCurrentNodeChangedNotification;
+use codex_app_server_protocol::ThreadChatTreeNodeUpdatedNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::ToolRequestUserInputParams;
@@ -5862,6 +5864,15 @@ impl ChatWidget {
             ServerNotification::TurnCompleted(notification) => {
                 self.handle_turn_completed_notification(notification, replay_kind);
             }
+            ServerNotification::ThreadChatTreeNodeUpdated(notification) => {
+                self.handle_thread_chat_tree_node_updated_notification(notification, from_replay);
+            }
+            ServerNotification::ThreadChatTreeCurrentNodeChanged(notification) => {
+                self.handle_thread_chat_tree_current_node_changed_notification(
+                    notification,
+                    from_replay,
+                );
+            }
             ServerNotification::ItemStarted(notification) => {
                 self.handle_item_started_notification(notification);
             }
@@ -6141,6 +6152,50 @@ impl ChatWidget {
                 }
             }
             TurnStatus::InProgress => {}
+        }
+    }
+
+    fn handle_thread_chat_tree_node_updated_notification(
+        &mut self,
+        notification: ThreadChatTreeNodeUpdatedNotification,
+        from_replay: bool,
+    ) {
+        if from_replay {
+            return;
+        }
+        match ThreadId::from_string(&notification.thread_id) {
+            Ok(thread_id) => self
+                .app_event_tx
+                .send(AppEvent::RefreshActiveThreadSnapshot { thread_id }),
+            Err(err) => {
+                warn!(
+                    thread_id = notification.thread_id,
+                    error = %err,
+                    "ignoring app-server chat-tree node update with invalid thread_id"
+                );
+            }
+        }
+    }
+
+    fn handle_thread_chat_tree_current_node_changed_notification(
+        &mut self,
+        notification: ThreadChatTreeCurrentNodeChangedNotification,
+        from_replay: bool,
+    ) {
+        if from_replay {
+            return;
+        }
+        match ThreadId::from_string(&notification.thread_id) {
+            Ok(thread_id) => self
+                .app_event_tx
+                .send(AppEvent::RefreshActiveThreadSnapshot { thread_id }),
+            Err(err) => {
+                warn!(
+                    thread_id = notification.thread_id,
+                    error = %err,
+                    "ignoring app-server chat-tree current-node change with invalid thread_id"
+                );
+            }
         }
     }
 

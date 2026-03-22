@@ -76,6 +76,9 @@ use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequestPayload;
 use codex_app_server_protocol::SkillsChangedNotification;
 use codex_app_server_protocol::TerminalInteractionNotification;
+use codex_app_server_protocol::ThreadChatTreeCurrentNodeChangedNotification;
+use codex_app_server_protocol::ThreadChatTreeNodeUpdatedNotification;
+use codex_app_server_protocol::ThreadChatTreeTurnInfo;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadNameUpdatedNotification;
 use codex_app_server_protocol::ThreadRealtimeClosedNotification;
@@ -112,6 +115,8 @@ use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynam
 use codex_protocol::dynamic_tools::DynamicToolResponse as CoreDynamicToolResponse;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
+use codex_protocol::protocol::ChatTreeCurrentNodeChangedEvent;
+use codex_protocol::protocol::ChatTreeNodeUpdatedEvent;
 use codex_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -298,6 +303,13 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .note_turn_completed(&conversation_id.to_string(), turn_failed)
                 .await;
             handle_turn_complete(conversation_id, event_turn_id, &outgoing, &thread_state).await;
+        }
+        EventMsg::ChatTreeNodeUpdated(payload) => {
+            handle_chat_tree_node_updated(conversation_id, payload, api_version, &outgoing).await;
+        }
+        EventMsg::ChatTreeCurrentNodeChanged(payload) => {
+            handle_chat_tree_current_node_changed(conversation_id, payload, api_version, &outgoing)
+                .await;
         }
         EventMsg::SkillsUpdateAvailable => {
             if let ApiVersion::V2 = api_version {
@@ -1897,6 +1909,46 @@ async fn emit_turn_completed_with_status(
     outgoing
         .send_server_notification(ServerNotification::TurnCompleted(notification))
         .await;
+}
+
+async fn handle_chat_tree_node_updated(
+    conversation_id: ThreadId,
+    payload: ChatTreeNodeUpdatedEvent,
+    api_version: ApiVersion,
+    outgoing: &ThreadScopedOutgoingMessageSender,
+) {
+    if let ApiVersion::V2 = api_version {
+        let notification = ThreadChatTreeNodeUpdatedNotification {
+            thread_id: conversation_id.to_string(),
+            chat_tree: ThreadChatTreeTurnInfo {
+                node_id: payload.chat_tree.node_id,
+                parent_node_id: payload.chat_tree.parent_node_id,
+                summary: payload.chat_tree.summary,
+            },
+        };
+        outgoing
+            .send_server_notification(ServerNotification::ThreadChatTreeNodeUpdated(notification))
+            .await;
+    }
+}
+
+async fn handle_chat_tree_current_node_changed(
+    conversation_id: ThreadId,
+    payload: ChatTreeCurrentNodeChangedEvent,
+    api_version: ApiVersion,
+    outgoing: &ThreadScopedOutgoingMessageSender,
+) {
+    if let ApiVersion::V2 = api_version {
+        let notification = ThreadChatTreeCurrentNodeChangedNotification {
+            thread_id: conversation_id.to_string(),
+            node_id: payload.node_id,
+        };
+        outgoing
+            .send_server_notification(ServerNotification::ThreadChatTreeCurrentNodeChanged(
+                notification,
+            ))
+            .await;
+    }
 }
 
 async fn complete_file_change_item(
@@ -3783,6 +3835,85 @@ mod tests {
         .await;
 
         assert!(rx.try_recv().is_err(), "no messages expected");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_chat_tree_node_updated_emits_v2_notification() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            ThreadId::new(),
+        );
+        let conversation_id = ThreadId::new();
+
+        handle_chat_tree_node_updated(
+            conversation_id,
+            ChatTreeNodeUpdatedEvent {
+                chat_tree: codex_protocol::protocol::ChatTreeTurnInfo {
+                    node_id: "node-1".to_string(),
+                    parent_node_id: Some("node-0".to_string()),
+                    summary: Some("summary".to_string()),
+                },
+            },
+            ApiVersion::V2,
+            &outgoing,
+        )
+        .await;
+
+        let msg = recv_broadcast_message(&mut rx).await?;
+        match msg {
+            OutgoingMessage::AppServerNotification(
+                ServerNotification::ThreadChatTreeNodeUpdated(notification),
+            ) => {
+                assert_eq!(notification.thread_id, conversation_id.to_string());
+                assert_eq!(notification.chat_tree.node_id, "node-1");
+                assert_eq!(
+                    notification.chat_tree.parent_node_id.as_deref(),
+                    Some("node-0")
+                );
+                assert_eq!(notification.chat_tree.summary.as_deref(), Some("summary"));
+            }
+            other => bail!("unexpected message: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "no extra messages expected");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handle_chat_tree_current_node_changed_emits_v2_notification() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            ThreadId::new(),
+        );
+        let conversation_id = ThreadId::new();
+
+        handle_chat_tree_current_node_changed(
+            conversation_id,
+            ChatTreeCurrentNodeChangedEvent {
+                node_id: "node-2".to_string(),
+            },
+            ApiVersion::V2,
+            &outgoing,
+        )
+        .await;
+
+        let msg = recv_broadcast_message(&mut rx).await?;
+        match msg {
+            OutgoingMessage::AppServerNotification(
+                ServerNotification::ThreadChatTreeCurrentNodeChanged(notification),
+            ) => {
+                assert_eq!(notification.thread_id, conversation_id.to_string());
+                assert_eq!(notification.node_id, "node-2");
+            }
+            other => bail!("unexpected message: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "no extra messages expected");
         Ok(())
     }
 }

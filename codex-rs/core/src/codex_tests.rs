@@ -2576,7 +2576,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
 }
 
 #[tokio::test]
-async fn abort_all_tasks_cancels_chat_tree_summary_jobs_without_active_turn() {
+async fn abort_all_tasks_keeps_chat_tree_summary_jobs_for_completed_turns() {
     let (session, _turn_context) = make_session_and_context().await;
     let summary_job = session.register_chat_tree_summary_job("node-1").await;
 
@@ -2586,11 +2586,11 @@ async fn abort_all_tasks_cancels_chat_tree_summary_jobs_without_active_turn() {
         .abort_all_tasks(TurnAbortReason::Interrupted)
         .await;
 
-    assert!(summary_job.is_cancelled());
+    assert!(!summary_job.is_cancelled());
 }
 
 #[tokio::test]
-async fn setting_current_chat_tree_node_cancels_chat_tree_summary_jobs() {
+async fn setting_current_chat_tree_node_keeps_chat_tree_summary_jobs() {
     let (session, _turn_context) = make_session_and_context().await;
     {
         let mut state = session.state.lock().await;
@@ -2611,7 +2611,7 @@ async fn setting_current_chat_tree_node_cancels_chat_tree_summary_jobs() {
         .set_current_chat_tree_node_and_emit("event-1".to_string(), "node-2")
         .await
         .expect("existing node should succeed");
-    assert!(summary_job.is_cancelled());
+    assert!(!summary_job.is_cancelled());
 }
 
 #[tokio::test]

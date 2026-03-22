@@ -3404,7 +3404,6 @@ impl Session {
         node_id: &str,
     ) -> Result<(), String> {
         self.set_current_chat_tree_node(node_id).await?;
-        self.cancel_all_chat_tree_summary_jobs().await;
         let event = Event {
             id: event_id,
             msg: EventMsg::ChatTreeCurrentNodeChanged(ChatTreeCurrentNodeChangedEvent {

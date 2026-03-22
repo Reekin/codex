@@ -261,7 +261,6 @@ impl Session {
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
-        self.cancel_all_chat_tree_summary_jobs().await;
         if let Some(mut active_turn) = self.take_active_turn().await {
             for task in active_turn.drain_tasks() {
                 self.handle_task_abort(task, reason.clone()).await;

@@ -7953,6 +7953,46 @@
           "properties": {
             "method": {
               "enum": [
+                "thread/chatTree/node/updated"
+              ],
+              "title": "Thread/chatTree/node/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadChatTreeNodeUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/chatTree/node/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "thread/chatTree/current/changed"
+              ],
+              "title": "Thread/chatTree/current/changedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadChatTreeCurrentNodeChangedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/chatTree/current/changedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "thread/tokenUsage/updated"
               ],
               "title": "Thread/tokenUsage/updatedNotificationMethod",
@@ -9503,6 +9543,23 @@
       ],
       "type": "object"
     },
+    "ThreadChatTreeCurrentNodeChangedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "nodeId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "nodeId",
+        "threadId"
+      ],
+      "title": "ThreadChatTreeCurrentNodeChangedNotification",
+      "type": "object"
+    },
     "ThreadChatTreeNode": {
       "properties": {
         "nodeId": {
@@ -9536,6 +9593,23 @@
         "nodeId",
         "order"
       ],
+      "type": "object"
+    },
+    "ThreadChatTreeNodeUpdatedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "chatTree": {
+          "$ref": "#/definitions/ThreadChatTreeTurnInfo"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chatTree",
+        "threadId"
+      ],
+      "title": "ThreadChatTreeNodeUpdatedNotification",
       "type": "object"
     },
     "ThreadChatTreeReadParams": {
@@ -9600,6 +9674,29 @@
         "threadId"
       ],
       "title": "ThreadChatTreeSetCurrentResponse",
+      "type": "object"
+    },
+    "ThreadChatTreeTurnInfo": {
+      "properties": {
+        "nodeId": {
+          "type": "string"
+        },
+        "parentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nodeId"
+      ],
       "type": "object"
     },
     "ThreadClosedNotification": {

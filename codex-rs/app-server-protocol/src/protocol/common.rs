@@ -876,6 +876,8 @@ server_notification_definitions! {
     ThreadClosed => "thread/closed" (v2::ThreadClosedNotification),
     SkillsChanged => "skills/changed" (v2::SkillsChangedNotification),
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
+    ThreadChatTreeNodeUpdated => "thread/chatTree/node/updated" (v2::ThreadChatTreeNodeUpdatedNotification),
+    ThreadChatTreeCurrentNodeChanged => "thread/chatTree/current/changed" (v2::ThreadChatTreeCurrentNodeChangedNotification),
     ThreadTokenUsageUpdated => "thread/tokenUsage/updated" (v2::ThreadTokenUsageUpdatedNotification),
     TurnStarted => "turn/started" (v2::TurnStartedNotification),
     HookStarted => "hook/started" (v2::HookStartedNotification),
