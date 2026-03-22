@@ -57,6 +57,8 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::ThreadChatTree;
+use codex_app_server_protocol::ThreadChatTreeTurnInfo;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnStatus;
@@ -446,6 +448,40 @@ struct SessionSummary {
     resume_command: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+struct ThreadChatTreeProjection {
+    node_updates: HashMap<String, ThreadChatTreeTurnInfo>,
+}
+
+impl ThreadChatTreeProjection {
+    fn record_node_update(&mut self, update: &ThreadChatTreeTurnInfo) {
+        let entry = self
+            .node_updates
+            .entry(update.node_id.clone())
+            .or_insert_with(|| update.clone());
+        if update.parent_node_id.is_some() {
+            entry.parent_node_id = update.parent_node_id.clone();
+        }
+        if update.summary.is_some() {
+            entry.summary = update.summary.clone();
+        }
+    }
+
+    fn merge_into(&self, chat_tree: &mut ThreadChatTree) {
+        for node in &mut chat_tree.nodes {
+            let Some(update) = self.node_updates.get(&node.node_id) else {
+                continue;
+            };
+            if update.parent_node_id.is_some() {
+                node.parent_node_id = update.parent_node_id.clone();
+            }
+            if update.summary.is_some() {
+                node.summary = update.summary.clone();
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ThreadEventSnapshot {
     session: Option<ThreadSessionState>,
@@ -479,6 +515,7 @@ enum ThreadBufferedEvent {
 struct ThreadEventStore {
     session: Option<ThreadSessionState>,
     turns: Vec<Turn>,
+    chat_tree_projection: ThreadChatTreeProjection,
     buffer: VecDeque<ThreadBufferedEvent>,
     pending_interactive_replay: PendingInteractiveReplayState,
     pending_local_legacy_rollbacks: VecDeque<u32>,
@@ -500,6 +537,7 @@ impl ThreadEventStore {
         Self {
             session: None,
             turns: Vec::new(),
+            chat_tree_projection: ThreadChatTreeProjection::default(),
             buffer: VecDeque::new(),
             pending_interactive_replay: PendingInteractiveReplayState::default(),
             pending_local_legacy_rollbacks: VecDeque::new(),
@@ -551,6 +589,10 @@ impl ThreadEventStore {
             }
             ServerNotification::ThreadClosed(_) => {
                 self.active_turn_id = None;
+            }
+            ServerNotification::ThreadChatTreeNodeUpdated(notification) => {
+                self.chat_tree_projection
+                    .record_node_update(&notification.chat_tree);
             }
             _ => {}
         }
@@ -637,6 +679,10 @@ impl ThreadEventStore {
                 .collect(),
             input_state: self.input_state.clone(),
         }
+    }
+
+    fn merge_chat_tree_projection(&self, chat_tree: &mut ThreadChatTree) {
+        self.chat_tree_projection.merge_into(chat_tree);
     }
 
     fn note_outbound_op<T>(&mut self, op: T)
@@ -3432,7 +3478,11 @@ impl App {
 
                 match app_server.thread_chat_tree_read(thread_id).await {
                     Ok(response) => {
-                        let chat_tree = response.chat_tree;
+                        let mut chat_tree = response.chat_tree;
+                        if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+                            let store = channel.store.lock().await;
+                            store.merge_chat_tree_projection(&mut chat_tree);
+                        }
                         let current_node_id = chat_tree.current_node_id.clone();
                         let nodes_by_id = chat_tree
                             .nodes
@@ -8091,6 +8141,73 @@ guardian_approval = true
         ));
 
         assert!(store.snapshot().requires_turn_refresh());
+    }
+
+    #[test]
+    fn thread_event_store_records_chat_tree_node_update_projection() {
+        let thread_id = ThreadId::new();
+        let mut store = ThreadEventStore::new(8);
+        store.push_notification(ServerNotification::ThreadChatTreeNodeUpdated(
+            codex_app_server_protocol::ThreadChatTreeNodeUpdatedNotification {
+                thread_id: thread_id.to_string(),
+                chat_tree: ThreadChatTreeTurnInfo {
+                    node_id: "node-2".to_string(),
+                    parent_node_id: Some("node-1".to_string()),
+                    summary: Some("branch summary".to_string()),
+                },
+            },
+        ));
+
+        assert_eq!(
+            store.chat_tree_projection.node_updates.get("node-2"),
+            Some(&ThreadChatTreeTurnInfo {
+                node_id: "node-2".to_string(),
+                parent_node_id: Some("node-1".to_string()),
+                summary: Some("branch summary".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn thread_event_store_projection_survives_notification_rebase() {
+        let thread_id = ThreadId::new();
+        let mut store = ThreadEventStore::new(8);
+        store.push_notification(ServerNotification::ThreadChatTreeNodeUpdated(
+            codex_app_server_protocol::ThreadChatTreeNodeUpdatedNotification {
+                thread_id: thread_id.to_string(),
+                chat_tree: ThreadChatTreeTurnInfo {
+                    node_id: "node-2".to_string(),
+                    parent_node_id: Some("node-1".to_string()),
+                    summary: Some("branch summary".to_string()),
+                },
+            },
+        ));
+
+        store.rebase_buffer_after_session_refresh();
+        assert!(store.snapshot().events.is_empty());
+
+        let mut chat_tree = ThreadChatTree {
+            current_node_id: Some("node-1".to_string()),
+            nodes: vec![codex_app_server_protocol::ThreadChatTreeNode {
+                node_id: "node-2".to_string(),
+                parent_node_id: Some("node-1".to_string()),
+                summary: None,
+                turn_id: Some("turn-2".to_string()),
+                order: 1,
+            }],
+        };
+        store.merge_chat_tree_projection(&mut chat_tree);
+
+        assert_eq!(
+            chat_tree.nodes,
+            vec![codex_app_server_protocol::ThreadChatTreeNode {
+                node_id: "node-2".to_string(),
+                parent_node_id: Some("node-1".to_string()),
+                summary: Some("branch summary".to_string()),
+                turn_id: Some("turn-2".to_string()),
+                order: 1,
+            }]
+        );
     }
 
     #[test]
