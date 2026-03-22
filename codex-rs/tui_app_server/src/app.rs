@@ -454,6 +454,19 @@ struct ThreadEventSnapshot {
     input_state: Option<ThreadInputState>,
 }
 
+impl ThreadEventSnapshot {
+    fn requires_turn_refresh(&self) -> bool {
+        self.events.iter().any(|event| {
+            matches!(
+                event,
+                ThreadBufferedEvent::Notification(
+                    ServerNotification::ThreadChatTreeCurrentNodeChanged(_)
+                )
+            )
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ThreadBufferedEvent {
     Notification(ServerNotification),
@@ -2344,35 +2357,53 @@ impl App {
         Ok(())
     }
 
-    async fn refresh_snapshot_session_if_needed(
+    async fn refresh_snapshot_before_replay(
         &mut self,
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
         is_replay_only: bool,
         snapshot: &mut ThreadEventSnapshot,
     ) {
-        let should_refresh = !is_replay_only
+        let should_refresh_session = !is_replay_only
             && snapshot.session.as_ref().is_none_or(|session| {
                 session.model.trim().is_empty() || session.rollout_path.is_none()
             });
-        if !should_refresh {
+        if should_refresh_session {
+            match app_server
+                .resume_thread(self.config.clone(), thread_id)
+                .await
+            {
+                Ok(started) => {
+                    self.apply_refreshed_snapshot_thread(thread_id, started, snapshot)
+                        .await
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        error = %err,
+                        "failed to refresh inferred thread session before replay"
+                    );
+                }
+            }
             return;
         }
 
-        match app_server
-            .resume_thread(self.config.clone(), thread_id)
-            .await
-        {
-            Ok(started) => {
-                self.apply_refreshed_snapshot_thread(thread_id, started, snapshot)
-                    .await
-            }
-            Err(err) => {
-                tracing::warn!(
-                    thread_id = %thread_id,
-                    error = %err,
-                    "failed to refresh inferred thread session before replay"
-                );
+        if !is_replay_only && snapshot.requires_turn_refresh() {
+            match app_server
+                .thread_read(thread_id, /*include_turns*/ true)
+                .await
+            {
+                Ok(thread) => {
+                    self.apply_refreshed_snapshot_turns(thread_id, thread.turns, snapshot)
+                        .await;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        thread_id = %thread_id,
+                        error = %err,
+                        "failed to refresh thread turns before replay"
+                    );
+                }
             }
         }
     }
@@ -2390,6 +2421,23 @@ impl App {
             store.rebase_buffer_after_session_refresh();
         }
         snapshot.session = Some(session);
+        snapshot.turns = turns;
+        snapshot
+            .events
+            .retain(ThreadEventStore::event_survives_session_refresh);
+    }
+
+    async fn apply_refreshed_snapshot_turns(
+        &mut self,
+        thread_id: ThreadId,
+        turns: Vec<Turn>,
+        snapshot: &mut ThreadEventSnapshot,
+    ) {
+        if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.set_turns(turns.clone());
+            store.rebase_buffer_after_session_refresh();
+        }
         snapshot.turns = turns;
         snapshot
             .events
@@ -2532,13 +2580,8 @@ impl App {
             return Ok(());
         };
 
-        self.refresh_snapshot_session_if_needed(
-            app_server,
-            thread_id,
-            is_replay_only,
-            &mut snapshot,
-        )
-        .await;
+        self.refresh_snapshot_before_replay(app_server, thread_id, is_replay_only, &mut snapshot)
+            .await;
 
         self.active_thread_id = Some(thread_id);
         self.active_thread_rx = Some(receiver);
@@ -8034,6 +8077,20 @@ guardian_approval = true
         let snapshot = store.snapshot();
         assert!(snapshot.events.is_empty());
         assert_eq!(store.has_pending_thread_approvals(), false);
+    }
+
+    #[test]
+    fn thread_event_snapshot_requires_turn_refresh_for_chat_tree_current_node_change() {
+        let thread_id = ThreadId::new();
+        let mut store = ThreadEventStore::new(8);
+        store.push_notification(ServerNotification::ThreadChatTreeCurrentNodeChanged(
+            codex_app_server_protocol::ThreadChatTreeCurrentNodeChangedNotification {
+                thread_id: thread_id.to_string(),
+                node_id: "node-2".to_string(),
+            },
+        ));
+
+        assert!(store.snapshot().requires_turn_refresh());
     }
 
     #[test]
