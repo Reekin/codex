@@ -898,12 +898,38 @@ impl ChatTreeOverlay {
             .collect()
     }
 
+    fn ensure_selected_visible(&mut self, renderable_lines: &[Vec<String>], visible_rows: usize) {
+        if visible_rows == 0 || renderable_lines.is_empty() {
+            self.scroll_offset = 0;
+            return;
+        }
+
+        let selected_start = renderable_lines
+            .iter()
+            .take(self.selected_idx)
+            .map(Vec::len)
+            .sum::<usize>();
+        let selected_height = renderable_lines
+            .get(self.selected_idx)
+            .map(Vec::len)
+            .unwrap_or(0)
+            .max(1);
+        let selected_end = selected_start.saturating_add(selected_height);
+
+        if selected_start < self.scroll_offset {
+            self.scroll_offset = selected_start;
+        } else if selected_end > self.scroll_offset.saturating_add(visible_rows) {
+            self.scroll_offset = selected_end.saturating_sub(visible_rows);
+        }
+
+        let total_rows = renderable_lines.iter().map(Vec::len).sum::<usize>();
+        let max_offset = total_rows.saturating_sub(visible_rows);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
+    }
+
     fn render_content(&mut self, area: Rect, buf: &mut Buffer) {
         let lines = self.renderable_lines(area.width);
-        let total_height = lines.iter().map(Vec::len).sum::<usize>();
-        self.scroll_offset = self
-            .scroll_offset
-            .min(total_height.saturating_sub(area.height as usize));
+        self.ensure_selected_visible(&lines, usize::from(area.height));
 
         let mut flat_index = 0usize;
         let mut y = area.y;
@@ -1540,5 +1566,22 @@ mod tests {
         assert!(changed);
         assert!(overlay.is_done());
         assert_eq!(overlay.take_selected_node_id(), None);
+    }
+
+    #[test]
+    fn chat_tree_overlay_render_scrolls_selected_node_into_view() {
+        let mut overlay = ChatTreeOverlay::new(vec![
+            ("node-1".to_string(), 0, "first".to_string(), false),
+            ("node-2".to_string(), 0, "second".to_string(), false),
+            ("node-3".to_string(), 0, "third".to_string(), false),
+            ("node-4".to_string(), 0, "fourth".to_string(), true),
+        ]);
+        overlay.selected_idx = 3;
+
+        let area = Rect::new(0, 0, 20, 7);
+        let mut buf = Buffer::empty(area);
+        overlay.render(area, &mut buf);
+
+        assert_eq!(overlay.scroll_offset, 1);
     }
 }

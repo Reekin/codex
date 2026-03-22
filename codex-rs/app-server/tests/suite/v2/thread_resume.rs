@@ -1269,6 +1269,11 @@ async fn thread_resume_rejoins_running_thread_even_with_override_mismatch() -> R
 async fn thread_resume_replays_pending_command_execution_request_approval() -> Result<()> {
     let responses = vec![
         create_final_assistant_message_sse_response("seeded")?,
+        responses::sse(vec![
+            responses::ev_response_created("resp-seeded-summary"),
+            responses::ev_assistant_message("msg-seeded-summary", "seed summary"),
+            responses::ev_completed("resp-seeded-summary"),
+        ]),
         create_shell_command_sse_response(
             vec![
                 "python3".to_string(),
@@ -1280,6 +1285,11 @@ async fn thread_resume_replays_pending_command_execution_request_approval() -> R
             "call-1",
         )?,
         create_final_assistant_message_sse_response("done")?,
+        responses::sse(vec![
+            responses::ev_response_created("resp-done-summary"),
+            responses::ev_assistant_message("msg-done-summary", "done summary"),
+            responses::ev_completed("resp-done-summary"),
+        ]),
     ];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
     let codex_home = TempDir::new()?;
@@ -1396,7 +1406,7 @@ async fn thread_resume_replays_pending_command_execution_request_approval() -> R
         primary.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
-    wait_for_responses_request_count(&server, 3).await?;
+    wait_for_responses_request_count(&server, 5).await?;
 
     Ok(())
 }
@@ -1416,8 +1426,18 @@ async fn thread_resume_replays_pending_file_change_request_approval() -> Result<
 "#;
     let responses = vec![
         create_final_assistant_message_sse_response("seeded")?,
+        responses::sse(vec![
+            responses::ev_response_created("resp-seeded-summary"),
+            responses::ev_assistant_message("msg-seeded-summary", "seed summary"),
+            responses::ev_completed("resp-seeded-summary"),
+        ]),
         create_apply_patch_sse_response(patch, "patch-call")?,
         create_final_assistant_message_sse_response("done")?,
+        responses::sse(vec![
+            responses::ev_response_created("resp-done-summary"),
+            responses::ev_assistant_message("msg-done-summary", "done summary"),
+            responses::ev_completed("resp-done-summary"),
+        ]),
     ];
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
     create_config_toml(&codex_home, &server.uri())?;
@@ -1562,7 +1582,7 @@ async fn thread_resume_replays_pending_file_change_request_approval() -> Result<
         primary.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
-    wait_for_responses_request_count(&server, 3).await?;
+    wait_for_responses_request_count(&server, 5).await?;
 
     Ok(())
 }
@@ -1955,12 +1975,31 @@ async fn thread_resume_accepts_personality_override() -> Result<()> {
         responses::ev_assistant_message("msg-1", "Done"),
         responses::ev_completed("resp-1"),
     ]);
+    let first_summary_body = responses::sse(vec![
+        responses::ev_response_created("resp-1-summary"),
+        responses::ev_assistant_message("msg-1-summary", "seed summary"),
+        responses::ev_completed("resp-1-summary"),
+    ]);
     let second_body = responses::sse(vec![
         responses::ev_response_created("resp-2"),
         responses::ev_assistant_message("msg-2", "Done"),
         responses::ev_completed("resp-2"),
     ]);
-    let response_mock = responses::mount_sse_sequence(&server, vec![first_body, second_body]).await;
+    let second_summary_body = responses::sse(vec![
+        responses::ev_response_created("resp-2-summary"),
+        responses::ev_assistant_message("msg-2-summary", "hello summary"),
+        responses::ev_completed("resp-2-summary"),
+    ]);
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            first_body,
+            first_summary_body,
+            second_body,
+            second_summary_body,
+        ],
+    )
+    .await;
 
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
@@ -2045,7 +2084,14 @@ async fn thread_resume_accepts_personality_override() -> Result<()> {
 
     let requests = response_mock.requests();
     let request = requests
-        .last()
+        .iter()
+        .rev()
+        .find(|request| {
+            request
+                .message_input_texts("user")
+                .iter()
+                .any(|text| text == "Hello")
+        })
         .expect("expected request for resumed thread turn");
     let developer_texts = request.message_input_texts("developer");
     assert!(

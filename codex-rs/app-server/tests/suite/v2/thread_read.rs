@@ -8,6 +8,7 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::Thread;
+use codex_app_server_protocol::ThreadChatTreeCurrentNodeChangedNotification;
 use codex_app_server_protocol::ThreadChatTreeReadParams;
 use codex_app_server_protocol::ThreadChatTreeReadResponse;
 use codex_app_server_protocol::ThreadChatTreeSetCurrentParams;
@@ -286,6 +287,68 @@ async fn thread_read_projects_loaded_thread_to_selected_chat_tree_branch() -> Re
         current_node_id, ..
     } = to_response::<ThreadChatTreeSetCurrentResponse>(set_current_resp)?;
     assert_eq!(current_node_id, root_node_id);
+
+    let notification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/chatTree/current/changed"),
+    )
+    .await??;
+    let changed: ThreadChatTreeCurrentNodeChangedNotification = serde_json::from_value(
+        notification
+            .params
+            .expect("chat-tree current change params"),
+    )?;
+    assert_eq!(changed.thread_id, thread.id);
+    assert_eq!(changed.node_id, root_node_id);
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread.id.clone(),
+            include_turns: true,
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadReadResponse { thread: read } = to_response::<ThreadReadResponse>(read_resp)?;
+    assert_eq!(user_messages(&read), vec!["root".to_string()]);
+
+    drop(mcp);
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let ThreadResumeResponse {
+        thread: resumed, ..
+    } = to_response::<ThreadResumeResponse>(resume_resp)?;
+    assert_eq!(resumed.id, thread.id);
+
+    let tree_read_id = mcp
+        .send_thread_chat_tree_read_request(ThreadChatTreeReadParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    let tree_read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(tree_read_id)),
+    )
+    .await??;
+    let ThreadChatTreeReadResponse { chat_tree, .. } =
+        to_response::<ThreadChatTreeReadResponse>(tree_read_resp)?;
+    assert_eq!(chat_tree.current_node_id, Some(root_node_id.clone()));
 
     let read_id = mcp
         .send_thread_read_request(ThreadReadParams {
