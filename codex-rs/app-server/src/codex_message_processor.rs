@@ -41,6 +41,11 @@ use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::CancelLoginAccountStatus;
+use codex_app_server_protocol::ChatTreeProjection;
+use codex_app_server_protocol::ChatTreeReadParams;
+use codex_app_server_protocol::ChatTreeReadResponse;
+use codex_app_server_protocol::ChatTreeSetCurrentParams;
+use codex_app_server_protocol::ChatTreeSetCurrentResponse;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::CodexErrorInfo;
@@ -229,6 +234,8 @@ use codex_app_server_protocol::WindowsSandboxSetupCompletedNotification;
 use codex_app_server_protocol::WindowsSandboxSetupMode;
 use codex_app_server_protocol::WindowsSandboxSetupStartParams;
 use codex_app_server_protocol::WindowsSandboxSetupStartResponse;
+use codex_app_server_protocol::build_chat_tree_projection_from_rollout_items;
+use codex_app_server_protocol::build_projected_turns_from_rollout_items;
 use codex_app_server_protocol::build_turns_from_rollout_items;
 use codex_arg0::Arg0DispatchPaths;
 use codex_backend_client::AddCreditsNudgeCreditType as BackendAddCreditsNudgeCreditType;
@@ -240,6 +247,8 @@ use codex_config::CloudRequirementsLoadErrorCode;
 use codex_config::ConfigLayerStack;
 use codex_config::loader::project_trust_key;
 use codex_config::types::McpServerTransportConfig;
+use codex_core::ChatTreeError;
+use codex_core::ChatTreeProjectionSnapshot as CoreChatTreeProjectionSnapshot;
 use codex_core::CodexThread;
 use codex_core::CodexThreadTurnContextOverrides;
 use codex_core::ForkSnapshot;
@@ -508,6 +517,75 @@ fn thread_read_view_error(err: ThreadReadViewError) -> JSONRPCErrorError {
     match err {
         ThreadReadViewError::InvalidRequest(message) => invalid_request(message),
         ThreadReadViewError::Internal(message) => internal_error(message),
+    }
+}
+
+fn chat_tree_error(err: ChatTreeError, thread_id: &str) -> JSONRPCErrorError {
+    match err {
+        ChatTreeError::UnknownNode(node_id) => chat_tree_invalid_request(
+            "unknownNode",
+            format!("unknown chat tree node: {node_id}"),
+            serde_json::json!({
+                "threadId": thread_id,
+                "nodeId": node_id,
+            }),
+        ),
+        ChatTreeError::MissingSnapshot(node_id) => internal_error(format!(
+            "chat tree node has no restorable context snapshot: {node_id}"
+        )),
+        ChatTreeError::RevisionConflict { expected, actual } => chat_tree_invalid_request(
+            "revisionConflict",
+            format!("chat tree revision conflict: expected {expected}, actual {actual}"),
+            serde_json::json!({
+                "threadId": thread_id,
+                "expectedRevision": expected,
+                "actualRevision": actual,
+            }),
+        ),
+    }
+}
+
+fn chat_tree_invalid_request(
+    kind: &'static str,
+    message: impl Into<String>,
+    data: serde_json::Value,
+) -> JSONRPCErrorError {
+    let mut data = match data {
+        serde_json::Value::Object(data) => data,
+        _ => serde_json::Map::new(),
+    };
+    data.insert(
+        "kind".to_string(),
+        serde_json::Value::String(kind.to_string()),
+    );
+    JSONRPCErrorError {
+        code: INVALID_REQUEST_ERROR_CODE,
+        message: message.into(),
+        data: Some(serde_json::Value::Object(data)),
+    }
+}
+
+fn chat_tree_projection_from_core(
+    projection: CoreChatTreeProjectionSnapshot,
+) -> ChatTreeProjection {
+    ChatTreeProjection {
+        version: projection.version,
+        revision: projection.revision,
+        current_node_id: projection.current_node_id,
+        visible_node_ids: projection.visible_node_ids,
+        visible_turn_ids: projection.visible_turn_ids,
+        nodes: projection
+            .nodes
+            .into_iter()
+            .map(|node| codex_app_server_protocol::ChatTreeNode {
+                node_id: node.node_id,
+                parent_node_id: node.parent_node_id,
+                turn_id: node.turn_id,
+                order: node.order,
+                status: node.status.into(),
+                summary: node.summary,
+            })
+            .collect(),
     }
 }
 
@@ -1077,6 +1155,14 @@ impl CodexMessageProcessor {
             }
             ClientRequest::ThreadRead { request_id, params } => {
                 self.thread_read(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ChatTreeRead { request_id, params } => {
+                self.chat_tree_read(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::ChatTreeSetCurrent { request_id, params } => {
+                self.chat_tree_set_current(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::ThreadTurnsList { request_id, params } => {
@@ -3880,6 +3966,130 @@ impl CodexMessageProcessor {
         Ok(ThreadReadResponse { thread })
     }
 
+    async fn chat_tree_read(&self, request_id: ConnectionRequestId, params: ChatTreeReadParams) {
+        let result = self.chat_tree_read_response(params).await;
+        self.outgoing.send_result(request_id, result).await;
+    }
+
+    async fn chat_tree_read_response(
+        &self,
+        params: ChatTreeReadParams,
+    ) -> Result<ChatTreeReadResponse, JSONRPCErrorError> {
+        let thread_id = params.thread_id;
+        let thread_uuid = ThreadId::from_string(&thread_id)
+            .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        let chat_tree = match self.thread_manager.get_thread(thread_uuid).await {
+            Ok(thread) => chat_tree_projection_from_core(thread.chat_tree_projection().await),
+            Err(_) => {
+                let rollout_items = self.chat_tree_rollout_items(thread_uuid).await?;
+                build_chat_tree_projection_from_rollout_items(&rollout_items)
+            }
+        };
+        Ok(ChatTreeReadResponse {
+            thread_id,
+            chat_tree: Box::new(chat_tree),
+        })
+    }
+
+    async fn chat_tree_set_current(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ChatTreeSetCurrentParams,
+    ) {
+        let result = self.chat_tree_set_current_response(params).await;
+        self.outgoing.send_result(request_id, result).await;
+    }
+
+    async fn chat_tree_set_current_response(
+        &self,
+        params: ChatTreeSetCurrentParams,
+    ) -> Result<ChatTreeSetCurrentResponse, JSONRPCErrorError> {
+        let ChatTreeSetCurrentParams {
+            thread_id,
+            node_id,
+            expected_revision,
+        } = params;
+        let thread_uuid = ThreadId::from_string(&thread_id).map_err(|err| {
+            chat_tree_invalid_request(
+                "invalidThreadId",
+                format!("invalid thread id: {err}"),
+                serde_json::json!({ "threadId": thread_id }),
+            )
+        })?;
+        let thread = self
+            .thread_manager
+            .get_thread(thread_uuid)
+            .await
+            .map_err(|_| {
+                chat_tree_invalid_request(
+                    "threadNotLoaded",
+                    format!("thread not loaded: {thread_id}"),
+                    serde_json::json!({ "threadId": thread_id }),
+                )
+            })?;
+        if matches!(thread.agent_status().await, AgentStatus::Running) {
+            return Err(chat_tree_invalid_request(
+                "taskRunning",
+                "cannot switch chat tree nodes while a task is running",
+                serde_json::json!({ "threadId": thread_id }),
+            ));
+        }
+        thread
+            .set_current_chat_tree_node(&node_id, expected_revision)
+            .await
+            .map_err(|err| chat_tree_error(err, &thread_id))?;
+        let chat_tree = chat_tree_projection_from_core(thread.chat_tree_projection().await);
+        Ok(ChatTreeSetCurrentResponse {
+            thread_id,
+            chat_tree: Box::new(chat_tree),
+        })
+    }
+
+    async fn chat_tree_rollout_items(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<Vec<RolloutItem>, JSONRPCErrorError> {
+        if let Some(thread) = self.load_live_thread_for_read(thread_id).await
+            && let Some(rollout_path) = thread.rollout_path()
+        {
+            return read_rollout_items_from_rollout(&rollout_path)
+                .await
+                .map_err(|err| {
+                    internal_error(format!(
+                        "failed to load rollout `{}` for thread {thread_id}: {err}",
+                        rollout_path.display()
+                    ))
+                });
+        }
+        match self
+            .thread_store
+            .read_thread(StoreReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: true,
+            })
+            .await
+        {
+            Ok(stored_thread) => Ok(stored_thread
+                .history
+                .map_or_else(Vec::new, |history| history.items)),
+            Err(ThreadStoreError::InvalidRequest { message })
+                if message == format!("no rollout found for thread id {thread_id}") =>
+            {
+                Err(invalid_request(format!(
+                    "thread {thread_id} is not materialized yet"
+                )))
+            }
+            Err(ThreadStoreError::ThreadNotFound {
+                thread_id: missing_thread_id,
+            }) if missing_thread_id == thread_id => {
+                Err(invalid_request(format!("thread not loaded: {thread_id}")))
+            }
+            Err(ThreadStoreError::InvalidRequest { message }) => Err(invalid_request(message)),
+            Err(err) => Err(internal_error(format!("failed to read thread: {err}"))),
+        }
+    }
+
     /// Builds the API view for `thread/read` from persisted metadata plus optional live state.
     async fn read_thread_view(
         &self,
@@ -3945,7 +4155,7 @@ impl CodexMessageProcessor {
                 let (mut thread, history) =
                     thread_from_stored_thread(stored_thread, fallback_provider, &self.config.cwd);
                 if include_turns && let Some(history) = history {
-                    thread.turns = build_turns_from_rollout_items(&history.items);
+                    thread.turns = build_projected_turns_from_rollout_items(&history.items);
                 }
                 Ok(Some(thread))
             }
@@ -4011,7 +4221,7 @@ impl CodexMessageProcessor {
         if include_turns && let Some(rollout_path) = rollout_path {
             match read_rollout_items_from_rollout(rollout_path).await {
                 Ok(items) => {
-                    thread.turns = build_turns_from_rollout_items(&items);
+                    thread.turns = build_projected_turns_from_rollout_items(&items);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                     return Err(ThreadReadViewError::InvalidRequest(format!(

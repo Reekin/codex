@@ -1351,6 +1351,18 @@ pub enum EventMsg {
     #[serde(rename = "task_started", alias = "turn_started")]
     TurnStarted(TurnStartedEvent),
 
+    /// Chat tree node was created for a user turn.
+    ChatTreeNodeStarted(Box<ChatTreeNodeStartedEvent>),
+
+    /// Chat tree node reached a terminal status.
+    ChatTreeNodeFinalized(Box<ChatTreeNodeFinalizedEvent>),
+
+    /// Chat tree node summary changed.
+    ChatTreeNodeSummaryUpdated(Box<ChatTreeNodeSummaryUpdatedEvent>),
+
+    /// Chat tree current node changed.
+    ChatTreeCurrentNodeChanged(Box<ChatTreeCurrentNodeChangedEvent>),
+
     /// Agent has completed all actions.
     /// v1 wire format uses `task_complete`; accept `turn_complete` for v2 interop.
     #[serde(rename = "task_complete", alias = "turn_complete")]
@@ -2051,6 +2063,58 @@ pub struct TurnStartedEvent {
     pub model_context_window: Option<i64>,
     #[serde(default)]
     pub collaboration_mode_kind: ModeKind,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum ChatTreeNodeStatus {
+    Pending,
+    Completed,
+    Interrupted,
+    Replaced,
+    ReviewEnded,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum ChatTreeChangeKind {
+    NodeStarted,
+    NodeFinalized,
+    NodeSummaryUpdated,
+    CurrentNodeChanged,
+    TreeRebuilt,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ChatTreeNodeStartedEvent {
+    pub revision: u64,
+    pub node_id: String,
+    pub parent_node_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub order: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ChatTreeNodeFinalizedEvent {
+    pub revision: u64,
+    pub node_id: String,
+    pub status: ChatTreeNodeStatus,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ChatTreeNodeSummaryUpdatedEvent {
+    pub revision: u64,
+    pub node_id: String,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ChatTreeCurrentNodeChangedEvent {
+    pub revision: u64,
+    pub node_id: String,
+    pub change_kind: ChatTreeChangeKind,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema, TS)]

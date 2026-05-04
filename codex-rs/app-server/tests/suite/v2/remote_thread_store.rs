@@ -15,6 +15,7 @@
 //! in unnoticed.
 
 use std::collections::BTreeSet;
+use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -48,110 +49,134 @@ use uuid::Uuid;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-#[tokio::test]
-async fn thread_start_with_non_local_thread_store_does_not_create_local_persistence() -> Result<()>
+fn run_current_thread_test_with_stack<F>(name: &str, future: F) -> Result<()>
+where
+    F: Future<Output = Result<()>> + Send + 'static,
 {
-    let server = create_mock_responses_server_repeating_assistant("Done").await;
-    let codex_home = TempDir::new()?;
-    let store_id = Uuid::new_v4().to_string();
-    // Plugin startup warmups may create `.tmp` under codex_home. Disable them
-    // here so this regression stays focused on thread persistence artifacts.
-    create_config_toml_with_thread_store(codex_home.path(), &server.uri(), &store_id)?;
+    const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;
 
-    let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
-    let config = ConfigBuilder::default()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .loader_overrides(loader_overrides.clone())
-        .build()
-        .await?;
+    let handle = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(move || -> Result<()> {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+            runtime.block_on(Box::pin(future))
+        })?;
 
-    let thread_store = InMemoryThreadStore::for_id(store_id.clone());
-    let _in_memory_store = InMemoryThreadStoreId { store_id };
+    match handle.join() {
+        Ok(result) => result,
+        Err(_) => Err(anyhow::anyhow!("{name} thread panicked")),
+    }
+}
 
-    let mut client = in_process::start(InProcessStartArgs {
-        arg0_paths: Arg0DispatchPaths::default(),
-        config: Arc::new(config),
-        cli_overrides: Vec::new(),
-        loader_overrides,
-        cloud_requirements: CloudRequirementsLoader::default(),
-        thread_config_loader: Arc::new(NoopThreadConfigLoader),
-        feedback: CodexFeedback::new(),
-        log_db: None,
-        environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
-        config_warnings: Vec::new(),
-        session_source: SessionSource::Cli,
-        enable_codex_api_key_env: false,
-        initialize: InitializeParams {
-            client_info: ClientInfo {
-                name: "codex-app-server-tests".to_string(),
-                title: None,
-                version: "0.1.0".to_string(),
-            },
-            capabilities: None,
+#[test]
+fn thread_start_with_non_local_thread_store_does_not_create_local_persistence() -> Result<()> {
+    run_current_thread_test_with_stack(
+        "thread_start_with_non_local_thread_store_does_not_create_local_persistence",
+        async {
+            let server = create_mock_responses_server_repeating_assistant("Done").await;
+            let codex_home = TempDir::new()?;
+            let store_id = Uuid::new_v4().to_string();
+            // Plugin startup warmups may create `.tmp` under codex_home. Disable them
+            // here so this regression stays focused on thread persistence artifacts.
+            create_config_toml_with_thread_store(codex_home.path(), &server.uri(), &store_id)?;
+
+            let loader_overrides = LoaderOverrides::without_managed_config_for_tests();
+            let config = ConfigBuilder::default()
+                .codex_home(codex_home.path().to_path_buf())
+                .fallback_cwd(Some(codex_home.path().to_path_buf()))
+                .loader_overrides(loader_overrides.clone())
+                .build()
+                .await?;
+
+            let thread_store = InMemoryThreadStore::for_id(store_id.clone());
+            let _in_memory_store = InMemoryThreadStoreId { store_id };
+
+            let mut client = in_process::start(InProcessStartArgs {
+                arg0_paths: Arg0DispatchPaths::default(),
+                config: Arc::new(config),
+                cli_overrides: Vec::new(),
+                loader_overrides,
+                cloud_requirements: CloudRequirementsLoader::default(),
+                thread_config_loader: Arc::new(NoopThreadConfigLoader),
+                feedback: CodexFeedback::new(),
+                log_db: None,
+                environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
+                config_warnings: Vec::new(),
+                session_source: SessionSource::Cli,
+                enable_codex_api_key_env: false,
+                initialize: InitializeParams {
+                    client_info: ClientInfo {
+                        name: "codex-app-server-tests".to_string(),
+                        title: None,
+                        version: "0.1.0".to_string(),
+                    },
+                    capabilities: None,
+                },
+                channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+            })
+            .await?;
+
+            let response = Box::pin(client.request(ClientRequest::ThreadStart {
+                request_id: RequestId::Integer(1),
+                params: ThreadStartParams::default(),
+            }))
+            .await?
+            .expect("thread/start should succeed");
+            let ThreadStartResponse { thread, .. } =
+                serde_json::from_value(response).expect("thread/start response should parse");
+            assert_eq!(thread.path, None);
+
+            Box::pin(client.request(ClientRequest::TurnStart {
+                request_id: RequestId::Integer(2),
+                params: TurnStartParams {
+                    thread_id: thread.id.clone(),
+                    input: vec![V2UserInput::Text {
+                        text: "Hello".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    ..Default::default()
+                },
+            }))
+            .await?
+            .expect("turn/start should succeed");
+
+            timeout(DEFAULT_READ_TIMEOUT, async {
+                loop {
+                    let Some(event) = client.next_event().await else {
+                        anyhow::bail!("in-process app-server stopped before turn/completed");
+                    };
+                    if let InProcessServerEvent::ServerNotification(
+                        ServerNotification::TurnCompleted(completed),
+                    ) = event
+                        && completed.thread_id == thread.id
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+            })
+            .await??;
+
+            client.shutdown().await?;
+
+            let calls = thread_store.calls().await;
+            assert_eq!(calls.create_thread, 1);
+            assert!(
+                calls.append_items > 0,
+                "turn/start should append rollout items through the injected store"
+            );
+            assert!(
+                calls.flush_thread > 0,
+                "turn completion should flush through the injected store"
+            );
+
+            assert_no_local_persistence_artifacts(codex_home.path())?;
+
+            Ok(())
         },
-        channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
-    })
-    .await?;
-
-    let response = client
-        .request(ClientRequest::ThreadStart {
-            request_id: RequestId::Integer(1),
-            params: ThreadStartParams::default(),
-        })
-        .await?
-        .expect("thread/start should succeed");
-    let ThreadStartResponse { thread, .. } =
-        serde_json::from_value(response).expect("thread/start response should parse");
-    assert_eq!(thread.path, None);
-
-    client
-        .request(ClientRequest::TurnStart {
-            request_id: RequestId::Integer(2),
-            params: TurnStartParams {
-                thread_id: thread.id.clone(),
-                input: vec![V2UserInput::Text {
-                    text: "Hello".to_string(),
-                    text_elements: Vec::new(),
-                }],
-                ..Default::default()
-            },
-        })
-        .await?
-        .expect("turn/start should succeed");
-
-    timeout(DEFAULT_READ_TIMEOUT, async {
-        loop {
-            let Some(event) = client.next_event().await else {
-                anyhow::bail!("in-process app-server stopped before turn/completed");
-            };
-            if let InProcessServerEvent::ServerNotification(ServerNotification::TurnCompleted(
-                completed,
-            )) = event
-                && completed.thread_id == thread.id
-            {
-                return Ok::<(), anyhow::Error>(());
-            }
-        }
-    })
-    .await??;
-
-    client.shutdown().await?;
-
-    let calls = thread_store.calls().await;
-    assert_eq!(calls.create_thread, 1);
-    assert!(
-        calls.append_items > 0,
-        "turn/start should append rollout items through the injected store"
-    );
-    assert!(
-        calls.flush_thread > 0,
-        "turn completion should flush through the injected store"
-    );
-
-    assert_no_local_persistence_artifacts(codex_home.path())?;
-
-    Ok(())
+    )
 }
 
 fn assert_no_local_persistence_artifacts(codex_home: &Path) -> Result<()> {

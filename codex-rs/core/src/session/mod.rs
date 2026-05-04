@@ -15,6 +15,7 @@ use crate::agent::MailboxReceiver;
 use crate::agent::agent_status_from_event;
 use crate::agent::status::is_final;
 use crate::build_available_skills;
+use crate::chat_tree::ChatTreeError;
 use crate::commit_attribution::commit_message_trailer_instruction;
 use crate::compact;
 use crate::config::ManagedFeatures;
@@ -319,6 +320,7 @@ use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::BackgroundEventEvent;
+use codex_protocol::protocol::ChatTreeNodeStatus;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::DeprecationNoticeEvent;
@@ -1238,11 +1240,31 @@ impl Session {
             .reconstruct_history_from_rollout(turn_context, rollout_items)
             .await;
         let previous_turn_settings = reconstructed_rollout.previous_turn_settings.clone();
-        self.replace_history(
-            reconstructed_rollout.history,
-            reconstructed_rollout.reference_context_item,
-        )
-        .await;
+        let history = reconstructed_rollout
+            .chat_tree
+            .as_ref()
+            .and_then(|chat_tree| {
+                chat_tree
+                    .current_history
+                    .as_ref()
+                    .map(|history| history.raw_items().to_vec())
+            })
+            .unwrap_or(reconstructed_rollout.history);
+        let reference_context_item = reconstructed_rollout
+            .chat_tree
+            .as_ref()
+            .and_then(|chat_tree| chat_tree.current_reference_context_item.clone())
+            .or(reconstructed_rollout.reference_context_item);
+        self.replace_history(history, reference_context_item).await;
+        if let Some(chat_tree) = reconstructed_rollout.chat_tree {
+            let mut state = self.state.lock().await;
+            state.chat_tree.replace_from_replay(
+                chat_tree.nodes,
+                chat_tree.ordered_node_ids,
+                chat_tree.current_node_id,
+                chat_tree.revision,
+            );
+        }
         self.set_previous_turn_settings(previous_turn_settings.clone())
             .await;
         previous_turn_settings
@@ -2750,6 +2772,73 @@ impl Session {
     pub(crate) async fn clone_history(&self) -> ContextManager {
         let state = self.state.lock().await;
         state.clone_history()
+    }
+
+    pub(crate) async fn start_chat_tree_node(
+        &self,
+        turn_context: &TurnContext,
+    ) -> Option<EventMsg> {
+        let event = {
+            let mut state = self.state.lock().await;
+            let parent_history = state.clone_history();
+            state
+                .chat_tree
+                .start_node(turn_context.sub_id.clone(), parent_history)
+        };
+        event.map(|event| EventMsg::ChatTreeNodeStarted(Box::new(event)))
+    }
+
+    pub(crate) async fn finalize_chat_tree_node(
+        &self,
+        turn_context: &TurnContext,
+        status: ChatTreeNodeStatus,
+    ) {
+        let event = {
+            let mut state = self.state.lock().await;
+            let history_snapshot = state.clone_history();
+            state
+                .chat_tree
+                .finalize_node(&turn_context.sub_id, status, history_snapshot)
+        };
+        if let Some(event) = event {
+            self.send_event(
+                turn_context,
+                EventMsg::ChatTreeNodeFinalized(Box::new(event)),
+            )
+            .await;
+        }
+    }
+
+    pub async fn set_current_chat_tree_node(
+        &self,
+        node_id: &str,
+        expected_revision: Option<u64>,
+    ) -> Result<(), ChatTreeError> {
+        let (event, history) = {
+            let mut state = self.state.lock().await;
+            let selection = state
+                .chat_tree
+                .set_current_node(node_id, expected_revision)?;
+            (selection.event, selection.history)
+        };
+        self.replace_history(
+            history.raw_items().to_vec(),
+            history.reference_context_item(),
+        )
+        .await;
+        self.send_event_raw(Event {
+            id: node_id.to_string(),
+            msg: EventMsg::ChatTreeCurrentNodeChanged(Box::new(event)),
+        })
+        .await;
+        Ok(())
+    }
+
+    pub(crate) async fn chat_tree_projection(
+        &self,
+    ) -> crate::chat_tree::ChatTreeProjectionSnapshot {
+        let state = self.state.lock().await;
+        state.chat_tree.projection()
     }
 
     pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {

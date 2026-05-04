@@ -43,6 +43,7 @@ use codex_otel::TURN_TOKEN_USAGE_METRIC;
 use codex_otel::TURN_TOOL_CALL_METRIC;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::ChatTreeNodeStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::TokenUsage;
@@ -63,6 +64,16 @@ pub(crate) use user_shell::UserShellCommandTask;
 pub(crate) use user_shell::execute_user_shell_command;
 
 const GRACEFULL_INTERRUPTION_TIMEOUT_MS: u64 = 100;
+
+fn chat_tree_status_from_abort_reason(reason: &TurnAbortReason) -> ChatTreeNodeStatus {
+    match reason {
+        TurnAbortReason::Interrupted | TurnAbortReason::BudgetLimited => {
+            ChatTreeNodeStatus::Interrupted
+        }
+        TurnAbortReason::Replaced => ChatTreeNodeStatus::Replaced,
+        TurnAbortReason::ReviewEnded => ChatTreeNodeStatus::ReviewEnded,
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InterruptedTurnHistoryMarker {
@@ -750,6 +761,8 @@ impl Session {
             duration_ms,
             time_to_first_token_ms,
         });
+        self.finalize_chat_tree_node(turn_context.as_ref(), ChatTreeNodeStatus::Completed)
+            .await;
         self.send_event(turn_context.as_ref(), event).await;
         self.services
             .guardian_rejection_circuit_breaker
@@ -845,12 +858,15 @@ impl Session {
             .turn_timing_state
             .completed_at_and_duration_ms()
             .await;
+        let chat_tree_status = chat_tree_status_from_abort_reason(&reason);
         let event = EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some(task.turn_context.sub_id.clone()),
             reason,
             completed_at,
             duration_ms,
         });
+        self.finalize_chat_tree_node(task.turn_context.as_ref(), chat_tree_status)
+            .await;
         self.send_event(task.turn_context.as_ref(), event).await;
         self.services
             .guardian_rejection_circuit_breaker

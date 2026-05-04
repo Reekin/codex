@@ -564,6 +564,16 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadReadResponse,
     },
+    ChatTreeRead => "chatTree/read" {
+        params: v2::ChatTreeReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ChatTreeReadResponse,
+    },
+    ChatTreeSetCurrent => "chatTree/setCurrent" {
+        params: v2::ChatTreeSetCurrentParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ChatTreeSetCurrentResponse,
+    },
     ThreadTurnsList => "thread/turns/list" {
         params: v2::ThreadTurnsListParams,
         // Explicitly concurrent: this primarily reads append-only rollout storage.
@@ -1362,6 +1372,7 @@ server_notification_definitions! {
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
     #[experimental("thread/goal/cleared")]
     ThreadGoalCleared => "thread/goal/cleared" (v2::ThreadGoalClearedNotification),
+    ChatTreeUpdated => "chatTree/updated" (v2::ChatTreeUpdatedNotification),
     ThreadTokenUsageUpdated => "thread/tokenUsage/updated" (v2::ThreadTokenUsageUpdatedNotification),
     TurnStarted => "turn/started" (v2::TurnStartedNotification),
     HookStarted => "hook/started" (v2::HookStartedNotification),

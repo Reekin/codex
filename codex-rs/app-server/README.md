@@ -148,7 +148,10 @@ Example with notification opt-out:
 - `thread/start`, `thread/resume`, and `thread/fork` responses include the legacy `sandbox` compatibility projection. Experimental clients can read response `permissionProfile` for the exact active runtime permissions and `activePermissionProfile` for the named or implicit built-in profile identity/provenance when known.
 - `thread/list` — page through stored rollouts; supports cursor-based pagination and optional `modelProviders`, `sourceKinds`, `archived`, `cwd`, and `searchTerm` filters. Each returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
-- `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
+- `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. When a thread has chat-tree data, `includeTurns` returns the current branch projection. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
+- `chatTree/read` — read the full chat tree plus the current branch projection for a thread.
+- `chatTree/setCurrent` — set the current chat-tree node for a loaded idle thread and return the updated projection.
+- `chatTree/updated` — notification emitted after durable chat-tree changes; includes the full updated projection.
 - `thread/turns/list` — page through a stored thread’s turn history without resuming it; supports cursor-based pagination with `sortDirection`, `nextCursor`, and `backwardsCursor`.
 - `thread/metadata/update` — patch stored thread metadata in sqlite; currently supports updating persisted `gitInfo` fields and returns the refreshed `thread`.
 - `thread/memoryMode/set` — experimental; set a thread’s persisted memory eligibility to `"enabled"` or `"disabled"` for either a loaded thread or a stored rollout; returns `{}` on success.
@@ -402,7 +405,7 @@ Later, after the idle unload timeout:
 
 ### Example: Read a thread
 
-Use `thread/read` to fetch a stored thread by id without resuming it. Pass `includeTurns` when you want the full rollout history loaded into `thread.turns`. The returned thread includes `agentNickname` and `agentRole` for AgentControl-spawned thread sub-agents when available.
+Use `thread/read` to fetch a stored thread by id without resuming it. Pass `includeTurns` when you want rollout history loaded into `thread.turns`. When chat-tree data exists, `thread.turns` contains the current branch projection. The returned thread includes `agentNickname` and `agentRole` for AgentControl-spawned thread sub-agents when available.
 
 ```json
 { "method": "thread/read", "id": 22, "params": { "threadId": "thr_123" } }
@@ -415,6 +418,82 @@ Use `thread/read` to fetch a stored thread by id without resuming it. Pass `incl
 { "method": "thread/read", "id": 23, "params": { "threadId": "thr_123", "includeTurns": true } }
 { "id": 23, "result": {
     "thread": { "id": "thr_123", "status": { "type": "notLoaded" }, "turns": [ ... ] }
+} }
+```
+
+### Example: Read or switch chat tree
+
+Use `chatTree/read` to fetch the full tree and the active branch projection. `currentNodeId` is `null` and `nodes` is empty when the thread has no chat-tree data.
+
+```json
+{ "method": "chatTree/read", "id": 24, "params": { "threadId": "thr_123" } }
+{ "id": 24, "result": {
+    "threadId": "thr_123",
+    "chatTree": {
+        "version": 1,
+        "revision": 3,
+        "currentNodeId": "node-b",
+        "visibleNodeIds": ["node-a", "node-b"],
+        "visibleTurnIds": ["node-a", "node-b"],
+        "nodes": [
+            {
+                "nodeId": "node-a",
+                "parentNodeId": null,
+                "turnId": "node-a",
+                "order": 0,
+                "status": "completed",
+                "summary": "turn completed"
+            },
+            {
+                "nodeId": "node-b",
+                "parentNodeId": "node-a",
+                "turnId": "node-b",
+                "order": 1,
+                "status": "pending",
+                "summary": null
+            }
+        ]
+    }
+} }
+```
+
+Use `chatTree/setCurrent` to change the branch used by future turns. The thread must be loaded and idle.
+
+```json
+{ "method": "chatTree/setCurrent", "id": 25, "params": {
+    "threadId": "thr_123",
+    "nodeId": "node-a",
+    "expectedRevision": 3
+} }
+{ "id": 25, "result": {
+    "threadId": "thr_123",
+    "chatTree": {
+        "version": 1,
+        "revision": 4,
+        "currentNodeId": "node-a",
+        "visibleNodeIds": ["node-a"],
+        "visibleTurnIds": ["node-a"],
+        "nodes": [ ... ]
+    }
+} }
+```
+
+`chatTree/setCurrent` uses JSON-RPC invalid-request errors for user-fixable failures and includes a stable `data.kind` value plus relevant IDs or revisions. Current values are `invalidThreadId`, `threadNotLoaded`, `taskRunning`, `unknownNode`, and `revisionConflict`.
+
+After any durable chat-tree change, initialized clients receive `chatTree/updated` unless they opted out of that exact notification method.
+
+```json
+{ "method": "chatTree/updated", "params": {
+    "threadId": "thr_123",
+    "change": { "type": "currentNodeChanged", "nodeId": "node-a" },
+    "chatTree": {
+        "version": 1,
+        "revision": 4,
+        "currentNodeId": "node-a",
+        "visibleNodeIds": ["node-a"],
+        "visibleTurnIds": ["node-a"],
+        "nodes": [ ... ]
+    }
 } }
 ```
 

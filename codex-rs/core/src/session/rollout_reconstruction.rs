@@ -1,4 +1,7 @@
 use super::*;
+use crate::chat_tree::ChatTreeNodeState;
+use crate::chat_tree::ReplayedChatTree;
+use crate::chat_tree::default_summary;
 use crate::context_manager::is_user_turn_boundary;
 
 // Return value of `Session::reconstruct_history_from_rollout`, bundling the rebuilt history with
@@ -8,6 +11,7 @@ pub(super) struct RolloutReconstruction {
     pub(super) history: Vec<ResponseItem>,
     pub(super) previous_turn_settings: Option<PreviousTurnSettings>,
     pub(super) reference_context_item: Option<TurnContextItem>,
+    pub(super) chat_tree: Option<ReplayedChatTree>,
 }
 
 #[derive(Debug, Default)]
@@ -296,6 +300,143 @@ impl Session {
             history: history.raw_items().to_vec(),
             previous_turn_settings,
             reference_context_item,
+            chat_tree: self.reconstruct_chat_tree_from_rollout(turn_context, rollout_items),
         }
+    }
+
+    fn reconstruct_chat_tree_from_rollout(
+        &self,
+        turn_context: &TurnContext,
+        rollout_items: &[RolloutItem],
+    ) -> Option<ReplayedChatTree> {
+        let mut nodes = HashMap::<String, ChatTreeNodeState>::new();
+        let mut ordered_node_ids = Vec::<String>::new();
+        let mut current_node_id = None::<String>;
+        let mut active_node_id = None::<String>;
+        let mut active_history = ContextManager::new();
+        let mut legacy_history = ContextManager::new();
+        let mut saw_chat_tree_event = false;
+        let mut revision = 0u64;
+
+        for item in rollout_items {
+            match item {
+                RolloutItem::EventMsg(EventMsg::ChatTreeNodeStarted(payload)) => {
+                    saw_chat_tree_event = true;
+                    let parent_history = payload
+                        .parent_node_id
+                        .as_ref()
+                        .and_then(|parent_node_id| nodes.get(parent_node_id))
+                        .and_then(|node| node.history_snapshot.clone())
+                        .unwrap_or_else(|| legacy_history.clone());
+                    active_history = parent_history.clone();
+                    let node = ChatTreeNodeState {
+                        parent_node_id: payload.parent_node_id.clone(),
+                        turn_id: payload.turn_id.clone(),
+                        order: payload.order,
+                        status: ChatTreeNodeStatus::Pending,
+                        summary: None,
+                        history_snapshot: Some(parent_history),
+                    };
+                    if !nodes.contains_key(&payload.node_id) {
+                        ordered_node_ids.push(payload.node_id.clone());
+                    }
+                    nodes.insert(payload.node_id.clone(), node);
+                    current_node_id = Some(payload.node_id.clone());
+                    active_node_id = Some(payload.node_id.clone());
+                    revision = payload.revision;
+                }
+                RolloutItem::ResponseItem(response_item) => {
+                    if let Some(active_node_id) = active_node_id.as_deref() {
+                        active_history.record_items(
+                            std::iter::once(response_item),
+                            turn_context.truncation_policy,
+                        );
+                        if let Some(node) = nodes.get_mut(active_node_id) {
+                            node.history_snapshot = Some(active_history.clone());
+                        }
+                    } else if !saw_chat_tree_event {
+                        legacy_history.record_items(
+                            std::iter::once(response_item),
+                            turn_context.truncation_policy,
+                        );
+                    }
+                }
+                RolloutItem::TurnContext(turn_context_item) => {
+                    if let Some(active_node_id) = active_node_id.as_deref() {
+                        active_history.set_reference_context_item(Some(turn_context_item.clone()));
+                        if let Some(node) = nodes.get_mut(active_node_id) {
+                            node.history_snapshot = Some(active_history.clone());
+                        }
+                    } else if !saw_chat_tree_event {
+                        legacy_history.set_reference_context_item(Some(turn_context_item.clone()));
+                    }
+                }
+                RolloutItem::Compacted(compacted) => {
+                    if let Some(active_node_id) = active_node_id.as_deref()
+                        && let Some(replacement_history) = &compacted.replacement_history
+                    {
+                        active_history.replace(replacement_history.clone());
+                        if let Some(node) = nodes.get_mut(active_node_id) {
+                            node.history_snapshot = Some(active_history.clone());
+                        }
+                    } else if !saw_chat_tree_event
+                        && let Some(replacement_history) = &compacted.replacement_history
+                    {
+                        legacy_history.replace(replacement_history.clone());
+                    }
+                }
+                RolloutItem::EventMsg(EventMsg::ChatTreeNodeFinalized(payload)) => {
+                    saw_chat_tree_event = true;
+                    if let Some(node) = nodes.get_mut(&payload.node_id) {
+                        node.status = payload.status;
+                        if node.summary.is_none() {
+                            node.summary = Some(default_summary(payload.status));
+                        }
+                        if active_node_id.as_deref() == Some(payload.node_id.as_str()) {
+                            node.history_snapshot = Some(active_history.clone());
+                        }
+                    }
+                    revision = payload.revision;
+                }
+                RolloutItem::EventMsg(EventMsg::ChatTreeNodeSummaryUpdated(payload)) => {
+                    saw_chat_tree_event = true;
+                    if let Some(node) = nodes.get_mut(&payload.node_id) {
+                        node.summary = payload.summary.clone();
+                    }
+                    revision = payload.revision;
+                }
+                RolloutItem::EventMsg(EventMsg::ChatTreeCurrentNodeChanged(payload)) => {
+                    saw_chat_tree_event = true;
+                    current_node_id = Some(payload.node_id.clone());
+                    active_node_id = Some(payload.node_id.clone());
+                    active_history = nodes
+                        .get(&payload.node_id)
+                        .and_then(|node| node.history_snapshot.clone())
+                        .unwrap_or_default();
+                    revision = payload.revision;
+                }
+                RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => {}
+            }
+        }
+
+        if nodes.is_empty() {
+            return None;
+        }
+
+        let current_history = current_node_id
+            .as_ref()
+            .and_then(|node_id| nodes.get(node_id))
+            .and_then(|node| node.history_snapshot.clone());
+        let current_reference_context_item = current_history
+            .as_ref()
+            .and_then(ContextManager::reference_context_item);
+        Some(ReplayedChatTree {
+            nodes,
+            ordered_node_ids,
+            current_node_id,
+            revision,
+            current_history,
+            current_reference_context_item,
+        })
     }
 }

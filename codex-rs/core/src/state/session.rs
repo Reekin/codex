@@ -6,6 +6,7 @@ use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use std::collections::HashMap;
 use std::collections::HashSet;
 
+use crate::chat_tree::ChatTreeState;
 use crate::context_manager::ContextManager;
 use crate::session::PreviousTurnSettings;
 use crate::session::session::SessionConfiguration;
@@ -20,6 +21,7 @@ use codex_utils_output_truncation::TruncationPolicy;
 pub(crate) struct SessionState {
     pub(crate) session_configuration: SessionConfiguration,
     pub(crate) history: ContextManager,
+    pub(crate) chat_tree: ChatTreeState,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) server_reasoning_included: bool,
     pub(crate) dependency_env: HashMap<String, String>,
@@ -43,6 +45,7 @@ impl SessionState {
         Self {
             session_configuration,
             history,
+            chat_tree: ChatTreeState::default(),
             latest_rate_limits: None,
             server_reasoning_included: false,
             dependency_env: HashMap::new(),

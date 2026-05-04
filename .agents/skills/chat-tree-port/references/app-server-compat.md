@@ -30,6 +30,8 @@ Use one notification method:
 
 This notification carries the new full projection after any durable chat tree change. It replaces separate node/current notifications.
 
+Live notifications should build the projection from authoritative in-memory chat tree state. If a future architecture can only rebuild from rollout files, wait until the projection contains the reported `change` without blocking the active turn loop.
+
 ## Core Types
 
 ### `ChatTreeNode`
@@ -207,6 +209,7 @@ Notification behavior:
 
 - Send after durable chat tree state changes.
 - Include the full updated projection so external clients do not need immediate follow-up reads.
+- Ensure the included projection already reflects the included `change`.
 - Do not emit replayed historical changes as live notifications unless the app-server has a replay marker that external clients can distinguish.
 - When a client connects and needs current state, it should call `chatTree/read`; do not rely on notification replay for initial state.
 
@@ -228,8 +231,7 @@ Use the app-server's existing JSON-RPC error code conventions, but include stabl
 Recommended `data.kind` values:
 
 - `invalidThreadId`
-- `unknownThread`
-- `threadNotMaterialized`
+- `threadNotLoaded`
 - `unknownNode`
 - `revisionConflict`
 - `taskRunning`
@@ -240,7 +242,7 @@ Example:
 
 ```json
 {
-  "code": -32602,
+  "code": -32600,
   "message": "unknown chat tree node: node-x",
   "data": {
     "kind": "unknownNode",

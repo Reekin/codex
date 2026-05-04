@@ -164,8 +164,12 @@ pub(crate) async fn run_turn(
 
     let skills_outcome = Some(turn_context.turn_skills.outcome.as_ref());
 
+    let chat_tree_node_started = sess.start_chat_tree_node(turn_context.as_ref()).await;
     sess.record_context_updates_and_set_reference_context_item(turn_context.as_ref())
         .await;
+    if let Some(event) = chat_tree_node_started {
+        sess.send_event(turn_context.as_ref(), event).await;
+    }
 
     let loaded_plugins = sess
         .services
@@ -1440,6 +1444,10 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         | EventMsg::ContextCompacted(_)
         | EventMsg::ThreadRolledBack(_)
         | EventMsg::TurnStarted(_)
+        | EventMsg::ChatTreeNodeStarted(_)
+        | EventMsg::ChatTreeNodeFinalized(_)
+        | EventMsg::ChatTreeNodeSummaryUpdated(_)
+        | EventMsg::ChatTreeCurrentNodeChanged(_)
         | EventMsg::TurnComplete(_)
         | EventMsg::TokenCount(_)
         | EventMsg::UserMessage(_)
