@@ -356,6 +356,7 @@ fn server_notification_thread_target(
         ServerNotification::ThreadGoalCleared(notification) => {
             Some(notification.thread_id.as_str())
         }
+        ServerNotification::ChatTreeUpdated(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::TurnStarted(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::HookStarted(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::TurnCompleted(notification) => Some(notification.thread_id.as_str()),
@@ -1073,6 +1074,10 @@ mod tests {
     use super::thread_snapshot_events;
     use super::turn_snapshot_events;
     use codex_app_server_protocol::AgentMessageDeltaNotification;
+    use codex_app_server_protocol::ChatTreeChange;
+    use codex_app_server_protocol::ChatTreeChangeKind;
+    use codex_app_server_protocol::ChatTreeProjection;
+    use codex_app_server_protocol::ChatTreeUpdatedNotification;
     use codex_app_server_protocol::CodexErrorInfo;
     use codex_app_server_protocol::CommandAction;
     use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
@@ -1705,6 +1710,30 @@ mod tests {
         let notification = ServerNotification::GuardianWarning(GuardianWarningNotification {
             thread_id: thread_id.to_string(),
             message: "warning".to_string(),
+        });
+
+        let target = server_notification_thread_target(&notification);
+
+        assert_eq!(target, ServerNotificationThreadTarget::Thread(thread_id));
+    }
+
+    #[test]
+    fn chat_tree_updated_notifications_route_to_threads() {
+        let thread_id = ThreadId::new();
+        let notification = ServerNotification::ChatTreeUpdated(ChatTreeUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            change: ChatTreeChange {
+                r#type: ChatTreeChangeKind::TreeRebuilt,
+                node_id: None,
+            },
+            chat_tree: Box::new(ChatTreeProjection {
+                version: 1,
+                revision: 0,
+                current_node_id: None,
+                visible_node_ids: Vec::new(),
+                visible_turn_ids: Vec::new(),
+                nodes: Vec::new(),
+            }),
         });
 
         let target = server_notification_thread_target(&notification);

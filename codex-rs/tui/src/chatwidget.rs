@@ -7014,6 +7014,7 @@ impl ChatWidget {
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadArchived(_)
             | ServerNotification::ThreadUnarchived(_)
+            | ServerNotification::ChatTreeUpdated(_)
             | ServerNotification::RawResponseItemCompleted(_)
             | ServerNotification::CommandExecOutputDelta(_)
             | ServerNotification::FileChangePatchUpdated(_)
@@ -7616,6 +7617,10 @@ impl ChatWidget {
             }
             EventMsg::RawResponseItem(_)
             | EventMsg::ItemStarted(_)
+            | EventMsg::ChatTreeNodeStarted(_)
+            | EventMsg::ChatTreeNodeFinalized(_)
+            | EventMsg::ChatTreeNodeSummaryUpdated(_)
+            | EventMsg::ChatTreeCurrentNodeChanged(_)
             | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::PatchApplyUpdated(_)
             | EventMsg::ReasoningContentDelta(_)
