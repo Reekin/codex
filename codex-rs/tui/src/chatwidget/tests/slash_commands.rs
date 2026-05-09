@@ -1,4 +1,12 @@
 use super::*;
+use codex_app_server_protocol::ChatTreeChange;
+use codex_app_server_protocol::ChatTreeChangeKind;
+use codex_app_server_protocol::ChatTreeNode;
+use codex_app_server_protocol::ChatTreeNodeStatus;
+use codex_app_server_protocol::ChatTreeProjection;
+use codex_app_server_protocol::ChatTreeUpdatedNotification;
+use codex_app_server_protocol::ServerNotification;
+use codex_protocol::ThreadId;
 use pretty_assertions::assert_eq;
 
 fn turn_complete_event(turn_id: &str, last_agent_message: Option<&str>) -> TurnCompleteEvent {
@@ -40,6 +48,171 @@ fn next_add_to_history_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) 
                 panic!("expected AddToHistory op but channel closed")
             }
         }
+    }
+}
+
+fn sample_chat_tree_projection() -> ChatTreeProjection {
+    ChatTreeProjection {
+        version: 1,
+        revision: 7,
+        current_node_id: Some("turn-c".to_string()),
+        visible_node_ids: vec![
+            "turn-a".to_string(),
+            "turn-b".to_string(),
+            "turn-c".to_string(),
+        ],
+        visible_turn_ids: vec![
+            "turn-a".to_string(),
+            "turn-b".to_string(),
+            "turn-c".to_string(),
+        ],
+        nodes: vec![
+            ChatTreeNode {
+                node_id: "turn-a".to_string(),
+                parent_node_id: None,
+                turn_id: Some("turn-a".to_string()),
+                order: 0,
+                status: ChatTreeNodeStatus::Completed,
+                summary: Some("Inspect project".to_string()),
+            },
+            ChatTreeNode {
+                node_id: "turn-b".to_string(),
+                parent_node_id: Some("turn-a".to_string()),
+                turn_id: Some("turn-b".to_string()),
+                order: 1,
+                status: ChatTreeNodeStatus::Completed,
+                summary: Some("Implement parser".to_string()),
+            },
+            ChatTreeNode {
+                node_id: "turn-c".to_string(),
+                parent_node_id: Some("turn-b".to_string()),
+                turn_id: Some("turn-c".to_string()),
+                order: 2,
+                status: ChatTreeNodeStatus::Completed,
+                summary: Some("Add tests".to_string()),
+            },
+            ChatTreeNode {
+                node_id: "turn-d".to_string(),
+                parent_node_id: Some("turn-a".to_string()),
+                turn_id: Some("turn-d".to_string()),
+                order: 3,
+                status: ChatTreeNodeStatus::Interrupted,
+                summary: None,
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn slash_chattree_opens_branch_popup() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_chat_tree_projection(sample_chat_tree_projection());
+
+    chat.dispatch_command(SlashCommand::ChatTree);
+
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("slash_chattree_popup", popup);
+}
+
+#[tokio::test]
+async fn slash_chattree_space_sets_selected_node() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.set_chat_tree_projection(sample_chat_tree_projection());
+    chat.dispatch_command(SlashCommand::ChatTree);
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+    assert!(chat.no_modal_or_popup_active());
+    match rx.try_recv() {
+        Ok(AppEvent::CodexOp(AppCommand::Other(Op::SetCurrentChatTreeNode {
+            node_id,
+            expected_revision,
+        }))) => {
+            assert_eq!(node_id, "turn-b");
+            assert_eq!(expected_revision, Some(7));
+        }
+        other => panic!("expected chat tree set-current op, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn slash_chattree_empty_tree_shows_message() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.dispatch_command(SlashCommand::ChatTree);
+
+    let inserted = drain_insert_history(&mut rx)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert!(
+        inserted
+            .iter()
+            .any(|line| line.to_string().contains("Send a prompt first")),
+        "expected empty chat tree message, got {inserted:?}"
+    );
+}
+
+#[tokio::test]
+async fn chat_tree_current_notification_refreshes_transcript_for_new_revision() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    let mut projection = sample_chat_tree_projection();
+    projection.revision += 1;
+    projection.current_node_id = Some("turn-a".to_string());
+
+    chat.handle_server_notification(
+        ServerNotification::ChatTreeUpdated(ChatTreeUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            change: ChatTreeChange {
+                r#type: ChatTreeChangeKind::CurrentNodeChanged,
+                node_id: Some("turn-a".to_string()),
+            },
+            chat_tree: Box::new(projection.clone()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    match rx.try_recv() {
+        Ok(AppEvent::RefreshChatTreeTranscript {
+            thread_id: actual_thread_id,
+            chat_tree,
+        }) => {
+            assert_eq!(actual_thread_id, thread_id);
+            assert_eq!(chat_tree, projection);
+        }
+        other => panic!("expected transcript refresh event, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn chat_tree_stale_current_notification_does_not_refresh_transcript() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    let projection = sample_chat_tree_projection();
+    chat.set_chat_tree_projection(projection.clone());
+    let stale_projection = ChatTreeProjection {
+        current_node_id: Some("turn-b".to_string()),
+        ..projection.clone()
+    };
+
+    chat.handle_server_notification(
+        ServerNotification::ChatTreeUpdated(ChatTreeUpdatedNotification {
+            thread_id: thread_id.to_string(),
+            change: ChatTreeChange {
+                r#type: ChatTreeChangeKind::CurrentNodeChanged,
+                node_id: Some("turn-a".to_string()),
+            },
+            chat_tree: Box::new(stale_projection),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert_eq!(chat.chat_tree.projection(), &projection);
+    match rx.try_recv() {
+        Err(TryRecvError::Empty) => {}
+        other => panic!("expected no transcript refresh event, got {other:?}"),
     }
 }
 

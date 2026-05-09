@@ -232,6 +232,8 @@ Recommended `data.kind` values:
 
 - `invalidThreadId`
 - `threadNotLoaded`
+- `threadNotMaterialized`
+- `threadStoreInvalidRequest`
 - `unknownNode`
 - `revisionConflict`
 - `taskRunning`
@@ -274,6 +276,8 @@ Not allowed:
 - making `summary` absent instead of null;
 - making `parentNodeId` absent instead of null;
 - requiring external clients to consume UI-local state.
+- returning undocumented chat-tree `data.kind` values for common client-handled cases.
+- sending a `chatTree/updated` notification whose projection revision is older than the client's last acknowledged projection.
 
 ## Required Fixtures
 
@@ -299,6 +303,8 @@ Before accepting an app-server chat tree port:
 - Verify all required fields are always serialized, with nulls instead of omission where specified.
 - Verify `revision` increments on durable changes.
 - Verify `chatTree/setCurrent` response includes the updated projection.
+- Verify `thread/read` and `thread/turns/list` return the same selected branch as `chatTree.visibleTurnIds`.
+- Verify stale notifications cannot rewind an app-server client or app-server TUI projection.
 - Verify app-server clients can validate behavior without using TUI.
 - Verify non-chat-tree app-server workflows still pass focused tests.
 - Update this file only for additive extensions or explicitly versioned replacements.

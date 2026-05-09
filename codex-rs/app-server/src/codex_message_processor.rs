@@ -1,5 +1,6 @@
 use crate::bespoke_event_handling::apply_bespoke_event_handling;
 use crate::bespoke_event_handling::maybe_emit_hook_prompt_item_completed;
+use crate::chat_tree_projection::chat_tree_projection_from_core;
 use crate::command_exec::CommandExecManager;
 use crate::command_exec::StartCommandExecParams;
 use crate::config_manager::ConfigManager;
@@ -41,7 +42,6 @@ use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::CancelLoginAccountStatus;
-use codex_app_server_protocol::ChatTreeProjection;
 use codex_app_server_protocol::ChatTreeReadParams;
 use codex_app_server_protocol::ChatTreeReadResponse;
 use codex_app_server_protocol::ChatTreeSetCurrentParams;
@@ -236,7 +236,6 @@ use codex_app_server_protocol::WindowsSandboxSetupStartParams;
 use codex_app_server_protocol::WindowsSandboxSetupStartResponse;
 use codex_app_server_protocol::build_chat_tree_projection_from_rollout_items;
 use codex_app_server_protocol::build_projected_turns_from_rollout_items;
-use codex_app_server_protocol::build_turns_from_rollout_items;
 use codex_arg0::Arg0DispatchPaths;
 use codex_backend_client::AddCreditsNudgeCreditType as BackendAddCreditsNudgeCreditType;
 use codex_backend_client::Client as BackendClient;
@@ -248,7 +247,6 @@ use codex_config::ConfigLayerStack;
 use codex_config::loader::project_trust_key;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::ChatTreeError;
-use codex_core::ChatTreeProjectionSnapshot as CoreChatTreeProjectionSnapshot;
 use codex_core::CodexThread;
 use codex_core::CodexThreadTurnContextOverrides;
 use codex_core::ForkSnapshot;
@@ -542,6 +540,9 @@ fn chat_tree_error(err: ChatTreeError, thread_id: &str) -> JSONRPCErrorError {
                 "actualRevision": actual,
             }),
         ),
+        ChatTreeError::Persistence(message) => internal_error(format!(
+            "failed to persist chat tree change for thread {thread_id}: {message}"
+        )),
     }
 }
 
@@ -562,30 +563,6 @@ fn chat_tree_invalid_request(
         code: INVALID_REQUEST_ERROR_CODE,
         message: message.into(),
         data: Some(serde_json::Value::Object(data)),
-    }
-}
-
-fn chat_tree_projection_from_core(
-    projection: CoreChatTreeProjectionSnapshot,
-) -> ChatTreeProjection {
-    ChatTreeProjection {
-        version: projection.version,
-        revision: projection.revision,
-        current_node_id: projection.current_node_id,
-        visible_node_ids: projection.visible_node_ids,
-        visible_turn_ids: projection.visible_turn_ids,
-        nodes: projection
-            .nodes
-            .into_iter()
-            .map(|node| codex_app_server_protocol::ChatTreeNode {
-                node_id: node.node_id,
-                parent_node_id: node.parent_node_id,
-                turn_id: node.turn_id,
-                order: node.order,
-                status: node.status.into(),
-                summary: node.summary,
-            })
-            .collect(),
     }
 }
 
@@ -3976,8 +3953,13 @@ impl CodexMessageProcessor {
         params: ChatTreeReadParams,
     ) -> Result<ChatTreeReadResponse, JSONRPCErrorError> {
         let thread_id = params.thread_id;
-        let thread_uuid = ThreadId::from_string(&thread_id)
-            .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        let thread_uuid = ThreadId::from_string(&thread_id).map_err(|err| {
+            chat_tree_invalid_request(
+                "invalidThreadId",
+                format!("invalid thread id: {err}"),
+                serde_json::json!({ "threadId": thread_id }),
+            )
+        })?;
         let chat_tree = match self.thread_manager.get_thread(thread_uuid).await {
             Ok(thread) => chat_tree_projection_from_core(thread.chat_tree_projection().await),
             Err(_) => {
@@ -4076,16 +4058,24 @@ impl CodexMessageProcessor {
             Err(ThreadStoreError::InvalidRequest { message })
                 if message == format!("no rollout found for thread id {thread_id}") =>
             {
-                Err(invalid_request(format!(
-                    "thread {thread_id} is not materialized yet"
-                )))
+                Err(chat_tree_invalid_request(
+                    "threadNotMaterialized",
+                    format!("thread {thread_id} is not materialized yet"),
+                    serde_json::json!({ "threadId": thread_id.to_string() }),
+                ))
             }
             Err(ThreadStoreError::ThreadNotFound {
                 thread_id: missing_thread_id,
-            }) if missing_thread_id == thread_id => {
-                Err(invalid_request(format!("thread not loaded: {thread_id}")))
-            }
-            Err(ThreadStoreError::InvalidRequest { message }) => Err(invalid_request(message)),
+            }) if missing_thread_id == thread_id => Err(chat_tree_invalid_request(
+                "threadNotLoaded",
+                format!("thread not loaded: {thread_id}"),
+                serde_json::json!({ "threadId": thread_id.to_string() }),
+            )),
+            Err(ThreadStoreError::InvalidRequest { message }) => Err(chat_tree_invalid_request(
+                "threadStoreInvalidRequest",
+                message,
+                serde_json::json!({ "threadId": thread_id.to_string() }),
+            )),
             Err(err) => Err(internal_error(format!("failed to read thread: {err}"))),
         }
     }
@@ -8684,7 +8674,7 @@ async fn populate_thread_turns(
     active_turn: Option<&Turn>,
 ) -> std::result::Result<(), String> {
     let mut turns = match turn_source {
-        ThreadTurnSource::HistoryItems(items) => build_turns_from_rollout_items(items),
+        ThreadTurnSource::HistoryItems(items) => build_projected_turns_from_rollout_items(items),
     };
     if let Some(active_turn) = active_turn {
         merge_turn_history_with_active_turn(&mut turns, active_turn.clone());
@@ -10061,7 +10051,7 @@ fn reconstruct_thread_turns_from_rollout_items(
     loaded_status: ThreadStatus,
     has_live_in_progress_turn: bool,
 ) -> Vec<Turn> {
-    let mut turns = build_turns_from_rollout_items(items);
+    let mut turns = build_projected_turns_from_rollout_items(items);
     normalize_thread_turns_status(&mut turns, loaded_status, has_live_in_progress_turn);
     turns
 }

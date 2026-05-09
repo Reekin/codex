@@ -203,6 +203,7 @@ pub(super) async fn make_chatwidget_manual(
         add_credits_nudge_email_in_flight: None,
         adaptive_chunking: crate::streaming::chunking::AdaptiveChunkingPolicy::default(),
         stream_controller: None,
+        chat_tree: ChatTreeUiState::default(),
         plan_stream_controller: None,
         clipboard_lease: None,
         copy_last_response_binding: crate::keymap::RuntimeKeymap::defaults().app.copy,

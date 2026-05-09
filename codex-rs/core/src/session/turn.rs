@@ -164,12 +164,12 @@ pub(crate) async fn run_turn(
 
     let skills_outcome = Some(turn_context.turn_skills.outcome.as_ref());
 
-    let chat_tree_node_started = sess.start_chat_tree_node(turn_context.as_ref()).await;
+    if let Err(err) = sess.start_chat_tree_node(turn_context.as_ref()).await {
+        error!("Failed to start chat tree node: {err:?}");
+        return None;
+    }
     sess.record_context_updates_and_set_reference_context_item(turn_context.as_ref())
         .await;
-    if let Some(event) = chat_tree_node_started {
-        sess.send_event(turn_context.as_ref(), event).await;
-    }
 
     let loaded_plugins = sess
         .services

@@ -50,8 +50,12 @@ Expected properties:
 - Replay handles late summary after turn completion.
 - Replay handles interrupted turn node.
 - Replay handles compacted history on one branch.
+- Replay handles standalone compaction after a tree exists and keeps the current node context cache consistent.
+- Replay handles rollback by pruning removed visible nodes or reports that rollback is unsupported before mutating history.
 - Replay handles forked thread initial context without polluting old branch snapshots.
 - Replay handles stale/missing current node with deterministic fallback or diagnostic.
+- Replay rejects or diagnoses non-increasing durable revisions.
+- Replay rejects or diagnoses duplicate node start, missing parent, and unknown current-node facts.
 - Mixed legacy linear history has explicit compatibility behavior.
 
 ## Projection Tests
@@ -66,8 +70,11 @@ Expected properties:
 
 - `chatTree/read` returns full tree, current node, revision, and visible projection.
 - `chatTree/setCurrent` changes current node and returns the updated projection.
+- After `chatTree/setCurrent`, `thread/read` with turns returns the same selected branch as `chatTree.visibleTurnIds`.
+- After `chatTree/setCurrent`, `thread/turns/list` returns the same selected branch as `chatTree.visibleTurnIds`.
 - Set-current persists and survives restart.
 - Set-current emits `chatTree/updated` with `change.type = currentNodeChanged`.
+- Stale or same-revision `chatTree/updated` payloads do not rewind a newer client projection.
 - Node summary update emits `chatTree/updated` with `change.type = nodeSummaryUpdated`.
 - `thread/read` with turns returns selected branch projection.
 - Loaded live thread current state and rollout current state do not diverge after flush/restart.
@@ -90,12 +97,15 @@ Expected properties:
 - Selected row scrolls into view.
 - Current marker updates after set-current.
 - Switching is blocked while a task is running.
+- Set-current refreshes the visible transcript to the selected branch before the next user turn.
+- Stale chat-tree notifications do not overwrite a newer overlay/current marker.
 
 ## Cross-UI Tests
 
 - Native TUI and app-server TUI use the same overlay entries for the same tree.
 - Native TUI and app-server TUI both block unsafe switch during running task.
 - App-server TUI refreshes transcript after current-node change.
+- Native TUI refreshes transcript after current-node change, or native `/chattree` is explicitly unsupported/redirected for that upstream base.
 - App-server TUI updates pending summary labels without changing current transcript unless needed.
 
 ## Summary Tests

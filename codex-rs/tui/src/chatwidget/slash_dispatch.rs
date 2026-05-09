@@ -174,6 +174,9 @@ impl ChatWidget {
                     .counter("codex.thread.rename", /*inc*/ 1, &[]);
                 self.show_rename_prompt();
             }
+            SlashCommand::ChatTree => {
+                self.open_chat_tree_popup();
+            }
             SlashCommand::Model => {
                 self.open_model_popup();
             }
@@ -846,6 +849,7 @@ impl ChatWidget {
             | SlashCommand::Copy
             | SlashCommand::Diff
             | SlashCommand::Rename
+            | SlashCommand::ChatTree
             | SlashCommand::TestApproval => QueueDrain::Continue,
             SlashCommand::Feedback
             | SlashCommand::New

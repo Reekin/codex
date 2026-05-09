@@ -7,17 +7,20 @@ description: Use when porting, reimplementing, reviewing, or validating the down
 
 Use this skill to keep the downstream chat tree feature working while rebasing onto newer upstream Codex releases.
 
-The goal is not to replay old patches. The goal is to reproduce the same feature behavior on the new upstream architecture with clear domain boundaries and tests.
+The goal is not to manually re-invent chat tree on every upstream release. The goal is to preserve the stable domain/API/UI contract while adapting only the upstream-specific hook layer.
+
+When upstream changes are small enough, prefer a normal rebase and keep the reusable domain, wire contract, projection, overlay, and tests intact. When upstream architecture changes make the old patch impossible to apply cleanly, start from the new stable base and reintroduce the reusable pieces first, then rewrite only the adapters.
 
 ## Start Here
 
 1. Read this file first.
 2. Read `references/contract.md` before changing code.
 3. Read `references/migration-playbook.md` before choosing hook points.
-4. Read `references/test-matrix.md` before writing or accepting tests.
-5. Read `references/app-server-compat.md` before changing app-server API, schema, notifications, or external-client behavior.
-6. Read `references/architecture.md` when deciding how much to refactor or when upstream architecture has changed.
-7. Read `references/v116-review.md` when comparing against the v116 reference branch or investigating regressions.
+4. Read `references/implementation-guide.md` before implementing, triaging review feedback, resuming a long migration, or deciding whether another refactor is worth doing.
+5. Read `references/test-matrix.md` before writing or accepting tests.
+6. Read `references/app-server-compat.md` before changing app-server API, schema, notifications, or external-client behavior.
+7. Read `references/architecture.md` when deciding how much to refactor or when upstream architecture has changed.
+8. Read `references/v116-review.md` when comparing against the v116 reference branch or investigating regressions.
 
 ## Branch Strategy
 
@@ -25,8 +28,11 @@ The goal is not to replay old patches. The goal is to reproduce the same feature
 - Treat this repo/fork as the downstream maintenance line.
 - Keep the skill on the durable chat tree maintenance branch, currently `codex/chat-tree`.
 - For each upstream stable release, create a clean implementation branch from the stable tag, for example `rebase/v0.128-chat-tree`.
-- Do not hard-merge old chat tree branches into the new upstream release.
+- Prefer rebasing the previous chat-tree branch when conflicts stay localized to adapter code and the reusable domain/API/test contract remains intact.
+- Do not blindly hard-merge old chat tree branches into a new upstream release when conflicts cross session, rollout, app-server, and TUI architecture boundaries.
 - Use older chat tree branches as behavior references and regression oracles, not as patch sources.
+- Reuse copyable files or modules from the previous implementation for domain, projection, wire schema, fixtures, and tests.
+- Rewrite upstream-specific adapters when their hook points have moved or their semantics changed.
 - After a migration branch is stable, update the user-facing downstream branch to point at it or merge it according to the repository owner's release flow.
 
 ## Non-Negotiable Feature Rules
@@ -67,6 +73,13 @@ The goal is not to replay old patches. The goal is to reproduce the same feature
 5. **Update this skill**
    - Add new architecture notes or new pitfalls to the reference docs when migration reveals a reusable lesson.
 
+6. **Stop review loops deliberately**
+   - Classify every review item as P0 contract break, P1 portability/test hardening, or P2 long-term debt.
+   - Fix all P0 items before claiming the migration is complete.
+   - Fix P1 items when they are small or when they protect future migrations.
+   - Record P2 items in references or follow-up tasks instead of repeatedly reshaping working code.
+   - Stop when the feature contract and golden tests pass, not when every possible architecture ideal has been exhausted.
+
 ## Preferred Technical Shape
 
 - `ChatTreeEngine`: pure state reducer and invariant checker.
@@ -103,7 +116,9 @@ Stop and report before finalizing if:
 - Current-node switching works live but does not survive restart.
 - `thread/read` and model-visible context disagree about the selected branch.
 - Native TUI and app-server TUI expose different tree/current behavior.
+- A supported UI switches future model context but keeps showing the old branch transcript.
 - Summary updates can alter a node's stored context.
 - The implementation requires copying large old patches into unrelated new architecture.
 - Validation depends on manual UI interaction without an equivalent CLI/RPC/test path.
 - External app-server clients or scripts would need schema/method changes without an explicit compatibility plan.
+- Review feedback contains untriaged P0/P1/P2 items, making it unclear whether more refactoring is required for correctness or only for long-term polish.

@@ -1258,12 +1258,9 @@ impl Session {
         self.replace_history(history, reference_context_item).await;
         if let Some(chat_tree) = reconstructed_rollout.chat_tree {
             let mut state = self.state.lock().await;
-            state.chat_tree.replace_from_replay(
-                chat_tree.nodes,
-                chat_tree.ordered_node_ids,
-                chat_tree.current_node_id,
-                chat_tree.revision,
-            );
+            state
+                .chat_tree
+                .replace_from_replay(chat_tree.domain, chat_tree.history_snapshots);
         }
         self.set_previous_turn_settings(previous_turn_settings.clone())
             .await;
@@ -2503,14 +2500,21 @@ impl Session {
         reference_context_item: Option<TurnContextItem>,
         compacted_item: CompactedItem,
     ) {
-        self.replace_history(items, reference_context_item.clone())
-            .await;
+        {
+            let mut state = self.state.lock().await;
+            state.replace_history(items, reference_context_item.clone());
+            let history_snapshot = state.clone_history();
+            state
+                .chat_tree
+                .update_current_history_snapshot(history_snapshot);
+        }
 
-        self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
-            .await;
+        let mut rollout_items = vec![RolloutItem::Compacted(compacted_item)];
         if let Some(turn_context_item) = reference_context_item {
-            self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item)])
-                .await;
+            rollout_items.push(RolloutItem::TurnContext(turn_context_item));
+        }
+        if let Err(err) = self.persist_rollout_items_durable(&rollout_items).await {
+            warn!("failed to durably persist compacted chat history: {err}");
         }
         self.services.model_client.advance_window_generation();
     }
@@ -2769,6 +2773,20 @@ impl Session {
         }
     }
 
+    pub(crate) async fn persist_rollout_items_durable(
+        &self,
+        items: &[RolloutItem],
+    ) -> std::io::Result<()> {
+        if let Some(live_thread) = self.live_thread() {
+            live_thread
+                .append_items(items)
+                .await
+                .map_err(std::io::Error::other)?;
+            live_thread.flush().await.map_err(std::io::Error::other)?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn clone_history(&self) -> ContextManager {
         let state = self.state.lock().await;
         state.clone_history()
@@ -2777,15 +2795,40 @@ impl Session {
     pub(crate) async fn start_chat_tree_node(
         &self,
         turn_context: &TurnContext,
-    ) -> Option<EventMsg> {
-        let event = {
+    ) -> Result<(), ChatTreeError> {
+        let Some(started) = ({
             let mut state = self.state.lock().await;
             let parent_history = state.clone_history();
             state
                 .chat_tree
                 .start_node(turn_context.sub_id.clone(), parent_history)
+        }) else {
+            return Ok(());
         };
-        event.map(|event| EventMsg::ChatTreeNodeStarted(Box::new(event)))
+        let msg = EventMsg::ChatTreeNodeStarted(Box::new(started.event.clone().into()));
+        if let Err(err) = self
+            .persist_rollout_items_durable(&[RolloutItem::EventMsg(msg.clone())])
+            .await
+        {
+            let mut state = self.state.lock().await;
+            state.chat_tree.rollback_node_start(&started);
+            return Err(ChatTreeError::Persistence(err.to_string()));
+        }
+        self.services
+            .rollout_thread_trace
+            .record_codex_turn_event(&turn_context.sub_id, &msg);
+        self.services
+            .rollout_thread_trace
+            .record_tool_call_event(turn_context.sub_id.clone(), &msg);
+        self.services
+            .rollout_thread_trace
+            .record_protocol_event(&msg);
+        self.deliver_event_raw(Event {
+            id: turn_context.sub_id.clone(),
+            msg,
+        })
+        .await;
+        Ok(())
     }
 
     pub(crate) async fn finalize_chat_tree_node(
@@ -2793,20 +2836,42 @@ impl Session {
         turn_context: &TurnContext,
         status: ChatTreeNodeStatus,
     ) {
-        let event = {
+        let Some(finalization) = ({
             let mut state = self.state.lock().await;
             let history_snapshot = state.clone_history();
             state
                 .chat_tree
                 .finalize_node(&turn_context.sub_id, status, history_snapshot)
+        }) else {
+            return;
         };
-        if let Some(event) = event {
-            self.send_event(
-                turn_context,
-                EventMsg::ChatTreeNodeFinalized(Box::new(event)),
-            )
-            .await;
+        let msg = EventMsg::ChatTreeNodeFinalized(Box::new(finalization.event.clone().into()));
+        if let Err(err) = self
+            .persist_rollout_items_durable(&[RolloutItem::EventMsg(msg.clone())])
+            .await
+        {
+            let mut state = self.state.lock().await;
+            state.chat_tree.rollback_node_finalization(&finalization);
+            warn!(
+                "failed to persist chat tree node finalization for turn {}: {err}",
+                turn_context.sub_id
+            );
+            return;
         }
+        self.services
+            .rollout_thread_trace
+            .record_codex_turn_event(&turn_context.sub_id, &msg);
+        self.services
+            .rollout_thread_trace
+            .record_tool_call_event(turn_context.sub_id.clone(), &msg);
+        self.services
+            .rollout_thread_trace
+            .record_protocol_event(&msg);
+        self.deliver_event_raw(Event {
+            id: turn_context.sub_id.clone(),
+            msg,
+        })
+        .await;
     }
 
     pub async fn set_current_chat_tree_node(
@@ -2814,23 +2879,33 @@ impl Session {
         node_id: &str,
         expected_revision: Option<u64>,
     ) -> Result<(), ChatTreeError> {
-        let (event, history) = {
+        let selection = {
             let mut state = self.state.lock().await;
-            let selection = state
+            state
                 .chat_tree
-                .set_current_node(node_id, expected_revision)?;
-            (selection.event, selection.history)
+                .set_current_node(node_id, expected_revision)?
         };
+
+        let event = Event {
+            id: node_id.to_string(),
+            msg: EventMsg::ChatTreeCurrentNodeChanged(Box::new(selection.event.clone().into())),
+        };
+        let rollout_items = vec![RolloutItem::EventMsg(event.msg.clone())];
+        if let Err(err) = self.persist_rollout_items_durable(&rollout_items).await {
+            let mut state = self.state.lock().await;
+            state.chat_tree.rollback_current_node_change(&selection);
+            return Err(ChatTreeError::Persistence(err.to_string()));
+        }
+
         self.replace_history(
-            history.raw_items().to_vec(),
-            history.reference_context_item(),
+            selection.history.raw_items().to_vec(),
+            selection.history.reference_context_item(),
         )
         .await;
-        self.send_event_raw(Event {
-            id: node_id.to_string(),
-            msg: EventMsg::ChatTreeCurrentNodeChanged(Box::new(event)),
-        })
-        .await;
+        self.services
+            .rollout_thread_trace
+            .record_protocol_event(&event.msg);
+        self.deliver_event_raw(event).await;
         Ok(())
     }
 

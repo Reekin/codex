@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppInfo;
+use codex_app_server_protocol::ChatTreeProjection;
 use codex_app_server_protocol::MarketplaceAddResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
@@ -454,6 +455,12 @@ pub(crate) enum AppEvent {
     /// inserted history cells.
     ApplyThreadRollback {
         num_turns: u32,
+    },
+
+    /// Re-read the active thread transcript after the selected chat-tree branch changes.
+    RefreshChatTreeTranscript {
+        thread_id: ThreadId,
+        chat_tree: ChatTreeProjection,
     },
 
     StartCommitAnimation,

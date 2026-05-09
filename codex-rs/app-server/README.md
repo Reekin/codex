@@ -442,7 +442,7 @@ Use `chatTree/read` to fetch the full tree and the active branch projection. `cu
                 "turnId": "node-a",
                 "order": 0,
                 "status": "completed",
-                "summary": "turn completed"
+                "summary": "Turn 1 · completed"
             },
             {
                 "nodeId": "node-b",
@@ -478,7 +478,7 @@ Use `chatTree/setCurrent` to change the branch used by future turns. The thread 
 } }
 ```
 
-`chatTree/setCurrent` uses JSON-RPC invalid-request errors for user-fixable failures and includes a stable `data.kind` value plus relevant IDs or revisions. Current values are `invalidThreadId`, `threadNotLoaded`, `taskRunning`, `unknownNode`, and `revisionConflict`.
+Chat-tree methods use JSON-RPC invalid-request errors for user-fixable failures and include a stable `data.kind` value plus relevant IDs or revisions. Current values are `invalidThreadId`, `threadNotLoaded`, `threadNotMaterialized`, `threadStoreInvalidRequest`, `taskRunning`, `unknownNode`, and `revisionConflict`.
 
 After any durable chat-tree change, initialized clients receive `chatTree/updated` unless they opted out of that exact notification method.
 

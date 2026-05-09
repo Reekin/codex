@@ -1,11 +1,17 @@
+use anyhow::Context;
 use anyhow::Result;
 use app_test_support::McpProcess;
+use app_test_support::create_fake_rollout;
 use app_test_support::create_fake_rollout_with_text_elements;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::rollout_path;
 use app_test_support::test_absolute_path;
 use app_test_support::to_response;
+use codex_app_server_protocol::ChatTreeReadResponse;
+use codex_app_server_protocol::ChatTreeSetCurrentResponse;
+use codex_app_server_protocol::ChatTreeUpdatedNotification;
 use codex_app_server_protocol::JSONRPCError;
+use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SessionSource;
@@ -27,11 +33,21 @@ use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::protocol::ChatTreeCurrentNodeChangedEvent;
+use codex_protocol::protocol::ChatTreeNodeFinalizedEvent;
+use codex_protocol::protocol::ChatTreeNodeStartedEvent;
+use codex_protocol::protocol::ChatTreeNodeStatus;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
 use core_test_support::responses;
@@ -160,6 +176,259 @@ async fn thread_read_can_include_turns() -> Result<()> {
         other => panic!("expected user message item, got {other:?}"),
     }
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_read_and_turns_list_project_chat_tree_current_branch() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let filename_ts = "2025-01-05T12-00-00";
+    let conversation_id = create_fake_rollout(
+        codex_home.path(),
+        filename_ts,
+        "2025-01-05T12:00:00Z",
+        "legacy preview",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let rollout_path = rollout_path(codex_home.path(), filename_ts, &conversation_id);
+    append_chat_tree_turn(
+        &rollout_path,
+        "2025-01-05T12:01:00Z",
+        1,
+        "turn-a",
+        None,
+        "A",
+        0,
+    )?;
+    append_chat_tree_turn(
+        &rollout_path,
+        "2025-01-05T12:02:00Z",
+        3,
+        "turn-b",
+        Some("turn-a"),
+        "B",
+        1,
+    )?;
+    append_chat_tree_turn(
+        &rollout_path,
+        "2025-01-05T12:03:00Z",
+        5,
+        "turn-c",
+        Some("turn-b"),
+        "C",
+        2,
+    )?;
+    append_chat_tree_current_node_changed(&rollout_path, "2025-01-05T12:04:00Z", 7, "turn-a")?;
+    append_chat_tree_turn(
+        &rollout_path,
+        "2025-01-05T12:05:00Z",
+        8,
+        "turn-d",
+        Some("turn-a"),
+        "D",
+        3,
+    )?;
+    append_chat_tree_current_node_changed(&rollout_path, "2025-01-05T12:06:00Z", 10, "turn-b")?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let chat_tree_id = mcp
+        .send_raw_request(
+            "chatTree/read",
+            Some(json!({ "threadId": conversation_id.clone() })),
+        )
+        .await?;
+    let chat_tree_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(chat_tree_id)),
+    )
+    .await??;
+    let ChatTreeReadResponse { chat_tree, .. } =
+        to_response::<ChatTreeReadResponse>(chat_tree_resp)?;
+    assert_eq!(chat_tree.current_node_id, Some("turn-b".to_string()));
+    assert_eq!(
+        chat_tree.visible_node_ids,
+        vec!["turn-a".to_string(), "turn-b".to_string()]
+    );
+    assert_eq!(
+        chat_tree.visible_turn_ids,
+        vec!["turn-a".to_string(), "turn-b".to_string()]
+    );
+    assert_eq!(chat_tree.nodes.len(), 4);
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: conversation_id.clone(),
+            include_turns: true,
+        })
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadReadResponse { thread, .. } = to_response::<ThreadReadResponse>(read_resp)?;
+    assert_eq!(turn_user_texts(&thread.turns), vec!["A", "B"]);
+
+    let turns_id = mcp
+        .send_thread_turns_list_request(ThreadTurnsListParams {
+            thread_id: conversation_id,
+            cursor: None,
+            limit: Some(10),
+            sort_direction: Some(SortDirection::Asc),
+        })
+        .await?;
+    let turns_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turns_id)),
+    )
+    .await??;
+    let ThreadTurnsListResponse { data, .. } = to_response::<ThreadTurnsListResponse>(turns_resp)?;
+    assert_eq!(turn_user_texts(&data), vec!["A", "B"]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_tree_read_rejects_invalid_thread_id_with_stable_kind() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let read_id = mcp
+        .send_raw_request("chatTree/read", Some(json!({ "threadId": "not-a-uuid" })))
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+
+    assert_eq!(error.error.code, -32600);
+    assert!(error.error.message.contains("invalid thread id"));
+    assert_eq!(
+        error.error.data,
+        Some(json!({
+            "kind": "invalidThreadId",
+            "threadId": "not-a-uuid",
+        }))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_tree_set_current_updates_loaded_thread_and_notifies() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_id = start_loaded_thread(&mut mcp).await?;
+    let turn_a = send_loaded_turn_and_wait(&mut mcp, &thread_id, "A").await?;
+    let turn_b = send_loaded_turn_and_wait(&mut mcp, &thread_id, "B").await?;
+    let before = read_chat_tree(&mut mcp, &thread_id).await?;
+    assert_eq!(before.chat_tree.current_node_id, Some(turn_b));
+
+    let set_id = mcp
+        .send_raw_request(
+            "chatTree/setCurrent",
+            Some(json!({
+                "threadId": thread_id,
+                "nodeId": turn_a,
+                "expectedRevision": before.chat_tree.revision,
+            })),
+        )
+        .await?;
+    let set_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(set_id)),
+    )
+    .await??;
+    let response = to_response::<ChatTreeSetCurrentResponse>(set_resp)?;
+    assert_eq!(response.chat_tree.current_node_id, Some(turn_a.clone()));
+    assert_eq!(response.chat_tree.visible_node_ids, vec![turn_a.clone()]);
+    assert_eq!(response.chat_tree.visible_turn_ids, vec![turn_a.clone()]);
+
+    let notification = wait_for_chat_tree_updated_current(&mut mcp, &thread_id, &turn_a).await?;
+    assert_eq!(notification.chat_tree.current_node_id, Some(turn_a));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_tree_set_current_reports_stable_error_kinds() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let thread_id = start_loaded_thread(&mut mcp).await?;
+    send_loaded_turn_and_wait(&mut mcp, &thread_id, "A").await?;
+
+    let unknown_id = mcp
+        .send_raw_request(
+            "chatTree/setCurrent",
+            Some(json!({
+                "threadId": thread_id,
+                "nodeId": "missing-node",
+                "expectedRevision": null,
+            })),
+        )
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(unknown_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32600);
+    assert_eq!(
+        error.error.data,
+        Some(json!({
+            "kind": "unknownNode",
+            "threadId": thread_id,
+            "nodeId": "missing-node",
+        }))
+    );
+
+    let conflict_id = mcp
+        .send_raw_request(
+            "chatTree/setCurrent",
+            Some(json!({
+                "threadId": thread_id,
+                "nodeId": "missing-node",
+                "expectedRevision": 0,
+            })),
+        )
+        .await?;
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(conflict_id)),
+    )
+    .await??;
+    assert_eq!(error.error.code, -32600);
+    assert_eq!(
+        error.error.data,
+        Some(json!({
+            "kind": "revisionConflict",
+            "threadId": thread_id,
+            "actualRevision": 2,
+            "expectedRevision": 0,
+        }))
+    );
 
     Ok(())
 }
@@ -737,6 +1006,90 @@ async fn thread_read_reports_system_error_idle_flag_after_failed_turn() -> Resul
     Ok(())
 }
 
+async fn start_loaded_thread(mcp: &mut McpProcess) -> Result<String> {
+    let start_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let start_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(start_id)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(start_resp)?;
+    Ok(thread.id)
+}
+
+async fn send_loaded_turn_and_wait(
+    mcp: &mut McpProcess,
+    thread_id: &str,
+    text: &str,
+) -> Result<String> {
+    let turn_start_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread_id.to_string(),
+            input: vec![UserInput::Text {
+                text: text.to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let turn_start_response: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_start_id)),
+    )
+    .await??;
+    let TurnStartResponse { turn } = to_response::<TurnStartResponse>(turn_start_response)?;
+    loop {
+        let notification: JSONRPCNotification = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_notification_message("turn/completed"),
+        )
+        .await??;
+        let completed: TurnCompletedNotification =
+            serde_json::from_value(notification.params.context("turn/completed params")?)?;
+        if completed.turn.id == turn.id {
+            return Ok(turn.id);
+        }
+    }
+}
+
+async fn read_chat_tree(mcp: &mut McpProcess, thread_id: &str) -> Result<ChatTreeReadResponse> {
+    let read_id = mcp
+        .send_raw_request("chatTree/read", Some(json!({ "threadId": thread_id })))
+        .await?;
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    to_response::<ChatTreeReadResponse>(read_resp)
+}
+
+async fn wait_for_chat_tree_updated_current(
+    mcp: &mut McpProcess,
+    thread_id: &str,
+    node_id: &str,
+) -> Result<ChatTreeUpdatedNotification> {
+    loop {
+        let notification: JSONRPCNotification = timeout(
+            DEFAULT_READ_TIMEOUT,
+            mcp.read_stream_until_notification_message("chatTree/updated"),
+        )
+        .await??;
+        let updated: ChatTreeUpdatedNotification =
+            serde_json::from_value(notification.params.context("chatTree/updated params")?)?;
+        if updated.thread_id == thread_id
+            && updated.chat_tree.current_node_id.as_deref() == Some(node_id)
+        {
+            return Ok(updated);
+        }
+    }
+}
+
 fn append_user_message(path: &Path, timestamp: &str, text: &str) -> std::io::Result<()> {
     let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
     writeln!(
@@ -751,6 +1104,98 @@ fn append_user_message(path: &Path, timestamp: &str, text: &str) -> std::io::Res
                 "text_elements": [],
                 "local_images": []
             }
+        })
+    )
+}
+
+fn append_chat_tree_turn(
+    path: &Path,
+    timestamp: &str,
+    start_revision: u64,
+    turn_id: &str,
+    parent_node_id: Option<&str>,
+    text: &str,
+    order: u64,
+) -> std::io::Result<()> {
+    append_event(
+        path,
+        timestamp,
+        EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: turn_id.to_string(),
+            started_at: None,
+            model_context_window: Some(128_000),
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+    )?;
+    append_event(
+        path,
+        timestamp,
+        EventMsg::ChatTreeNodeStarted(Box::new(ChatTreeNodeStartedEvent {
+            revision: start_revision,
+            node_id: turn_id.to_string(),
+            parent_node_id: parent_node_id.map(str::to_string),
+            turn_id: Some(turn_id.to_string()),
+            order,
+        })),
+    )?;
+    append_event(
+        path,
+        timestamp,
+        EventMsg::UserMessage(UserMessageEvent {
+            message: text.to_string(),
+            images: None,
+            local_images: Vec::new(),
+            text_elements: Vec::new(),
+        }),
+    )?;
+    append_event(
+        path,
+        timestamp,
+        EventMsg::ChatTreeNodeFinalized(Box::new(ChatTreeNodeFinalizedEvent {
+            revision: start_revision + 1,
+            node_id: turn_id.to_string(),
+            status: ChatTreeNodeStatus::Completed,
+        })),
+    )?;
+    append_event(
+        path,
+        timestamp,
+        EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: turn_id.to_string(),
+            last_agent_message: None,
+            completed_at: None,
+            duration_ms: None,
+            time_to_first_token_ms: None,
+        }),
+    )
+}
+
+fn append_chat_tree_current_node_changed(
+    path: &Path,
+    timestamp: &str,
+    revision: u64,
+    node_id: &str,
+) -> std::io::Result<()> {
+    append_event(
+        path,
+        timestamp,
+        EventMsg::ChatTreeCurrentNodeChanged(Box::new(ChatTreeCurrentNodeChangedEvent {
+            revision,
+            node_id: node_id.to_string(),
+        })),
+    )
+}
+
+fn append_event(path: &Path, timestamp: &str, event: EventMsg) -> std::io::Result<()> {
+    let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+    let payload = serde_json::to_value(event).map_err(std::io::Error::other)?;
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "timestamp": timestamp,
+            "type": "event_msg",
+            "payload": payload
         })
     )
 }

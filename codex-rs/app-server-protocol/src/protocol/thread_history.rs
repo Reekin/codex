@@ -25,6 +25,11 @@ use crate::protocol::v2::TurnError;
 use crate::protocol::v2::TurnStatus;
 use crate::protocol::v2::UserInput;
 use crate::protocol::v2::WebSearchAction;
+use codex_protocol::chat_tree::ChatTreeNode as DomainChatTreeNode;
+use codex_protocol::chat_tree::ChatTreeProjection as DomainChatTreeProjection;
+use codex_protocol::chat_tree::ChatTreeState as DomainChatTreeState;
+use codex_protocol::chat_tree::overlay_entries_from_projection;
+use codex_protocol::chat_tree_protocol::chat_tree_event_from_protocol_event;
 use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::AgentReasoningEvent;
@@ -62,6 +67,14 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use tracing::warn;
 use uuid::Uuid;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatTreeOverlayEntry {
+    pub node_id: String,
+    pub depth: usize,
+    pub summary: String,
+    pub is_current: bool,
+}
 
 #[cfg(test)]
 use crate::protocol::v2::CommandAction;
@@ -106,102 +119,100 @@ pub fn build_projected_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Tu
 }
 
 pub fn build_chat_tree_projection_from_rollout_items(items: &[RolloutItem]) -> ChatTreeProjection {
-    let mut nodes_by_id = HashMap::<String, ChatTreeNode>::new();
-    let mut ordered_node_ids = Vec::<String>::new();
-    let mut current_node_id = None::<String>;
-    let mut legacy_visible_turn_ids = Vec::<String>::new();
-    let mut saw_chat_tree_event = false;
-    let mut revision = 0u64;
-
+    let mut state = DomainChatTreeState::default();
     for item in items {
-        let RolloutItem::EventMsg(event) = item else {
-            continue;
-        };
-        match event {
-            EventMsg::ChatTreeNodeStarted(payload) => {
-                if !saw_chat_tree_event
-                    && payload.turn_id.as_ref() == legacy_visible_turn_ids.last()
-                {
-                    legacy_visible_turn_ids.pop();
-                }
-                saw_chat_tree_event = true;
-                let node = ChatTreeNode {
-                    node_id: payload.node_id.clone(),
-                    parent_node_id: payload.parent_node_id.clone(),
-                    turn_id: payload.turn_id.clone(),
-                    order: payload.order,
-                    status: ChatTreeNodeStatus::Pending,
-                    summary: None,
-                };
-                if !nodes_by_id.contains_key(&payload.node_id) {
-                    ordered_node_ids.push(payload.node_id.clone());
-                }
-                nodes_by_id.insert(payload.node_id.clone(), node);
-                current_node_id = Some(payload.node_id.clone());
-                revision = payload.revision;
-            }
-            EventMsg::ChatTreeNodeFinalized(payload) => {
-                saw_chat_tree_event = true;
-                if let Some(node) = nodes_by_id.get_mut(&payload.node_id) {
-                    node.status = payload.status.into();
-                    if node.summary.is_none() {
-                        node.summary = Some(default_chat_tree_summary(node.status));
-                    }
-                }
-                revision = payload.revision;
-            }
-            EventMsg::ChatTreeNodeSummaryUpdated(payload) => {
-                saw_chat_tree_event = true;
-                if let Some(node) = nodes_by_id.get_mut(&payload.node_id) {
-                    node.summary = payload.summary.clone();
-                }
-                revision = payload.revision;
-            }
-            EventMsg::ChatTreeCurrentNodeChanged(payload) => {
-                saw_chat_tree_event = true;
-                current_node_id = Some(payload.node_id.clone());
-                revision = payload.revision;
-            }
-            EventMsg::TurnStarted(payload) => {
-                if !saw_chat_tree_event {
-                    legacy_visible_turn_ids.push(payload.turn_id.clone());
-                }
-            }
-            _ => {}
+        if let RolloutItem::EventMsg(event_msg) = item
+            && let Some(event) = chat_tree_event_from_protocol_event(event_msg)
+            && let Err(err) = state.apply_event(&event)
+        {
+            warn!(
+                ?err,
+                "invalid durable chat tree event ignored while building projection"
+            );
         }
     }
+    chat_tree_projection_from_domain(state.projection())
+}
 
-    let mut visible_node_ids = Vec::<String>::new();
-    let mut next_node_id = current_node_id.clone();
-    while let Some(node_id) = next_node_id {
-        let Some(node) = nodes_by_id.get(&node_id) else {
-            break;
-        };
-        visible_node_ids.push(node.node_id.clone());
-        next_node_id = node.parent_node_id.clone();
+pub fn refresh_chat_tree_projection(projection: &mut ChatTreeProjection) {
+    let domain_projection = domain_projection_from_chat_tree_projection(projection.clone());
+    *projection = chat_tree_projection_from_domain(domain_projection);
+}
+
+pub fn apply_chat_tree_event_to_projection(projection: &mut ChatTreeProjection, event: &EventMsg) {
+    let mut state = DomainChatTreeState::from_projection(
+        domain_projection_from_chat_tree_projection(projection.clone()),
+    );
+    let Some(event) = chat_tree_event_from_protocol_event(event) else {
+        return;
+    };
+    if let Err(err) = state.apply_event(&event) {
+        warn!(
+            ?err,
+            "invalid chat tree event ignored while updating projection"
+        );
+        return;
     }
-    visible_node_ids.reverse();
-    let visible_turn_ids = visible_node_ids
-        .iter()
-        .filter_map(|node_id| nodes_by_id.get(node_id))
-        .filter_map(|node| node.turn_id.clone())
-        .collect::<Vec<_>>();
-    let visible_turn_ids = legacy_visible_turn_ids
-        .into_iter()
-        .chain(visible_turn_ids)
-        .collect();
-    let nodes = ordered_node_ids
-        .into_iter()
-        .filter_map(|node_id| nodes_by_id.remove(&node_id))
-        .collect();
+    *projection = chat_tree_projection_from_domain(state.projection());
+}
 
+pub fn chat_tree_overlay_entries(projection: &ChatTreeProjection) -> Vec<ChatTreeOverlayEntry> {
+    overlay_entries_from_projection(&domain_projection_from_chat_tree_projection(
+        projection.clone(),
+    ))
+    .into_iter()
+    .map(|entry| ChatTreeOverlayEntry {
+        node_id: entry.node_id,
+        depth: entry.depth,
+        summary: entry.summary,
+        is_current: entry.is_current,
+    })
+    .collect()
+}
+
+fn chat_tree_projection_from_domain(projection: DomainChatTreeProjection) -> ChatTreeProjection {
     ChatTreeProjection {
-        version: 1,
-        revision,
-        current_node_id,
-        visible_node_ids,
-        visible_turn_ids,
-        nodes,
+        version: projection.version,
+        revision: projection.revision,
+        current_node_id: projection.current_node_id,
+        visible_node_ids: projection.visible_node_ids,
+        visible_turn_ids: projection.visible_turn_ids,
+        nodes: projection
+            .nodes
+            .into_iter()
+            .map(|node| ChatTreeNode {
+                node_id: node.node_id,
+                parent_node_id: node.parent_node_id,
+                turn_id: node.turn_id,
+                order: node.order,
+                status: node.status.into(),
+                summary: node.summary,
+            })
+            .collect(),
+    }
+}
+
+fn domain_projection_from_chat_tree_projection(
+    projection: ChatTreeProjection,
+) -> DomainChatTreeProjection {
+    DomainChatTreeProjection {
+        version: projection.version,
+        revision: projection.revision,
+        current_node_id: projection.current_node_id,
+        visible_node_ids: projection.visible_node_ids,
+        visible_turn_ids: projection.visible_turn_ids,
+        nodes: projection
+            .nodes
+            .into_iter()
+            .map(|node| DomainChatTreeNode {
+                node_id: node.node_id,
+                parent_node_id: node.parent_node_id,
+                turn_id: node.turn_id,
+                order: node.order,
+                status: node.status.to_core(),
+                summary: node.summary,
+            })
+            .collect(),
     }
 }
 
@@ -220,22 +231,19 @@ pub fn chat_tree_change_from_event(event: &EventMsg) -> Option<ChatTreeChange> {
             node_id: Some(payload.node_id.clone()),
         }),
         EventMsg::ChatTreeCurrentNodeChanged(payload) => Some(ChatTreeChange {
-            r#type: payload.change_kind.into(),
+            r#type: ChatTreeChangeKind::CurrentNodeChanged,
             node_id: Some(payload.node_id.clone()),
+        }),
+        EventMsg::ThreadRolledBack(_) => Some(ChatTreeChange {
+            r#type: ChatTreeChangeKind::TreeRebuilt,
+            node_id: None,
         }),
         _ => None,
     }
 }
 
-fn default_chat_tree_summary(status: ChatTreeNodeStatus) -> String {
-    match status {
-        ChatTreeNodeStatus::Pending => "turn pending",
-        ChatTreeNodeStatus::Completed => "turn completed",
-        ChatTreeNodeStatus::Interrupted => "turn interrupted",
-        ChatTreeNodeStatus::Replaced => "turn replaced",
-        ChatTreeNodeStatus::ReviewEnded => "turn review ended",
-    }
-    .to_string()
+pub fn chat_tree_default_summary(status: ChatTreeNodeStatus) -> &'static str {
+    status.to_core().default_summary()
 }
 
 pub struct ThreadHistoryBuilder {
@@ -1358,7 +1366,6 @@ mod tests {
     use codex_protocol::protocol::AgentReasoningEvent;
     use codex_protocol::protocol::AgentReasoningRawContentEvent;
     use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
-    use codex_protocol::protocol::ChatTreeChangeKind as CoreChatTreeChangeKind;
     use codex_protocol::protocol::ChatTreeCurrentNodeChangedEvent;
     use codex_protocol::protocol::ChatTreeNodeFinalizedEvent;
     use codex_protocol::protocol::ChatTreeNodeStartedEvent;
@@ -1418,7 +1425,6 @@ mod tests {
                 ChatTreeCurrentNodeChangedEvent {
                     revision: 4,
                     node_id: "node-a".into(),
-                    change_kind: CoreChatTreeChangeKind::CurrentNodeChanged,
                 },
             ))),
         ];
@@ -1440,7 +1446,7 @@ mod tests {
                         turn_id: Some("node-a".into()),
                         order: 0,
                         status: ChatTreeNodeStatus::Completed,
-                        summary: Some("turn completed".into()),
+                        summary: Some("Turn 1 · completed".into()),
                     },
                     ChatTreeNode {
                         node_id: "node-b".into(),
@@ -1452,6 +1458,41 @@ mod tests {
                     },
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn projection_preserves_legacy_visible_turns_before_chat_tree_events() {
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "legacy-turn".into(),
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "legacy-turn".into(),
+                last_agent_message: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            })),
+            RolloutItem::EventMsg(EventMsg::ChatTreeNodeStarted(Box::new(
+                ChatTreeNodeStartedEvent {
+                    revision: 1,
+                    node_id: "node-a".into(),
+                    parent_node_id: None,
+                    turn_id: Some("node-a".into()),
+                    order: 0,
+                },
+            ))),
+        ];
+
+        let projection = build_chat_tree_projection_from_rollout_items(&items);
+
+        assert_eq!(
+            projection.visible_turn_ids,
+            vec!["legacy-turn".to_string(), "node-a".to_string()]
         );
     }
 
@@ -1518,7 +1559,6 @@ mod tests {
                 ChatTreeCurrentNodeChangedEvent {
                     revision: 3,
                     node_id: "node-a".into(),
-                    change_kind: CoreChatTreeChangeKind::CurrentNodeChanged,
                 },
             ))),
         ];

@@ -1,3 +1,5 @@
+use crate::chat_tree_projection::chat_tree_projection_contains_change;
+use crate::chat_tree_projection::chat_tree_projection_from_core;
 use crate::codex_message_processor::read_rollout_items_from_rollout;
 use crate::codex_message_processor::read_summary_from_rollout;
 use crate::codex_message_processor::summary_to_thread;
@@ -16,9 +18,6 @@ use codex_app_server_protocol::AccountRateLimitsUpdatedNotification;
 use codex_app_server_protocol::AdditionalPermissionProfile as V2AdditionalPermissionProfile;
 use codex_app_server_protocol::AgentMessageDeltaNotification;
 use codex_app_server_protocol::ChatTreeChange;
-use codex_app_server_protocol::ChatTreeChangeKind;
-use codex_app_server_protocol::ChatTreeNodeStatus;
-use codex_app_server_protocol::ChatTreeProjection;
 use codex_app_server_protocol::ChatTreeUpdatedNotification;
 use codex_app_server_protocol::CodexErrorInfo as V2CodexErrorInfo;
 use codex_app_server_protocol::CollabAgentState as V2CollabAgentStatus;
@@ -108,11 +107,10 @@ use codex_app_server_protocol::build_file_change_approval_request_item;
 use codex_app_server_protocol::build_file_change_begin_item;
 use codex_app_server_protocol::build_file_change_end_item;
 use codex_app_server_protocol::build_item_from_guardian_event;
-use codex_app_server_protocol::build_turns_from_rollout_items;
+use codex_app_server_protocol::build_projected_turns_from_rollout_items;
 use codex_app_server_protocol::chat_tree_change_from_event;
 use codex_app_server_protocol::convert_patch_changes;
 use codex_app_server_protocol::guardian_auto_approval_review_notification;
-use codex_core::ChatTreeProjectionSnapshot as CoreChatTreeProjectionSnapshot;
 use codex_core::CodexThread;
 use codex_core::ThreadManager;
 use codex_core::find_thread_name_by_id;
@@ -186,18 +184,24 @@ pub(crate) async fn apply_bespoke_event_handling(
         msg,
     } = event;
     let chat_tree_change = chat_tree_change_from_event(&msg);
+    let expected_chat_tree_summary = match &msg {
+        EventMsg::ChatTreeNodeSummaryUpdated(payload) => Some(payload.summary.clone()),
+        _ => None,
+    };
     match msg {
         EventMsg::ChatTreeNodeStarted(_)
         | EventMsg::ChatTreeNodeFinalized(_)
         | EventMsg::ChatTreeNodeSummaryUpdated(_)
         | EventMsg::ChatTreeCurrentNodeChanged(_) => {
             if let Some(change) = chat_tree_change {
-                tokio::spawn(send_chat_tree_updated_notification(
+                send_chat_tree_updated_notification(
                     conversation_id,
                     conversation.clone(),
                     outgoing.clone(),
                     change,
-                ));
+                    expected_chat_tree_summary,
+                )
+                .await;
             }
         }
         EventMsg::TurnStarted(payload) => {
@@ -1744,7 +1748,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                         let mut thread = summary_to_thread(summary, &fallback_cwd);
                         match read_rollout_items_from_rollout(rollout_path.as_path()).await {
                             Ok(items) => {
-                                thread.turns = build_turns_from_rollout_items(&items);
+                                thread.turns = build_projected_turns_from_rollout_items(&items);
                                 thread.status = thread_watch_manager
                                     .loaded_status_for_thread(&thread.id)
                                     .await;
@@ -1789,6 +1793,16 @@ pub(crate) async fn apply_bespoke_event_handling(
                 };
 
                 outgoing.send_response(request_id, response).await;
+            }
+            if let Some(change) = chat_tree_change {
+                send_chat_tree_updated_notification(
+                    conversation_id,
+                    conversation.clone(),
+                    outgoing.clone(),
+                    change,
+                    expected_chat_tree_summary,
+                )
+                .await;
             }
         }
         EventMsg::ThreadNameUpdated(thread_name_event) => {
@@ -1841,13 +1855,19 @@ async fn send_chat_tree_updated_notification(
     conversation: Arc<CodexThread>,
     outgoing: ThreadScopedOutgoingMessageSender,
     change: ChatTreeChange,
+    expected_summary: Option<Option<String>>,
 ) {
     let chat_tree = chat_tree_projection_from_core(conversation.chat_tree_projection().await);
-    if !chat_tree_projection_contains_change(&chat_tree, &change) {
+    if !chat_tree_projection_contains_change(
+        &chat_tree,
+        &change,
+        expected_summary.as_ref().map(Option::as_deref),
+    ) {
         warn!(
             "live chat tree projection did not include notification change `{:?}`",
             change.r#type
         );
+        return;
     }
     let notification = ChatTreeUpdatedNotification {
         thread_id: conversation_id.to_string(),
@@ -1857,52 +1877,6 @@ async fn send_chat_tree_updated_notification(
     outgoing
         .send_server_notification(ServerNotification::ChatTreeUpdated(notification))
         .await;
-}
-
-fn chat_tree_projection_from_core(
-    projection: CoreChatTreeProjectionSnapshot,
-) -> ChatTreeProjection {
-    ChatTreeProjection {
-        version: projection.version,
-        revision: projection.revision,
-        current_node_id: projection.current_node_id,
-        visible_node_ids: projection.visible_node_ids,
-        visible_turn_ids: projection.visible_turn_ids,
-        nodes: projection
-            .nodes
-            .into_iter()
-            .map(|node| codex_app_server_protocol::ChatTreeNode {
-                node_id: node.node_id,
-                parent_node_id: node.parent_node_id,
-                turn_id: node.turn_id,
-                order: node.order,
-                status: node.status.into(),
-                summary: node.summary,
-            })
-            .collect(),
-    }
-}
-
-fn chat_tree_projection_contains_change(
-    chat_tree: &ChatTreeProjection,
-    change: &ChatTreeChange,
-) -> bool {
-    let Some(node_id) = change.node_id.as_deref() else {
-        return true;
-    };
-    match change.r#type {
-        ChatTreeChangeKind::NodeStarted | ChatTreeChangeKind::NodeSummaryUpdated => {
-            chat_tree.nodes.iter().any(|node| node.node_id == node_id)
-        }
-        ChatTreeChangeKind::NodeFinalized => chat_tree
-            .nodes
-            .iter()
-            .any(|node| node.node_id == node_id && node.status != ChatTreeNodeStatus::Pending),
-        ChatTreeChangeKind::CurrentNodeChanged => {
-            chat_tree.current_node_id.as_deref() == Some(node_id)
-        }
-        ChatTreeChangeKind::TreeRebuilt => true,
-    }
 }
 
 async fn handle_turn_diff(

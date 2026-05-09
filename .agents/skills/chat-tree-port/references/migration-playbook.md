@@ -28,6 +28,8 @@ Find the current upstream equivalents of:
 
 Write down the hook points before editing.
 
+Also decide which UI entrypoints are supported on this upstream base. A UI path is supported only if it can open the tree, set current, refresh the selected-branch transcript, and prevent stale projections from rolling back local state. Disable, redirect, or document any path that cannot meet that bar.
+
 ## 3. Install Domain Types
 
 Add or locate shared types for:
@@ -105,10 +107,21 @@ Minimum before considering migration complete:
 - native/app-server TUI behavior matches;
 - late summary does not alter context.
 
-## 10. Update Skill References
+## 10. Triage Review Feedback
+
+Before starting another refactor round, classify review items using `implementation-guide.md`:
+
+- P0 contract breaks must be fixed and covered by tests.
+- P1 portability hardening should be fixed when it materially reduces future rebase risk.
+- P2 long-term debt should be documented instead of blocking a complete, tested migration.
+
+Do not keep reshaping a working implementation unless the proposed change is tied to a contract rule, a test-matrix gap, or a specific future-portability risk.
+
+## 11. Update Skill References
 
 Add reusable findings to:
 
+- `implementation-guide.md` for end-to-end implementation process and environment pitfalls;
 - `v116-review.md` for newly discovered pitfalls;
 - `architecture.md` for new upstream adaptation patterns;
 - `test-matrix.md` for new regression scenarios.
@@ -124,3 +137,6 @@ Add reusable findings to:
 - Forgetting interrupted turns.
 - Forgetting resume/replay.
 - Hiding stale current-node errors behind fallback behavior.
+- Letting review loops continue without classifying findings as P0/P1/P2.
+- Claiming native/app-server TUI parity when one path refreshes model context but not visible transcript.
+- Treating antivirus, symlink, or lockfile noise as feature bugs before checking the local Windows environment.

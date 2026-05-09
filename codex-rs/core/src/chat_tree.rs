@@ -1,28 +1,19 @@
 use crate::context_manager::ContextManager;
-use codex_protocol::protocol::ChatTreeChangeKind;
-use codex_protocol::protocol::ChatTreeCurrentNodeChangedEvent;
-use codex_protocol::protocol::ChatTreeNodeFinalizedEvent;
-use codex_protocol::protocol::ChatTreeNodeStartedEvent;
+use codex_protocol::chat_tree::ChatTreeApplyError;
+use codex_protocol::chat_tree::ChatTreeCurrentNodeChanged;
+use codex_protocol::chat_tree::ChatTreeNode as DomainChatTreeNode;
+use codex_protocol::chat_tree::ChatTreeNodeFinalized;
+use codex_protocol::chat_tree::ChatTreeNodeStarted;
+use codex_protocol::chat_tree::ChatTreeProjection as DomainChatTreeProjection;
+use codex_protocol::chat_tree::ChatTreeState as DomainChatTreeState;
 use codex_protocol::protocol::ChatTreeNodeStatus;
 use codex_protocol::protocol::TurnContextItem;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
-pub(crate) struct ChatTreeNodeState {
-    pub(crate) parent_node_id: Option<String>,
-    pub(crate) turn_id: Option<String>,
-    pub(crate) order: u64,
-    pub(crate) status: ChatTreeNodeStatus,
-    pub(crate) summary: Option<String>,
-    pub(crate) history_snapshot: Option<ContextManager>,
-}
-
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ChatTreeState {
-    revision: u64,
-    current_node_id: Option<String>,
-    nodes: HashMap<String, ChatTreeNodeState>,
-    ordered_node_ids: Vec<String>,
+    domain: DomainChatTreeState,
+    history_snapshots: HashMap<String, ContextManager>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +21,7 @@ pub enum ChatTreeError {
     UnknownNode(String),
     MissingSnapshot(String),
     RevisionConflict { expected: u64, actual: u64 },
+    Persistence(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,8 +45,23 @@ pub struct ChatTreeProjectionSnapshot {
 }
 
 pub(crate) struct ChatTreeSelection {
-    pub(crate) event: ChatTreeCurrentNodeChangedEvent,
+    pub(crate) event: ChatTreeCurrentNodeChanged,
     pub(crate) history: ContextManager,
+    pub(crate) previous_node_id: Option<String>,
+    pub(crate) previous_revision: u64,
+}
+
+pub(crate) struct ChatTreeNodeStart {
+    pub(crate) event: ChatTreeNodeStarted,
+    previous_node_id: Option<String>,
+    previous_revision: u64,
+}
+
+pub(crate) struct ChatTreeNodeFinalization {
+    pub(crate) event: ChatTreeNodeFinalized,
+    previous_node: DomainChatTreeNode,
+    previous_revision: u64,
+    previous_history_snapshot: Option<ContextManager>,
 }
 
 impl ChatTreeState {
@@ -62,32 +69,16 @@ impl ChatTreeState {
         &mut self,
         turn_id: String,
         parent_history: ContextManager,
-    ) -> Option<ChatTreeNodeStartedEvent> {
-        let node_id = turn_id.clone();
-        let event_turn_id = turn_id.clone();
-        if self.nodes.contains_key(&node_id) {
-            return None;
-        }
-        let parent_node_id = self.current_node_id.clone();
-        let order = self.ordered_node_ids.len() as u64;
-        self.revision = self.revision.saturating_add(1);
-        let node = ChatTreeNodeState {
-            parent_node_id: parent_node_id.clone(),
-            turn_id: Some(turn_id),
-            order,
-            status: ChatTreeNodeStatus::Pending,
-            summary: None,
-            history_snapshot: Some(parent_history),
-        };
-        self.nodes.insert(node_id.clone(), node);
-        self.ordered_node_ids.push(node_id.clone());
-        self.current_node_id = Some(node_id.clone());
-        Some(ChatTreeNodeStartedEvent {
-            revision: self.revision,
-            node_id,
-            parent_node_id,
-            turn_id: Some(event_turn_id),
-            order,
+    ) -> Option<ChatTreeNodeStart> {
+        let previous_node_id = self.domain.current_node_id().map(str::to_string);
+        let previous_revision = self.domain.revision();
+        let event = self.domain.start_node(turn_id)?;
+        self.history_snapshots
+            .insert(event.node_id.clone(), parent_history);
+        Some(ChatTreeNodeStart {
+            event,
+            previous_node_id,
+            previous_revision,
         })
     }
 
@@ -96,19 +87,53 @@ impl ChatTreeState {
         node_id: &str,
         status: ChatTreeNodeStatus,
         history_snapshot: ContextManager,
-    ) -> Option<ChatTreeNodeFinalizedEvent> {
-        let node = self.nodes.get_mut(node_id)?;
-        node.status = status;
-        if node.summary.is_none() {
-            node.summary = Some(default_summary(status));
-        }
-        node.history_snapshot = Some(history_snapshot);
-        self.revision = self.revision.saturating_add(1);
-        Some(ChatTreeNodeFinalizedEvent {
-            revision: self.revision,
-            node_id: node_id.to_string(),
-            status,
+    ) -> Option<ChatTreeNodeFinalization> {
+        let previous_node = self.domain.node(node_id)?.clone();
+        let previous_revision = self.domain.revision();
+        let previous_history_snapshot = self.history_snapshots.get(node_id).cloned();
+        let event = self.domain.finalize_node(node_id, status)?;
+        self.history_snapshots
+            .insert(node_id.to_string(), history_snapshot);
+        Some(ChatTreeNodeFinalization {
+            event,
+            previous_node,
+            previous_revision,
+            previous_history_snapshot,
         })
+    }
+
+    pub(crate) fn rollback_node_start(&mut self, start: &ChatTreeNodeStart) {
+        self.domain.rollback_started_node(
+            &start.event,
+            start.previous_node_id.clone(),
+            start.previous_revision,
+        );
+        self.history_snapshots.remove(&start.event.node_id);
+    }
+
+    pub(crate) fn rollback_node_finalization(&mut self, finalization: &ChatTreeNodeFinalization) {
+        self.domain.restore_node_for_rollback(
+            finalization.previous_node.clone(),
+            finalization.previous_revision,
+        );
+        if let Some(history_snapshot) = &finalization.previous_history_snapshot {
+            self.history_snapshots
+                .insert(finalization.event.node_id.clone(), history_snapshot.clone());
+        } else {
+            self.history_snapshots.remove(&finalization.event.node_id);
+        }
+    }
+
+    pub(crate) fn update_current_history_snapshot(
+        &mut self,
+        history_snapshot: ContextManager,
+    ) -> bool {
+        let Some(current_node_id) = self.domain.current_node_id() else {
+            return false;
+        };
+        self.history_snapshots
+            .insert(current_node_id.to_string(), history_snapshot);
+        true
     }
 
     pub(crate) fn set_current_node(
@@ -117,104 +142,110 @@ impl ChatTreeState {
         expected_revision: Option<u64>,
     ) -> Result<ChatTreeSelection, ChatTreeError> {
         if let Some(expected) = expected_revision
-            && expected != self.revision
+            && expected != self.domain.revision()
         {
             return Err(ChatTreeError::RevisionConflict {
                 expected,
-                actual: self.revision,
+                actual: self.domain.revision(),
             });
         }
-        let Some(node) = self.nodes.get(node_id) else {
+        if self.domain.node(node_id).is_none() {
             return Err(ChatTreeError::UnknownNode(node_id.to_string()));
-        };
-        let Some(history) = node.history_snapshot.clone() else {
+        }
+        let Some(history) = self.history_snapshots.get(node_id).cloned() else {
             return Err(ChatTreeError::MissingSnapshot(node_id.to_string()));
         };
-        self.current_node_id = Some(node_id.to_string());
-        self.revision = self.revision.saturating_add(1);
+        let previous_node_id = self.domain.current_node_id().map(str::to_string);
+        let previous_revision = self.domain.revision();
+        let event = self
+            .domain
+            .set_current_node(node_id, expected_revision)
+            .map_err(ChatTreeError::from)?;
         Ok(ChatTreeSelection {
-            event: ChatTreeCurrentNodeChangedEvent {
-                revision: self.revision,
-                node_id: node_id.to_string(),
-                change_kind: ChatTreeChangeKind::CurrentNodeChanged,
-            },
+            event,
             history,
+            previous_node_id,
+            previous_revision,
         })
+    }
+
+    pub(crate) fn rollback_current_node_change(&mut self, selection: &ChatTreeSelection) {
+        self.domain.rollback_current_node_change(
+            &selection.event,
+            selection.previous_node_id.clone(),
+            selection.previous_revision,
+        );
     }
 
     pub(crate) fn replace_from_replay(
         &mut self,
-        nodes: HashMap<String, ChatTreeNodeState>,
-        ordered_node_ids: Vec<String>,
-        current_node_id: Option<String>,
-        revision: u64,
+        domain: DomainChatTreeState,
+        history_snapshots: HashMap<String, ContextManager>,
     ) {
-        self.nodes = nodes;
-        self.ordered_node_ids = ordered_node_ids;
-        self.current_node_id = current_node_id;
-        self.revision = revision;
+        self.domain = domain;
+        self.history_snapshots = history_snapshots;
     }
 
     pub(crate) fn projection(&self) -> ChatTreeProjectionSnapshot {
-        let mut visible_node_ids = Vec::new();
-        let mut next_node_id = self.current_node_id.clone();
-        while let Some(node_id) = next_node_id {
-            let Some(node) = self.nodes.get(&node_id) else {
-                break;
-            };
-            visible_node_ids.push(node_id);
-            next_node_id = node.parent_node_id.clone();
-        }
-        visible_node_ids.reverse();
-        let visible_turn_ids = visible_node_ids
-            .iter()
-            .filter_map(|node_id| self.nodes.get(node_id))
-            .filter_map(|node| node.turn_id.clone())
-            .collect();
-        let nodes = self
-            .ordered_node_ids
-            .iter()
-            .filter_map(|node_id| {
-                let node = self.nodes.get(node_id)?;
-                Some(ChatTreeNodeSnapshot {
-                    node_id: node_id.clone(),
-                    parent_node_id: node.parent_node_id.clone(),
-                    turn_id: node.turn_id.clone(),
-                    order: node.order,
-                    status: node.status,
-                    summary: node.summary.clone(),
-                })
-            })
-            .collect();
+        ChatTreeProjectionSnapshot::from(self.domain.projection())
+    }
+}
 
-        ChatTreeProjectionSnapshot {
-            version: 1,
-            revision: self.revision,
-            current_node_id: self.current_node_id.clone(),
-            visible_node_ids,
-            visible_turn_ids,
-            nodes,
+impl From<ChatTreeApplyError> for ChatTreeError {
+    fn from(value: ChatTreeApplyError) -> Self {
+        match value {
+            ChatTreeApplyError::DuplicateNode(node_id) => ChatTreeError::Persistence(format!(
+                "duplicate chat tree node in domain event: {node_id}"
+            )),
+            ChatTreeApplyError::MissingParent {
+                node_id,
+                parent_node_id,
+            } => ChatTreeError::Persistence(format!(
+                "chat tree node {node_id} references missing parent {parent_node_id}"
+            )),
+            ChatTreeApplyError::UnknownNode(node_id) => ChatTreeError::UnknownNode(node_id),
+            ChatTreeApplyError::RevisionConflict { expected, actual } => {
+                ChatTreeError::RevisionConflict { expected, actual }
+            }
+            ChatTreeApplyError::NonIncreasingRevision { current, incoming } => {
+                ChatTreeError::Persistence(format!(
+                    "stale chat tree event revision {incoming} ignored at revision {current}"
+                ))
+            }
         }
     }
 }
 
-pub(crate) fn default_summary(status: ChatTreeNodeStatus) -> String {
-    match status {
-        ChatTreeNodeStatus::Pending => "turn pending",
-        ChatTreeNodeStatus::Completed => "turn completed",
-        ChatTreeNodeStatus::Interrupted => "turn interrupted",
-        ChatTreeNodeStatus::Replaced => "turn replaced",
-        ChatTreeNodeStatus::ReviewEnded => "turn review ended",
+impl From<DomainChatTreeProjection> for ChatTreeProjectionSnapshot {
+    fn from(value: DomainChatTreeProjection) -> Self {
+        Self {
+            version: value.version,
+            revision: value.revision,
+            current_node_id: value.current_node_id,
+            visible_node_ids: value.visible_node_ids,
+            visible_turn_ids: value.visible_turn_ids,
+            nodes: value.nodes.into_iter().map(Into::into).collect(),
+        }
     }
-    .to_string()
+}
+
+impl From<DomainChatTreeNode> for ChatTreeNodeSnapshot {
+    fn from(value: DomainChatTreeNode) -> Self {
+        Self {
+            node_id: value.node_id,
+            parent_node_id: value.parent_node_id,
+            turn_id: value.turn_id,
+            order: value.order,
+            status: value.status,
+            summary: value.summary,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct ReplayedChatTree {
-    pub(crate) nodes: HashMap<String, ChatTreeNodeState>,
-    pub(crate) ordered_node_ids: Vec<String>,
-    pub(crate) current_node_id: Option<String>,
-    pub(crate) revision: u64,
+    pub(crate) domain: DomainChatTreeState,
+    pub(crate) history_snapshots: HashMap<String, ContextManager>,
     pub(crate) current_history: Option<ContextManager>,
     pub(crate) current_reference_context_item: Option<TurnContextItem>,
 }
@@ -236,8 +267,8 @@ mod tests {
             .expect("child node should start");
 
         assert_eq!(
-            root_event,
-            ChatTreeNodeStartedEvent {
+            root_event.event,
+            ChatTreeNodeStarted {
                 revision: 1,
                 node_id: "turn-a".to_string(),
                 parent_node_id: None,
@@ -246,8 +277,8 @@ mod tests {
             }
         );
         assert_eq!(
-            child_event,
-            ChatTreeNodeStartedEvent {
+            child_event.event,
+            ChatTreeNodeStarted {
                 revision: 2,
                 node_id: "turn-b".to_string(),
                 parent_node_id: Some("turn-a".to_string()),
@@ -255,7 +286,10 @@ mod tests {
                 order: 1,
             }
         );
-        assert_eq!(chat_tree.current_node_id, Some("turn-b".to_string()));
+        assert_eq!(
+            chat_tree.projection().current_node_id,
+            Some("turn-b".to_string())
+        );
     }
 
     #[test]
@@ -273,8 +307,9 @@ mod tests {
                 .is_none()
         );
 
-        assert_eq!(chat_tree.revision, 1);
-        assert_eq!(chat_tree.ordered_node_ids, vec!["turn-a".to_string()]);
+        let projection = chat_tree.projection();
+        assert_eq!(projection.revision, 1);
+        assert_eq!(projection.nodes[0].node_id, "turn-a");
     }
 
     #[test]
@@ -293,8 +328,9 @@ mod tests {
                 actual: 1,
             })
         );
-        assert_eq!(chat_tree.current_node_id, Some("turn-a".to_string()));
-        assert_eq!(chat_tree.revision, 1);
+        let projection = chat_tree.projection();
+        assert_eq!(projection.current_node_id, Some("turn-a".to_string()));
+        assert_eq!(projection.revision, 1);
     }
 
     #[test]
@@ -313,24 +349,24 @@ mod tests {
             .expect("node should finalize");
 
         assert_eq!(
-            event,
-            ChatTreeNodeFinalizedEvent {
+            event.event,
+            ChatTreeNodeFinalized {
                 revision: 2,
                 node_id: "turn-a".to_string(),
                 status: ChatTreeNodeStatus::Interrupted,
             }
         );
         assert_eq!(
-            chat_tree.nodes.get("turn-a").map(|node| (
-                node.status,
-                node.summary.as_deref(),
-                node.history_snapshot.is_some()
-            )),
-            Some((
-                ChatTreeNodeStatus::Interrupted,
-                Some("turn interrupted"),
-                true
-            ))
+            chat_tree.projection().nodes,
+            vec![ChatTreeNodeSnapshot {
+                node_id: "turn-a".to_string(),
+                parent_node_id: None,
+                turn_id: Some("turn-a".to_string()),
+                order: 0,
+                status: ChatTreeNodeStatus::Interrupted,
+                summary: Some("Turn 1 · interrupted".to_string()),
+            }]
         );
+        assert!(chat_tree.history_snapshots.contains_key("turn-a"));
     }
 }

@@ -1,0 +1,11 @@
+---
+source: tui/src/chatwidget/tests/slash_commands.rs
+expression: popup
+---
+  Chat tree
+  Select a node for future turns.
+    [ ] Inspect project
+    [ ]   Implement parser
+  > [*]     Add tests
+    [ ]   Turn 4 · interrupted
+  Space/Enter switch · ↑/↓/j/k move · q/Esc close

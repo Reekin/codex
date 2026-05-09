@@ -272,6 +272,13 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
             }
+            AppEvent::RefreshChatTreeTranscript {
+                thread_id,
+                chat_tree,
+            } => {
+                self.refresh_chat_tree_transcript(tui, app_server, thread_id, chat_tree)
+                    .await?;
+            }
             AppEvent::StartCommitAnimation => {
                 if self
                     .commit_anim_running

@@ -173,6 +173,219 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
 }
 
 #[tokio::test]
+async fn reconstruct_chat_tree_does_not_attach_post_switch_items_to_selected_node() {
+    let (session, turn_context) = make_session_and_context().await;
+    let turn_a_id = "turn-a".to_string();
+    let turn_a_user = user_message("turn A user");
+    let turn_a_assistant = assistant_message("turn A assistant");
+    let stray_assistant = assistant_message("stray assistant after current switch");
+
+    let rollout_items = vec![
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: turn_a_id.clone(),
+                started_at: None,
+                model_context_window: Some(128_000),
+                collaboration_mode_kind: ModeKind::Default,
+            },
+        )),
+        RolloutItem::EventMsg(EventMsg::ChatTreeNodeStarted(Box::new(
+            codex_protocol::protocol::ChatTreeNodeStartedEvent {
+                revision: 1,
+                node_id: turn_a_id.clone(),
+                parent_node_id: None,
+                turn_id: Some(turn_a_id.clone()),
+                order: 0,
+            },
+        ))),
+        RolloutItem::ResponseItem(turn_a_user.clone()),
+        RolloutItem::ResponseItem(turn_a_assistant.clone()),
+        RolloutItem::EventMsg(EventMsg::ChatTreeNodeFinalized(Box::new(
+            codex_protocol::protocol::ChatTreeNodeFinalizedEvent {
+                revision: 2,
+                node_id: turn_a_id.clone(),
+                status: codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+            },
+        ))),
+        RolloutItem::EventMsg(EventMsg::TurnComplete(
+            codex_protocol::protocol::TurnCompleteEvent {
+                turn_id: turn_a_id.clone(),
+                last_agent_message: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            },
+        )),
+        RolloutItem::EventMsg(EventMsg::ChatTreeCurrentNodeChanged(Box::new(
+            codex_protocol::protocol::ChatTreeCurrentNodeChangedEvent {
+                revision: 3,
+                node_id: turn_a_id,
+            },
+        ))),
+        RolloutItem::ResponseItem(stray_assistant),
+    ];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+    let chat_tree = reconstructed.chat_tree.expect("chat tree should replay");
+    let current_history = chat_tree
+        .current_history
+        .expect("current node should have a history snapshot");
+
+    assert_eq!(
+        current_history.raw_items(),
+        &[turn_a_user, turn_a_assistant]
+    );
+}
+
+#[tokio::test]
+async fn reconstruct_chat_tree_applies_standalone_compaction_to_current_node() {
+    let (session, turn_context) = make_session_and_context().await;
+    let turn_a_id = "turn-a".to_string();
+    let compacted_history = vec![user_message("compacted branch summary")];
+
+    let rollout_items = vec![
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: turn_a_id.clone(),
+                started_at: None,
+                model_context_window: Some(128_000),
+                collaboration_mode_kind: ModeKind::Default,
+            },
+        )),
+        RolloutItem::EventMsg(EventMsg::ChatTreeNodeStarted(Box::new(
+            codex_protocol::protocol::ChatTreeNodeStartedEvent {
+                revision: 1,
+                node_id: turn_a_id.clone(),
+                parent_node_id: None,
+                turn_id: Some(turn_a_id.clone()),
+                order: 0,
+            },
+        ))),
+        RolloutItem::ResponseItem(user_message("turn A user")),
+        RolloutItem::EventMsg(EventMsg::ChatTreeNodeFinalized(Box::new(
+            codex_protocol::protocol::ChatTreeNodeFinalizedEvent {
+                revision: 2,
+                node_id: turn_a_id.clone(),
+                status: codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+            },
+        ))),
+        RolloutItem::EventMsg(EventMsg::TurnComplete(
+            codex_protocol::protocol::TurnCompleteEvent {
+                turn_id: turn_a_id,
+                last_agent_message: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            },
+        )),
+        RolloutItem::Compacted(CompactedItem {
+            message: "compacted branch summary".to_string(),
+            replacement_history: Some(compacted_history.clone()),
+        }),
+    ];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+    let chat_tree = reconstructed.chat_tree.expect("chat tree should replay");
+
+    assert_eq!(
+        chat_tree
+            .current_history
+            .expect("current node should have compacted snapshot")
+            .raw_items(),
+        compacted_history.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn reconstruct_chat_tree_thread_rollback_prunes_current_branch() {
+    let (session, turn_context) = make_session_and_context().await;
+    let turn_a_id = "turn-a".to_string();
+    let turn_b_id = "turn-b".to_string();
+
+    let rollout_items = vec![
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: turn_a_id.clone(),
+                started_at: None,
+                model_context_window: Some(128_000),
+                collaboration_mode_kind: ModeKind::Default,
+            },
+        )),
+        RolloutItem::EventMsg(EventMsg::ChatTreeNodeStarted(Box::new(
+            codex_protocol::protocol::ChatTreeNodeStartedEvent {
+                revision: 1,
+                node_id: turn_a_id.clone(),
+                parent_node_id: None,
+                turn_id: Some(turn_a_id.clone()),
+                order: 0,
+            },
+        ))),
+        RolloutItem::ResponseItem(user_message("turn A user")),
+        RolloutItem::EventMsg(EventMsg::ChatTreeNodeFinalized(Box::new(
+            codex_protocol::protocol::ChatTreeNodeFinalizedEvent {
+                revision: 2,
+                node_id: turn_a_id.clone(),
+                status: codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+            },
+        ))),
+        RolloutItem::EventMsg(EventMsg::TurnComplete(
+            codex_protocol::protocol::TurnCompleteEvent {
+                turn_id: turn_a_id.clone(),
+                last_agent_message: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            },
+        )),
+        RolloutItem::EventMsg(EventMsg::TurnStarted(
+            codex_protocol::protocol::TurnStartedEvent {
+                turn_id: turn_b_id.clone(),
+                started_at: None,
+                model_context_window: Some(128_000),
+                collaboration_mode_kind: ModeKind::Default,
+            },
+        )),
+        RolloutItem::EventMsg(EventMsg::ChatTreeNodeStarted(Box::new(
+            codex_protocol::protocol::ChatTreeNodeStartedEvent {
+                revision: 3,
+                node_id: turn_b_id.clone(),
+                parent_node_id: Some(turn_a_id.clone()),
+                turn_id: Some(turn_b_id.clone()),
+                order: 1,
+            },
+        ))),
+        RolloutItem::ResponseItem(user_message("turn B user")),
+        RolloutItem::EventMsg(EventMsg::ChatTreeNodeFinalized(Box::new(
+            codex_protocol::protocol::ChatTreeNodeFinalizedEvent {
+                revision: 4,
+                node_id: turn_b_id,
+                status: codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+            },
+        ))),
+        RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+            codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+        )),
+    ];
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+    let projection = reconstructed
+        .chat_tree
+        .expect("chat tree should replay")
+        .domain
+        .projection();
+
+    assert_eq!(projection.current_node_id, Some(turn_a_id.clone()));
+    assert_eq!(projection.visible_turn_ids, vec![turn_a_id]);
+    assert_eq!(projection.nodes.len(), 1);
+}
+
+#[tokio::test]
 async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_completed_turns() {
     let (session, turn_context) = make_session_and_context().await;
     let first_context_item = turn_context.to_turn_context_item();

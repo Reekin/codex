@@ -82,6 +82,7 @@ use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppInfo;
 use codex_app_server_protocol::AppSummary;
+use codex_app_server_protocol::ChatTreeChangeKind;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
 use codex_app_server_protocol::CollabAgentState as AppServerCollabAgentState;
 use codex_app_server_protocol::CollabAgentStatus as AppServerCollabAgentStatus;
@@ -382,6 +383,8 @@ use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod goal_status;
 use self::goal_status::GoalStatusState;
+mod chat_tree;
+use self::chat_tree::ChatTreeUiState;
 #[cfg(test)]
 use self::goal_status::goal_status_indicator_from_app_goal;
 mod goal_menu;
@@ -938,6 +941,7 @@ pub(crate) struct ChatWidget {
     budget_limited_turn_ids: HashSet<String>,
     thread_name: Option<String>,
     thread_rename_block_message: Option<String>,
+    chat_tree: ChatTreeUiState,
     active_side_conversation: bool,
     normal_placeholder_text: String,
     side_placeholder_text: String,
@@ -5377,6 +5381,7 @@ impl ChatWidget {
             budget_limited_turn_ids: HashSet::new(),
             thread_name: None,
             thread_rename_block_message: None,
+            chat_tree: ChatTreeUiState::default(),
             active_side_conversation: false,
             normal_placeholder_text: placeholder,
             side_placeholder_text: side_placeholder,
@@ -7007,6 +7012,26 @@ impl ChatWidget {
                     self.on_realtime_conversation_sdp(notification.sdp);
                 }
             }
+            ServerNotification::ChatTreeUpdated(notification) => {
+                if notification.chat_tree.revision <= self.chat_tree.revision() {
+                    return;
+                }
+                let should_refresh_transcript = !from_replay
+                    && matches!(
+                        notification.change.r#type,
+                        ChatTreeChangeKind::CurrentNodeChanged | ChatTreeChangeKind::TreeRebuilt
+                    );
+                let chat_tree = *notification.chat_tree;
+                self.set_chat_tree_projection(chat_tree.clone());
+                if should_refresh_transcript
+                    && let Ok(thread_id) = ThreadId::from_string(&notification.thread_id)
+                {
+                    self.app_event_tx.send(AppEvent::RefreshChatTreeTranscript {
+                        thread_id,
+                        chat_tree,
+                    });
+                }
+            }
             ServerNotification::ServerRequestResolved(_)
             | ServerNotification::AccountUpdated(_)
             | ServerNotification::AccountRateLimitsUpdated(_)
@@ -7014,7 +7039,6 @@ impl ChatWidget {
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadArchived(_)
             | ServerNotification::ThreadUnarchived(_)
-            | ServerNotification::ChatTreeUpdated(_)
             | ServerNotification::RawResponseItemCompleted(_)
             | ServerNotification::CommandExecOutputDelta(_)
             | ServerNotification::FileChangePatchUpdated(_)
@@ -7609,18 +7633,30 @@ impl ChatWidget {
             EventMsg::CollabResumeBegin(ev) => self.on_collab_event(multi_agents::resume_begin(ev)),
             EventMsg::CollabResumeEnd(ev) => self.on_collab_event(multi_agents::resume_end(ev)),
             EventMsg::ThreadRolledBack(rollback) => {
+                let rollback_msg = EventMsg::ThreadRolledBack(rollback.clone());
+                if from_replay {
+                    self.chat_tree.apply_replay_event(&rollback_msg);
+                } else {
+                    self.chat_tree.apply_event(&rollback_msg);
+                }
                 if from_replay {
                     self.app_event_tx.send(AppEvent::ApplyThreadRollback {
                         num_turns: rollback.num_turns,
                     });
                 }
             }
-            EventMsg::RawResponseItem(_)
-            | EventMsg::ItemStarted(_)
-            | EventMsg::ChatTreeNodeStarted(_)
+            event_msg @ (EventMsg::ChatTreeNodeStarted(_)
             | EventMsg::ChatTreeNodeFinalized(_)
             | EventMsg::ChatTreeNodeSummaryUpdated(_)
-            | EventMsg::ChatTreeCurrentNodeChanged(_)
+            | EventMsg::ChatTreeCurrentNodeChanged(_)) => {
+                if from_replay {
+                    self.chat_tree.apply_replay_event(&event_msg);
+                } else {
+                    self.chat_tree.apply_event(&event_msg);
+                }
+            }
+            EventMsg::RawResponseItem(_)
+            | EventMsg::ItemStarted(_)
             | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::PatchApplyUpdated(_)
             | EventMsg::ReasoningContentDelta(_)
@@ -10944,6 +10980,33 @@ impl ChatWidget {
 
     pub(crate) fn add_info_message(&mut self, message: String, hint: Option<String>) {
         self.add_to_history(history_cell::new_info_event(message, hint));
+        self.request_redraw();
+    }
+
+    pub(crate) fn open_chat_tree_popup(&mut self) {
+        if self.bottom_pane.is_task_running() {
+            self.add_error_message(
+                "Cannot switch chat tree nodes while a task is running.".to_string(),
+            );
+            return;
+        }
+        let Some(view) = self.chat_tree.view(self.app_event_tx.clone()) else {
+            self.add_info_message(
+                "Chat tree is empty. Send a prompt first, then use /chattree to switch branches."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        };
+        self.bottom_pane.show_view(Box::new(view));
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_chat_tree_projection(
+        &mut self,
+        projection: codex_app_server_protocol::ChatTreeProjection,
+    ) {
+        self.chat_tree.set_projection(projection);
         self.request_redraw();
     }
 

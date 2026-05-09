@@ -73,6 +73,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 mod analytics_utils;
 mod app_server_tracing;
 mod bespoke_event_handling;
+mod chat_tree_projection;
 mod codex_message_processor;
 mod command_exec;
 mod config;

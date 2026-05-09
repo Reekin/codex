@@ -775,6 +775,13 @@ pub enum Op {
     /// model.
     SetThreadMemoryMode { mode: ThreadMemoryMode },
 
+    /// Set the current chat-tree node for future turns.
+    SetCurrentChatTreeNode {
+        node_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<u64>,
+    },
+
     /// Legacy request to undo a turn.
     ///
     /// The op is still accepted for compatibility, but ghost snapshots are no
@@ -909,6 +916,7 @@ impl Op {
             Self::Compact => "compact",
             Self::SetThreadName { .. } => "set_thread_name",
             Self::SetThreadMemoryMode { .. } => "set_thread_memory_mode",
+            Self::SetCurrentChatTreeNode { .. } => "set_current_chat_tree_node",
             Self::Undo => "undo",
             Self::ThreadRollback { .. } => "thread_rollback",
             Self::Review { .. } => "review",
@@ -2076,6 +2084,28 @@ pub enum ChatTreeNodeStatus {
     ReviewEnded,
 }
 
+impl ChatTreeNodeStatus {
+    pub fn default_summary(self) -> &'static str {
+        match self {
+            ChatTreeNodeStatus::Pending => "turn pending",
+            ChatTreeNodeStatus::Completed => "turn completed",
+            ChatTreeNodeStatus::Interrupted => "turn interrupted",
+            ChatTreeNodeStatus::Replaced => "turn replaced",
+            ChatTreeNodeStatus::ReviewEnded => "turn review ended",
+        }
+    }
+
+    pub fn summary_label(self) -> &'static str {
+        match self {
+            ChatTreeNodeStatus::Pending => "pending",
+            ChatTreeNodeStatus::Completed => "completed",
+            ChatTreeNodeStatus::Interrupted => "interrupted",
+            ChatTreeNodeStatus::Replaced => "replaced",
+            ChatTreeNodeStatus::ReviewEnded => "review ended",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(rename_all = "camelCase")]
@@ -2114,7 +2144,6 @@ pub struct ChatTreeNodeSummaryUpdatedEvent {
 pub struct ChatTreeCurrentNodeChangedEvent {
     pub revision: u64,
     pub node_id: String,
-    pub change_kind: ChatTreeChangeKind,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq, JsonSchema, TS)]
