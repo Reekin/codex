@@ -107,7 +107,20 @@ Minimum before considering migration complete:
 - native/app-server TUI behavior matches;
 - late summary does not alter context.
 
-## 10. Triage Review Feedback
+## 10. Prepare Release Handoff
+
+Use `release-automation.md`.
+
+Before pushing a completed migration branch:
+
+- confirm the branch contains `.github/workflows/windows-codex-branch-release.yml`;
+- keep this downstream workflow separate from upstream official release workflows;
+- update only the workflow's build/staging adapter if upstream changed the build layout;
+- run a lightweight workflow sanity check.
+
+If a clean upstream tag does not contain the workflow, copy it from the current chat-tree maintenance branch before the final push.
+
+## 11. Triage Review Feedback
 
 Before starting another refactor round, classify review items using `implementation-guide.md`:
 
@@ -117,7 +130,7 @@ Before starting another refactor round, classify review items using `implementat
 
 Do not keep reshaping a working implementation unless the proposed change is tied to a contract rule, a test-matrix gap, or a specific future-portability risk.
 
-## 11. Update Skill References
+## 12. Update Skill References
 
 Add reusable findings to:
 
@@ -125,6 +138,7 @@ Add reusable findings to:
 - `v116-review.md` for newly discovered pitfalls;
 - `architecture.md` for new upstream adaptation patterns;
 - `test-matrix.md` for new regression scenarios.
+- `release-automation.md` for reusable release handoff lessons.
 
 ## Common Mistakes
 
@@ -140,3 +154,4 @@ Add reusable findings to:
 - Letting review loops continue without classifying findings as P0/P1/P2.
 - Claiming native/app-server TUI parity when one path refreshes model context but not visible transcript.
 - Treating antivirus, symlink, or lockfile noise as feature bugs before checking the local Windows environment.
+- Finishing and pushing a migration branch without the downstream branch-release workflow, leaving users with no fresh downloadable binary.

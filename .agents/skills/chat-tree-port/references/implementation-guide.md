@@ -15,6 +15,7 @@ A migration is complete only when all of these are true:
 - app-server clients can use stable `chatTree/read`, `chatTree/setCurrent`, and `chatTree/updated`;
 - every supported UI path shows the same current branch that the next turn will use;
 - tests cover the golden branch scenario, replay, app-server contract, and supported UI behavior.
+- pushing the completed migration branch automatically produces a Windows development prerelease artifact.
 
 ## Reference Technical Design
 
@@ -67,7 +68,8 @@ The normal porting loop should be:
 2. map upstream hooks;
 3. write thin adapters around those hooks;
 4. run the golden tests;
-5. only then adjust design if an invariant cannot be satisfied.
+5. verify branch-push release automation still exists and matches the current build layout;
+6. only then adjust design if an invariant cannot be satisfied.
 
 If the implementation starts by changing domain semantics, app-server field names, projection rules, or overlay behavior, stop and justify the deviation before continuing.
 

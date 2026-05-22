@@ -19,8 +19,9 @@ When upstream changes are small enough, prefer a normal rebase and keep the reus
 4. Read `references/implementation-guide.md` before implementing, triaging review feedback, resuming a long migration, or deciding whether another refactor is worth doing.
 5. Read `references/test-matrix.md` before writing or accepting tests.
 6. Read `references/app-server-compat.md` before changing app-server API, schema, notifications, or external-client behavior.
-7. Read `references/architecture.md` when deciding how much to refactor or when upstream architecture has changed.
-8. Read `references/v116-review.md` when comparing against the v116 reference branch or investigating regressions.
+7. Read `references/release-automation.md` before pushing a completed migration branch.
+8. Read `references/architecture.md` when deciding how much to refactor or when upstream architecture has changed.
+9. Read `references/v116-review.md` when comparing against the v116 reference branch or investigating regressions.
 
 ## Branch Strategy
 
@@ -70,10 +71,14 @@ When upstream changes are small enough, prefer a normal rebase and keep the reus
    - Add or update tests from `references/test-matrix.md`.
    - Verify resume/replay and app-server paths, not just live native TUI behavior.
 
-5. **Update this skill**
+5. **Prepare release automation**
+   - Ensure the downstream branch contains the branch-push Windows release workflow described in `references/release-automation.md`.
+   - A completed migration branch should produce a GitHub prerelease automatically after it is pushed.
+
+6. **Update this skill**
    - Add new architecture notes or new pitfalls to the reference docs when migration reveals a reusable lesson.
 
-6. **Stop review loops deliberately**
+7. **Stop review loops deliberately**
    - Classify every review item as P0 contract break, P1 portability/test hardening, or P2 long-term debt.
    - Fix all P0 items before claiming the migration is complete.
    - Fix P1 items when they are small or when they protect future migrations.
@@ -108,6 +113,7 @@ Adapt commands to the changed crates and current upstream layout.
 - If changing common/core/protocol behavior, ask before running the complete workspace test suite.
 - For UI-visible changes, update and review insta snapshots.
 - For app-server changes, validate the wire-level fixtures and compatibility rules in `references/app-server-compat.md`.
+- Before pushing a completed migration branch, verify the branch contains the automatic dev release workflow from `references/release-automation.md`.
 
 ## Stop Conditions
 
@@ -122,3 +128,4 @@ Stop and report before finalizing if:
 - Validation depends on manual UI interaction without an equivalent CLI/RPC/test path.
 - External app-server clients or scripts would need schema/method changes without an explicit compatibility plan.
 - Review feedback contains untriaged P0/P1/P2 items, making it unclear whether more refactoring is required for correctness or only for long-term polish.
+- A completed migration branch has no branch-push release workflow, because downstream users would not get a fresh executable after push.
