@@ -1,5 +1,6 @@
 use super::emit_turn_memory_metric;
 use super::emit_turn_network_proxy_metric;
+use super::summarize_for_chat_tree;
 use codex_otel::MetricsClient;
 use codex_otel::MetricsConfig;
 use codex_otel::SessionTelemetry;
@@ -55,6 +56,28 @@ fn attributes_to_map<'a>(
     attributes
         .map(|kv| (kv.key.as_str().to_string(), kv.value.as_str().to_string()))
         .collect()
+}
+
+#[test]
+fn summarize_for_chat_tree_uses_first_line_and_strips_quotes() {
+    let summary = summarize_for_chat_tree(
+        Some("\"Implement chat tree summaries\"\nExtra details should be ignored."),
+        "fallback",
+    );
+
+    assert_eq!(summary, "Implement chat tree summaries");
+}
+
+#[test]
+fn summarize_for_chat_tree_limits_length_and_uses_fallback_for_empty_text() {
+    let long_summary = "a".repeat(120);
+    let summary = summarize_for_chat_tree(Some(long_summary.as_str()), "fallback");
+
+    assert_eq!(summary, format!("{}...", "a".repeat(96)));
+    assert_eq!(
+        summarize_for_chat_tree(Some("   \n\t"), "fallback"),
+        "fallback"
+    );
 }
 
 fn metric_point(resource_metrics: &ResourceMetrics, name: &str) -> (BTreeMap<String, String>, u64) {

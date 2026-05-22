@@ -2835,7 +2835,7 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         status: ChatTreeNodeStatus,
-    ) {
+    ) -> bool {
         let Some(finalization) = ({
             let mut state = self.state.lock().await;
             let history_snapshot = state.clone_history();
@@ -2843,7 +2843,7 @@ impl Session {
                 .chat_tree
                 .finalize_node(&turn_context.sub_id, status, history_snapshot)
         }) else {
-            return;
+            return false;
         };
         let msg = EventMsg::ChatTreeNodeFinalized(Box::new(finalization.event.clone().into()));
         if let Err(err) = self
@@ -2856,7 +2856,7 @@ impl Session {
                 "failed to persist chat tree node finalization for turn {}: {err}",
                 turn_context.sub_id
             );
-            return;
+            return false;
         }
         self.services
             .rollout_thread_trace
@@ -2864,6 +2864,47 @@ impl Session {
         self.services
             .rollout_thread_trace
             .record_tool_call_event(turn_context.sub_id.clone(), &msg);
+        self.services
+            .rollout_thread_trace
+            .record_protocol_event(&msg);
+        self.deliver_event_raw(Event {
+            id: turn_context.sub_id.clone(),
+            msg,
+        })
+        .await;
+        true
+    }
+
+    pub(crate) async fn update_chat_tree_node_summary(
+        &self,
+        turn_context: &TurnContext,
+        node_id: &str,
+        summary: String,
+    ) {
+        let Some(update) = ({
+            let mut state = self.state.lock().await;
+            state
+                .chat_tree
+                .update_node_summary(node_id, Some(summary.clone()))
+        }) else {
+            return;
+        };
+        let msg = EventMsg::ChatTreeNodeSummaryUpdated(Box::new(update.event.clone().into()));
+        if let Err(err) = self
+            .persist_rollout_items_durable(&[RolloutItem::EventMsg(msg.clone())])
+            .await
+        {
+            let mut state = self.state.lock().await;
+            state.chat_tree.rollback_node_summary_update(&update);
+            warn!("failed to persist chat tree node summary for turn {node_id}: {err}");
+            return;
+        }
+        self.services
+            .rollout_thread_trace
+            .record_codex_turn_event(node_id, &msg);
+        self.services
+            .rollout_thread_trace
+            .record_tool_call_event(node_id.to_string(), &msg);
         self.services
             .rollout_thread_trace
             .record_protocol_event(&msg);

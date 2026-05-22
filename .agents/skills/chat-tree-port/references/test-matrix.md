@@ -111,6 +111,8 @@ Expected properties:
 ## Summary Tests
 
 - Deterministic summary fallback always returns a bounded single-line label.
+- Completed turns with non-empty assistant output spawn a separate async summary request and persist `NodeSummaryUpdated`.
+- Completed turns without assistant output do not spawn a model summary request.
 - Model summary failure does not fail turn completion.
 - Model summary cancellation does not fail turn completion.
 - Empty model summary falls back or remains pending without breaking tree.

@@ -916,6 +916,7 @@ pub async fn set_current_chat_tree_node(
 
 pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    sess.cancel_all_chat_tree_summary_jobs().await;
     let _ = sess.conversation.shutdown().await;
     sess.services
         .unified_exec_manager
@@ -1224,6 +1225,7 @@ pub(super) async fn submission_loop(
         .unified_exec_manager
         .terminate_all_processes()
         .await;
+    sess.cancel_all_chat_tree_summary_jobs().await;
     let mcp_shutdown = {
         let mut manager = sess.services.mcp_connection_manager.write().await;
         manager.begin_shutdown()

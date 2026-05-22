@@ -4,6 +4,7 @@ use codex_protocol::chat_tree::ChatTreeCurrentNodeChanged;
 use codex_protocol::chat_tree::ChatTreeNode as DomainChatTreeNode;
 use codex_protocol::chat_tree::ChatTreeNodeFinalized;
 use codex_protocol::chat_tree::ChatTreeNodeStarted;
+use codex_protocol::chat_tree::ChatTreeNodeSummaryUpdated;
 use codex_protocol::chat_tree::ChatTreeProjection as DomainChatTreeProjection;
 use codex_protocol::chat_tree::ChatTreeState as DomainChatTreeState;
 use codex_protocol::protocol::ChatTreeNodeStatus;
@@ -64,6 +65,12 @@ pub(crate) struct ChatTreeNodeFinalization {
     previous_history_snapshot: Option<ContextManager>,
 }
 
+pub(crate) struct ChatTreeNodeSummaryUpdate {
+    pub(crate) event: ChatTreeNodeSummaryUpdated,
+    previous_node: DomainChatTreeNode,
+    previous_revision: u64,
+}
+
 impl ChatTreeState {
     pub(crate) fn start_node(
         &mut self,
@@ -122,6 +129,30 @@ impl ChatTreeState {
         } else {
             self.history_snapshots.remove(&finalization.event.node_id);
         }
+    }
+
+    pub(crate) fn update_node_summary(
+        &mut self,
+        node_id: &str,
+        summary: Option<String>,
+    ) -> Option<ChatTreeNodeSummaryUpdate> {
+        let previous_node = self.domain.node(node_id)?.clone();
+        let previous_revision = self.domain.revision();
+        let event = self.domain.update_node_summary(node_id, summary)?;
+        Some(ChatTreeNodeSummaryUpdate {
+            event,
+            previous_node,
+            previous_revision,
+        })
+    }
+
+    pub(crate) fn rollback_node_summary_update(&mut self, update: &ChatTreeNodeSummaryUpdate) {
+        self.domain.restore_node_summary_for_rollback(
+            &update.event.node_id,
+            update.previous_node.summary.clone(),
+            update.previous_revision,
+            update.event.revision,
+        );
     }
 
     pub(crate) fn update_current_history_snapshot(
@@ -365,6 +396,46 @@ mod tests {
                 order: 0,
                 status: ChatTreeNodeStatus::Interrupted,
                 summary: Some("Turn 1 · interrupted".to_string()),
+            }]
+        );
+        assert!(chat_tree.history_snapshots.contains_key("turn-a"));
+    }
+
+    #[test]
+    fn update_node_summary_replaces_default_summary_without_touching_history_cache() {
+        let mut chat_tree = ChatTreeState::default();
+        chat_tree
+            .start_node("turn-a".to_string(), ContextManager::default())
+            .expect("node should start");
+        chat_tree
+            .finalize_node(
+                "turn-a",
+                ChatTreeNodeStatus::Completed,
+                ContextManager::default(),
+            )
+            .expect("node should finalize");
+
+        let update = chat_tree
+            .update_node_summary("turn-a", Some("Implemented chat tree summary".to_string()))
+            .expect("summary should update");
+
+        assert_eq!(
+            update.event,
+            ChatTreeNodeSummaryUpdated {
+                revision: 3,
+                node_id: "turn-a".to_string(),
+                summary: Some("Implemented chat tree summary".to_string()),
+            }
+        );
+        assert_eq!(
+            chat_tree.projection().nodes,
+            vec![ChatTreeNodeSnapshot {
+                node_id: "turn-a".to_string(),
+                parent_node_id: None,
+                turn_id: Some("turn-a".to_string()),
+                order: 0,
+                status: ChatTreeNodeStatus::Completed,
+                summary: Some("Implemented chat tree summary".to_string()),
             }]
         );
         assert!(chat_tree.history_snapshots.contains_key("turn-a"));

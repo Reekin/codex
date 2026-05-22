@@ -2,9 +2,11 @@ use crate::chat_tree::ChatTreeCurrentNodeChanged;
 use crate::chat_tree::ChatTreeEvent;
 use crate::chat_tree::ChatTreeNodeFinalized;
 use crate::chat_tree::ChatTreeNodeStarted;
+use crate::chat_tree::ChatTreeNodeSummaryUpdated;
 use crate::protocol::ChatTreeCurrentNodeChangedEvent;
 use crate::protocol::ChatTreeNodeFinalizedEvent;
 use crate::protocol::ChatTreeNodeStartedEvent;
+use crate::protocol::ChatTreeNodeSummaryUpdatedEvent;
 use crate::protocol::EventMsg;
 use crate::protocol::ThreadRolledBackEvent;
 use crate::protocol::TurnStartedEvent;
@@ -27,6 +29,16 @@ impl From<ChatTreeNodeFinalized> for ChatTreeNodeFinalizedEvent {
             revision: value.revision,
             node_id: value.node_id,
             status: value.status,
+        }
+    }
+}
+
+impl From<ChatTreeNodeSummaryUpdated> for ChatTreeNodeSummaryUpdatedEvent {
+    fn from(value: ChatTreeNodeSummaryUpdated) -> Self {
+        Self {
+            revision: value.revision,
+            node_id: value.node_id,
+            summary: value.summary,
         }
     }
 }

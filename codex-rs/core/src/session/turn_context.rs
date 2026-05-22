@@ -4,9 +4,11 @@ use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::user_input::UserInput;
 use codex_sandboxing::compatibility_sandbox_policy_for_permission_profile;
 use codex_sandboxing::policy_transforms::effective_file_system_sandbox_policy;
 use codex_sandboxing::policy_transforms::effective_network_sandbox_policy;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
@@ -90,6 +92,9 @@ pub(crate) struct TurnContext {
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) turn_skills: TurnSkillsContext,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
+    /// Text from the initial input that started this turn, used by background
+    /// chat tree summaries instead of sampling shared session history.
+    pub(crate) chat_tree_summary_user_message: OnceLock<Option<String>>,
     pub(crate) server_model_warning_emitted: AtomicBool,
     pub(crate) model_verification_emitted: AtomicBool,
 }
@@ -132,6 +137,29 @@ impl TurnContext {
             .as_deref()
             .is_some_and(AuthManager::current_auth_uses_codex_backend);
         self.features.apps_enabled_for_auth(uses_codex_backend)
+    }
+
+    pub(crate) fn capture_chat_tree_summary_user_message(&self, input: &[UserInput]) {
+        let pieces = input
+            .iter()
+            .filter_map(|item| match item {
+                UserInput::Text { text, .. } => {
+                    let trimmed = text.trim();
+                    (!trimmed.is_empty()).then(|| trimmed.to_string())
+                }
+                UserInput::Image { .. }
+                | UserInput::LocalImage { .. }
+                | UserInput::Skill { .. }
+                | UserInput::Mention { .. } => None,
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let message = (!pieces.is_empty()).then(|| pieces.join("\n"));
+        let _ = self.chat_tree_summary_user_message.set(message);
+    }
+
+    pub(crate) fn chat_tree_summary_user_message(&self) -> Option<String> {
+        self.chat_tree_summary_user_message.get().cloned().flatten()
     }
 
     pub(crate) async fn with_model(
@@ -258,6 +286,11 @@ impl TurnContext {
             turn_metadata_state: self.turn_metadata_state.clone(),
             turn_skills: self.turn_skills.clone(),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
+            chat_tree_summary_user_message: {
+                let lock = OnceLock::new();
+                let _ = lock.set(self.chat_tree_summary_user_message());
+                lock
+            },
             server_model_warning_emitted: AtomicBool::new(
                 self.server_model_warning_emitted.load(Ordering::Relaxed),
             ),
@@ -550,6 +583,7 @@ impl Session {
             turn_metadata_state,
             turn_skills: TurnSkillsContext::new(skills_outcome),
             turn_timing_state: Arc::new(TurnTimingState::default()),
+            chat_tree_summary_user_message: OnceLock::new(),
             server_model_warning_emitted: AtomicBool::new(false),
             model_verification_emitted: AtomicBool::new(false),
         }

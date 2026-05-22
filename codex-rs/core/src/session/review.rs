@@ -151,6 +151,7 @@ pub(super) async fn spawn_review_thread(
         turn_metadata_state,
         turn_skills: TurnSkillsContext::new(parent_turn_context.turn_skills.outcome.clone()),
         turn_timing_state: Arc::new(TurnTimingState::default()),
+        chat_tree_summary_user_message: std::sync::OnceLock::new(),
         server_model_warning_emitted: AtomicBool::new(false),
         model_verification_emitted: AtomicBool::new(false),
     };

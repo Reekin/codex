@@ -3609,6 +3609,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         idle_pending_input: Mutex::new(Vec::new()),
         goal_runtime: crate::goals::GoalRuntimeState::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        chat_tree_summary_jobs: Mutex::new(std::collections::HashMap::new()),
+        chat_tree_summary_jobs_changed: tokio::sync::Notify::new(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
     };
@@ -5038,6 +5040,8 @@ where
         idle_pending_input: Mutex::new(Vec::new()),
         goal_runtime: crate::goals::GoalRuntimeState::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        chat_tree_summary_jobs: Mutex::new(std::collections::HashMap::new()),
+        chat_tree_summary_jobs_changed: tokio::sync::Notify::new(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
     });

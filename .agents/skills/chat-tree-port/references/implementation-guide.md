@@ -586,6 +586,16 @@ Recommended order:
 4. optional async/model summary provider;
 5. cancellation/failure tests.
 
+Async/model summary provider rules:
+
+- spawn only after the node finalization event is durably persisted and the main turn completion has been emitted;
+- require non-empty assistant output before calling the model; turns with no assistant text keep deterministic fallback labels;
+- use a small no-tools prompt built from the user request and assistant result, with reasoning summaries disabled;
+- normalize the model result to a single non-empty line with a fixed length cap before persisting;
+- persist the result as `NodeSummaryUpdated`; do not rewrite `NodeFinalized` or the node's context snapshot;
+- cancel outstanding summary jobs on explicit shutdown and implicit session-loop exit;
+- in tests, mount/expect summary model calls separately from main turn calls so the background request cannot consume the next turn's fixture.
+
 Summary generation must never:
 
 - block turn completion;

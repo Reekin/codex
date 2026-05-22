@@ -20,6 +20,13 @@ pub struct ChatTreeNodeFinalized {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatTreeNodeSummaryUpdated {
+    pub revision: u64,
+    pub node_id: String,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatTreeCurrentNodeChanged {
     pub revision: u64,
     pub node_id: String,
@@ -170,6 +177,24 @@ impl ChatTreeState {
         })
     }
 
+    pub fn update_node_summary(
+        &mut self,
+        node_id: &str,
+        summary: Option<String>,
+    ) -> Option<ChatTreeNodeSummaryUpdated> {
+        let node = self.nodes.get_mut(node_id)?;
+        if node.summary == summary {
+            return None;
+        }
+        node.summary = summary.clone();
+        self.revision = self.revision.saturating_add(1);
+        Some(ChatTreeNodeSummaryUpdated {
+            revision: self.revision,
+            node_id: node_id.to_string(),
+            summary,
+        })
+    }
+
     pub fn set_current_node(
         &mut self,
         node_id: &str,
@@ -270,6 +295,21 @@ impl ChatTreeState {
         if self.nodes.contains_key(&node.node_id) {
             self.nodes.insert(node.node_id.clone(), node);
             self.revision = previous_revision;
+        }
+    }
+
+    pub fn restore_node_summary_for_rollback(
+        &mut self,
+        node_id: &str,
+        previous_summary: Option<String>,
+        previous_revision: u64,
+        rollback_revision: u64,
+    ) {
+        if let Some(node) = self.nodes.get_mut(node_id) {
+            node.summary = previous_summary;
+            if self.revision == rollback_revision {
+                self.revision = previous_revision;
+            }
         }
     }
 
@@ -772,6 +812,70 @@ mod tests {
             })
         );
         assert_eq!(state.projection(), before);
+    }
+
+    #[test]
+    fn replay_late_summary_update_changes_only_node_label() {
+        let mut state = ChatTreeState::default();
+        state
+            .apply_event(&ChatTreeEvent::NodeStarted {
+                revision: 1,
+                node_id: "turn-a".to_string(),
+                parent_node_id: None,
+                turn_id: Some("turn-a".to_string()),
+                order: 0,
+            })
+            .unwrap();
+        state
+            .apply_event(&ChatTreeEvent::NodeFinalized {
+                revision: 2,
+                node_id: "turn-a".to_string(),
+                status: ChatTreeNodeStatus::Completed,
+            })
+            .unwrap();
+        let before = state.projection();
+
+        state
+            .apply_event(&ChatTreeEvent::NodeSummaryUpdated {
+                revision: 3,
+                node_id: "turn-a".to_string(),
+                summary: Some("Summarized completed turn".to_string()),
+            })
+            .unwrap();
+
+        let after = state.projection();
+        assert_eq!(after.current_node_id, before.current_node_id);
+        assert_eq!(after.visible_node_ids, before.visible_node_ids);
+        assert_eq!(after.visible_turn_ids, before.visible_turn_ids);
+        assert_eq!(
+            after.nodes[0].summary,
+            Some("Summarized completed turn".to_string())
+        );
+    }
+
+    #[test]
+    fn summary_rollback_restores_label_without_rewinding_later_revisions() {
+        let mut state = ChatTreeState::default();
+        state.start_node("turn-a".to_string()).unwrap();
+        state.finalize_node("turn-a", ChatTreeNodeStatus::Completed);
+        let previous_summary = state.node("turn-a").unwrap().summary.clone();
+        let previous_revision = state.revision();
+        let summary_update = state
+            .update_node_summary("turn-a", Some("Async summary".to_string()))
+            .unwrap();
+        state.start_node("turn-b".to_string()).unwrap();
+
+        state.restore_node_summary_for_rollback(
+            "turn-a",
+            previous_summary.clone(),
+            previous_revision,
+            summary_update.revision,
+        );
+
+        let projection = state.projection();
+        assert_eq!(projection.revision, 4);
+        assert_eq!(projection.nodes[0].summary, previous_summary);
+        assert_eq!(projection.nodes[1].node_id, "turn-b");
     }
 
     #[test]

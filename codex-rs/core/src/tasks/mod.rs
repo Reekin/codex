@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use futures::StreamExt;
 use futures::future::BoxFuture;
 use tokio::select;
 use tokio::sync::Notify;
@@ -41,11 +42,14 @@ use codex_otel::TURN_MEMORY_METRIC;
 use codex_otel::TURN_NETWORK_PROXY_METRIC;
 use codex_otel::TURN_TOKEN_USAGE_METRIC;
 use codex_otel::TURN_TOOL_CALL_METRIC;
+use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ChatTreeNodeStatus;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
@@ -53,8 +57,11 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 
+use crate::client_common::Prompt;
+use crate::client_common::ResponseEvent;
 use codex_features::Feature;
 use codex_protocol::models::ContentItem;
+use codex_rollout_trace::InferenceTraceContext;
 pub(crate) use compact::CompactTask;
 pub(crate) use regular::RegularTask;
 pub(crate) use review::ReviewTask;
@@ -64,6 +71,39 @@ pub(crate) use user_shell::UserShellCommandTask;
 pub(crate) use user_shell::execute_user_shell_command;
 
 const GRACEFULL_INTERRUPTION_TIMEOUT_MS: u64 = 100;
+const CHAT_TREE_SUMMARY_SYSTEM_INSTRUCTIONS: &str =
+    "You generate a concise summary label for one completed assistant turn.";
+const CHAT_TREE_SUMMARY_REQUEST_TEMPLATE: &str = "Summarize this turn for a chat tree node.\nRequirements:\n- single line\n- at most 96 characters\n- no markdown\n- no surrounding quotes\n- describe user intent + assistant outcome\n\nUser message:\n{user_message}\n\nAssistant message:\n{assistant_message}";
+
+fn summarize_for_chat_tree(message: Option<&str>, fallback: &str) -> String {
+    let trimmed = message
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or(fallback);
+    let line = trimmed
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or(fallback);
+    let line = line
+        .strip_prefix('"')
+        .and_then(|line| line.strip_suffix('"'))
+        .unwrap_or(line)
+        .trim();
+    let mut summary = line.chars().take(96).collect::<String>();
+    if line.chars().count() > 96 {
+        summary.push_str("...");
+    }
+    summary
+}
+
+fn abort_reason_summary(reason: &TurnAbortReason) -> &'static str {
+    match reason {
+        TurnAbortReason::Interrupted | TurnAbortReason::BudgetLimited => "turn interrupted",
+        TurnAbortReason::Replaced => "turn replaced",
+        TurnAbortReason::ReviewEnded => "turn review ended",
+    }
+}
 
 fn chat_tree_status_from_abort_reason(reason: &TurnAbortReason) -> ChatTreeNodeStatus {
     match reason {
@@ -327,6 +367,7 @@ impl Session {
             .turn_timing_state
             .mark_turn_started(started_at)
             .await;
+        turn_context.capture_chat_tree_summary_user_message(&input);
         turn_context
             .turn_metadata_state
             .set_turn_started_at_unix_ms(turn_started_at_unix_ms);
@@ -564,6 +605,207 @@ impl Session {
         true
     }
 
+    async fn register_chat_tree_summary_job(&self, node_id: &str) -> CancellationToken {
+        let token = CancellationToken::new();
+        let mut jobs = self.chat_tree_summary_jobs.lock().await;
+        if let Some(previous_token) = jobs.insert(node_id.to_string(), token.clone()) {
+            previous_token.cancel();
+        }
+        token
+    }
+
+    async fn finish_chat_tree_summary_job(&self, node_id: &str) {
+        let mut jobs = self.chat_tree_summary_jobs.lock().await;
+        jobs.remove(node_id);
+        self.chat_tree_summary_jobs_changed.notify_waiters();
+    }
+
+    pub(crate) async fn cancel_all_chat_tree_summary_jobs(&self) {
+        loop {
+            let notified = self.chat_tree_summary_jobs_changed.notified();
+            let tokens = {
+                let jobs = self.chat_tree_summary_jobs.lock().await;
+                if jobs.is_empty() {
+                    return;
+                }
+                jobs.values().cloned().collect::<Vec<_>>()
+            };
+            for token in tokens {
+                token.cancel();
+            }
+            notified.await;
+        }
+    }
+
+    fn spawn_chat_tree_summary_job(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        last_user_message: Option<String>,
+        last_agent_message: Option<String>,
+        cancellation_token: CancellationToken,
+    ) {
+        let sess = Arc::clone(self);
+        tokio::spawn(async move {
+            sess.run_async_chat_tree_summary_job(
+                turn_context,
+                last_user_message,
+                last_agent_message,
+                cancellation_token,
+            )
+            .await;
+        });
+    }
+
+    async fn run_async_chat_tree_summary_job(
+        self: Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        last_user_message: Option<String>,
+        last_agent_message: Option<String>,
+        cancellation_token: CancellationToken,
+    ) {
+        let node_id = turn_context.sub_id.clone();
+        async {
+            let user_message = last_user_message.as_deref().unwrap_or("(none)");
+            let assistant_message = last_agent_message.as_deref().unwrap_or("(none)");
+            let request_payload = CHAT_TREE_SUMMARY_REQUEST_TEMPLATE
+                .replace("{user_message}", user_message)
+                .replace("{assistant_message}", assistant_message);
+            let prompt = Prompt {
+                input: vec![ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: request_payload,
+                    }],
+                    phase: None,
+                }],
+                tools: Vec::new(),
+                parallel_tool_calls: false,
+                base_instructions: BaseInstructions {
+                    text: CHAT_TREE_SUMMARY_SYSTEM_INSTRUCTIONS.to_string(),
+                },
+                personality: None,
+                output_schema: None,
+                output_schema_strict: true,
+            };
+            let mut client_session = self.services.model_client.new_session();
+            let turn_metadata_header = turn_context.turn_metadata_state.current_header_value();
+            let inference_trace_context = InferenceTraceContext::disabled();
+            let started_at = Instant::now();
+            let mut stream = match tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    trace!(
+                        node_id = node_id.as_str(),
+                        "chat tree summary request cancelled before start"
+                    );
+                    return;
+                }
+                stream = client_session.stream(
+                    &prompt,
+                    &turn_context.model_info,
+                    &turn_context.session_telemetry,
+                    None,
+                    ReasoningSummaryConfig::None,
+                    turn_context.config.service_tier,
+                    turn_metadata_header.as_deref(),
+                    &inference_trace_context,
+                ) => stream,
+            } {
+                Ok(stream) => stream,
+                Err(err) => {
+                    warn!(
+                        node_id = node_id.as_str(),
+                        error = %err,
+                        "chat tree summary request failed to start"
+                    );
+                    return;
+                }
+            };
+            let mut response_from_item: Option<String> = None;
+            let mut response_from_deltas = String::new();
+            let mut saw_completed = false;
+            loop {
+                let Some(event_result) = (tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        trace!(
+                            node_id = node_id.as_str(),
+                            "chat tree summary request cancelled during stream"
+                        );
+                        return;
+                    }
+                    event_result = stream.next() => event_result,
+                }) else {
+                    break;
+                };
+                let event = match event_result {
+                    Ok(event) => event,
+                    Err(err) => {
+                        warn!(
+                            node_id = node_id.as_str(),
+                            error = %err,
+                            "chat tree summary stream failed"
+                        );
+                        return;
+                    }
+                };
+                match event {
+                    ResponseEvent::OutputTextDelta(delta) => response_from_deltas.push_str(&delta),
+                    ResponseEvent::OutputItemDone(item) => {
+                        if let ResponseItem::Message { role, content, .. } = item
+                            && role == "assistant"
+                        {
+                            response_from_item = crate::compact::content_items_to_text(&content);
+                        }
+                    }
+                    ResponseEvent::Completed { .. } => {
+                        saw_completed = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if !saw_completed || cancellation_token.is_cancelled() {
+                return;
+            }
+            let response_payload = response_from_item.or_else(|| {
+                let trimmed = response_from_deltas.trim();
+                (!trimmed.is_empty()).then(|| trimmed.to_string())
+            });
+            let Some(response_payload) = response_payload else {
+                warn!(
+                    node_id = node_id.as_str(),
+                    "chat tree summary response had no assistant text"
+                );
+                return;
+            };
+            let summary = summarize_for_chat_tree(Some(response_payload.as_str()), "");
+            if summary.is_empty() {
+                warn!(
+                    node_id = node_id.as_str(),
+                    "chat tree summary response normalized to empty summary"
+                );
+                return;
+            }
+            if cancellation_token.is_cancelled() {
+                return;
+            }
+            let updated = tokio::select! {
+                _ = cancellation_token.cancelled() => false,
+                _ = self.update_chat_tree_node_summary(turn_context.as_ref(), &node_id, summary) => true,
+            };
+            if !updated {
+                return;
+            }
+            trace!(
+                node_id = node_id.as_str(),
+                elapsed_ms = started_at.elapsed().as_millis(),
+                "chat tree summary updated"
+            );
+        }
+        .await;
+        self.finish_chat_tree_summary_job(&node_id).await;
+    }
+
     pub async fn on_task_finished(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
@@ -754,6 +996,12 @@ impl Session {
         {
             warn!("failed to apply goal runtime turn-finished event: {err}");
         }
+        let last_agent_message_for_summary = last_agent_message
+            .clone()
+            .filter(|message| !message.trim().is_empty());
+        let should_summarize_chat_tree_node =
+            !matches!(turn_context.session_source, SessionSource::SubAgent(_))
+                && last_agent_message_for_summary.is_some();
         let event = EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: turn_context.sub_id.clone(),
             last_agent_message,
@@ -761,9 +1009,22 @@ impl Session {
             duration_ms,
             time_to_first_token_ms,
         });
-        self.finalize_chat_tree_node(turn_context.as_ref(), ChatTreeNodeStatus::Completed)
+        let finalized_chat_tree_node = self
+            .finalize_chat_tree_node(turn_context.as_ref(), ChatTreeNodeStatus::Completed)
             .await;
         self.send_event(turn_context.as_ref(), event).await;
+        if should_summarize_chat_tree_node && finalized_chat_tree_node {
+            let last_user_message_for_summary = turn_context.chat_tree_summary_user_message();
+            let cancellation_token = self
+                .register_chat_tree_summary_job(&turn_context.sub_id)
+                .await;
+            self.spawn_chat_tree_summary_job(
+                Arc::clone(&turn_context),
+                last_user_message_for_summary,
+                last_agent_message_for_summary,
+                cancellation_token,
+            );
+        }
         self.services
             .guardian_rejection_circuit_breaker
             .lock()
@@ -859,14 +1120,24 @@ impl Session {
             .completed_at_and_duration_ms()
             .await;
         let chat_tree_status = chat_tree_status_from_abort_reason(&reason);
+        let chat_tree_summary = abort_reason_summary(&reason).to_string();
         let event = EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some(task.turn_context.sub_id.clone()),
             reason,
             completed_at,
             duration_ms,
         });
-        self.finalize_chat_tree_node(task.turn_context.as_ref(), chat_tree_status)
+        let finalized_chat_tree_node = self
+            .finalize_chat_tree_node(task.turn_context.as_ref(), chat_tree_status)
             .await;
+        if finalized_chat_tree_node {
+            self.update_chat_tree_node_summary(
+                task.turn_context.as_ref(),
+                &task.turn_context.sub_id,
+                chat_tree_summary,
+            )
+            .await;
+        }
         self.send_event(task.turn_context.as_ref(), event).await;
         self.services
             .guardian_rejection_circuit_breaker
