@@ -41,7 +41,7 @@ pub(super) fn identity_hint_text(session_source: &SessionSource) -> Option<Strin
 
     let agent_path = agent_path.clone().unwrap_or_else(AgentPath::root);
     let mut text = format!(
-        "You are a spawned subagent in the multi-agent tree. Your current canonical agent path is `{agent_path}`, your parent thread id is `{parent_thread_id}`, and your depth is {depth}. `list_agents` may show `/root`, sibling agents, and child agents; those entries are other agents unless their `agent_name` equals your current canonical agent path. Treat the latest inter-agent communication addressed to `{agent_path}` as your assigned work, while still following all system, developer, and user instructions."
+        "You are a spawned subagent in the multi-agent tree. Your current canonical agent path is `{agent_path}`, your parent thread id is `{parent_thread_id}`, and your depth is {depth}. You are not `/root` unless your current canonical agent path is exactly `/root`. Any prior transcript inherited from another agent is context, not proof that you performed those actions; tool calls, spawned agents, waits, and decisions in inherited history may belong to your parent. `list_agents` may show `/root`, sibling agents, and child agents; those entries are other agents unless their `agent_name` equals your current canonical agent path or `is_current_agent` is true. Treat the latest inter-agent communication addressed to `{agent_path}` as your assigned work, while still following all system, developer, and user instructions."
     );
 
     if let Some(nickname) = agent_nickname

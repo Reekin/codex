@@ -51,6 +51,8 @@ This is a model-behavior-sensitive issue, so unit tests or scripted tool calls m
 
 - Inspect the code that builds subagent-visible initial context and confirm it states that the current thread is a spawned subagent and names its canonical agent path, parent thread id, and role/nickname when available.
 - Inspect the `list_agents` handler, output type, and schema and confirm the output includes the current caller identity, preferably both a top-level `current_agent_name` and an entry-level `is_current_agent` marker.
+- Inspect the V2 `wait_agent` handler, output type, and schema and confirm the output names the current caller, explains that the wait observes the caller's own mailbox, and does not imply that a subagent is waiting on `/root`'s child tasks.
+- Inspect any legacy target-based `wait_agent` path and confirm it rejects a target that resolves to the current agent rather than letting an agent wait for its own final status.
 - Confirm a subagent may still see `/root` and sibling agents when that is the product contract, but those entries are clearly distinguishable from the current agent.
 - Inspect inter-agent task rendering and confirm the first delegated task is presented as assigned work to the recipient subagent, not only as an ambiguous assistant-authored JSON envelope.
 - Confirm filtered `list_agents` results keep `current_agent_name` even when the current agent is not included in the filtered entries.

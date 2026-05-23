@@ -78,7 +78,11 @@ impl ToolExecutor<ToolInvocation> for Handler {
 
         let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
         let timed_out = !wait_for_mailbox_change(&mut mailbox_rx, deadline).await;
-        let result = WaitAgentResult::from_timed_out(timed_out);
+        let current_agent_path = turn
+            .session_source
+            .get_agent_path()
+            .unwrap_or_else(AgentPath::root);
+        let result = WaitAgentResult::from_timed_out(timed_out, current_agent_path.to_string());
 
         session
             .send_event(
@@ -112,19 +116,25 @@ struct WaitArgs {
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct WaitAgentResult {
+    pub(crate) current_agent_name: String,
     pub(crate) message: String,
     pub(crate) timed_out: bool,
 }
 
 impl WaitAgentResult {
-    fn from_timed_out(timed_out: bool) -> Self {
+    fn from_timed_out(timed_out: bool, current_agent_name: String) -> Self {
         let message = if timed_out {
-            "Wait timed out."
+            format!(
+                "Wait timed out for your mailbox as `{current_agent_name}`. This wait only observes updates delivered to your own mailbox; it does not wait for `/root`'s child tasks unless you are `/root`."
+            )
         } else {
-            "Wait completed."
+            format!(
+                "Wait completed for your mailbox as `{current_agent_name}`. This wait only observed an update delivered to your own mailbox; it did not wait for another agent's mailbox."
+            )
         };
         Self {
-            message: message.to_string(),
+            current_agent_name,
+            message,
             timed_out,
         }
     }
