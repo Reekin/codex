@@ -11,7 +11,7 @@ When the branch contains the downstream release workflow, these happen automatic
 - the Windows binary is built and staged;
 - GitHub release assets are uploaded;
 - checksum files are produced;
-- the release is kept separate from official upstream releases.
+- the pushed build becomes the repository latest release.
 
 Do not duplicate these mechanics in migration notes, manual commands, or the skill body. The agent only needs to preserve the workflow and check that it is still connected to the current build layout.
 
@@ -22,16 +22,17 @@ Before pushing a completed migration branch:
 1. Confirm `.github/workflows/windows-codex-branch-release.yml` exists on the branch.
 2. If the branch was created from a clean upstream tag and the workflow is missing, copy it from the current chat-tree maintenance branch.
 3. Keep this workflow separate from upstream official release workflows.
-4. Do not repurpose official release tags, signing, npm publishing, DotSlash, WinGet, or latest-release automation for downstream branch builds.
+4. Do not repurpose official release tags, signing, npm publishing, DotSlash, or WinGet automation for downstream branch builds.
 5. If upstream changed the Rust crate layout, binary name, target path, or toolchain setup, update only the workflow's build/staging adapter section.
-6. Run a lightweight workflow sanity check before push: at minimum `git diff --check` and a visual check for YAML indentation or shell continuation mistakes.
+6. Keep the uploaded portable assets clearly named as standalone or portable artifacts.
+7. Run a lightweight workflow sanity check before push: at minimum `git diff --check` and a visual check for YAML indentation or shell continuation mistakes.
 
 After pushing a completed migration branch:
 
 1. Check that the branch-push release workflow started for the pushed commit.
 2. If it fails before Rust compilation, fix the workflow adapter and push again.
 3. If Rust compilation fails, treat it as a migration/build issue unless logs clearly show transient infrastructure failure.
-4. Confirm a new prerelease exists for the pushed commit before telling the user the packaged build is available.
+4. Confirm the pushed commit produced the repository latest release before telling the user the packaged build is available.
 
 ## Decision Rule
 

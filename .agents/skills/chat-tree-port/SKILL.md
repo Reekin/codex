@@ -73,7 +73,7 @@ For the full acceptance standard, use `references/acceptance-checklist.md`.
 
 5. **Prepare release automation**
    - Ensure the downstream branch contains the branch-push Windows release workflow described in `references/release-automation.md`.
-   - A completed migration branch should produce a GitHub prerelease automatically after it is pushed.
+   - A completed migration branch should produce the repository latest GitHub release automatically after it is pushed.
 
 6. **Run continuous acceptance**
    - Start SmartTakeover for every release migration before claiming completion.
@@ -116,7 +116,7 @@ Adapt commands to the changed crates and current upstream layout.
 - If changing common/core/protocol behavior, ask before running the complete workspace test suite.
 - For UI-visible changes, update and review insta snapshots.
 - For app-server changes, validate the wire-level fixtures and compatibility rules in `references/app-server-compat.md`.
-- Before pushing a completed migration branch, verify the branch contains the automatic dev release workflow from `references/release-automation.md`.
+- Before pushing a completed migration branch, verify the branch contains the automatic latest release workflow from `references/release-automation.md`.
 
 ## Acceptance
 

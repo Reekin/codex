@@ -16,7 +16,7 @@ permissions:
 jobs:
   build-and-release:
     if: github.repository == 'Reekin/codex'
-    name: Build Windows codex.exe and publish dev release
+    name: Build Windows codex.exe and publish latest release
     runs-on: windows-latest
     timeout-minutes: 120
     defaults:
@@ -53,8 +53,8 @@ jobs:
           fi
 
           short_sha="${GITHUB_SHA::12}"
-          release_tag="codex-dev-${branch_slug}-${short_sha}"
-          asset_prefix="codex-windows-x64-dev-${branch_slug}-${short_sha}"
+          release_tag="codex-latest-${branch_slug}-${short_sha}"
+          asset_prefix="codex-windows-x64-portable"
 
           {
             echo "branch=${branch}"
@@ -95,7 +95,7 @@ jobs:
           (cd "$dist" && sha256sum "${asset_prefix}.exe" "${asset_prefix}.zip" > "${asset_prefix}.sha256")
           ls -lh "$dist"
 
-      - name: Publish GitHub prerelease
+      - name: Publish GitHub latest release
         shell: bash
         working-directory: .
         env:
@@ -104,7 +104,7 @@ jobs:
           set -euo pipefail
 
           release_tag="${{ steps.meta.outputs.release_tag }}"
-          release_name="Codex Windows dev build: ${{ steps.meta.outputs.branch }} @ ${{ steps.meta.outputs.short_sha }}"
+          release_name="Codex Windows portable build: ${{ steps.meta.outputs.branch }} @ ${{ steps.meta.outputs.short_sha }}"
           notes_path="${RUNNER_TEMP}/codex-dev-release-notes.md"
 
           cat > "$notes_path" <<EOF
@@ -113,24 +113,23 @@ jobs:
           - Commit: \`${GITHUB_SHA}\`
           - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
           - Target: \`${TARGET}\`
-          - Binary: unsigned development build
+          - Binary: unsigned portable branch build
           - LTO: \`${CARGO_PROFILE_RELEASE_LTO}\`
 
-          This prerelease is generated for downstream branch testing and is not an official Codex release.
+          This release is generated automatically from the downstream branch push and is marked as the repository latest release. Download \`codex-windows-x64-portable.exe\` for the standalone executable, or \`codex-windows-x64-portable.zip\` for the compressed portable package.
           EOF
 
           if gh release view "$release_tag" >/dev/null 2>&1; then
             gh release edit "$release_tag" \
               --title "$release_name" \
               --notes-file "$notes_path" \
-              --prerelease
+              --latest
           else
             gh release create "$release_tag" \
               --target "$GITHUB_SHA" \
               --title "$release_name" \
               --notes-file "$notes_path" \
-              --prerelease \
-              --latest=false
+              --latest
           fi
 
           gh release upload "$release_tag" dist/* --clobber
