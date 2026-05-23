@@ -41,27 +41,13 @@ jobs:
           set -euo pipefail
 
           branch="${GITHUB_REF_NAME}"
-          branch_slug="$(
-            printf '%s' "$branch" \
-              | tr '[:upper:]' '[:lower:]' \
-              | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-+/-/g' \
-              | cut -c1-80 \
-              | sed -E 's/-+$//'
-          )"
-          if [[ -z "$branch_slug" ]]; then
-            branch_slug="branch"
-          fi
-
           short_sha="${GITHUB_SHA::12}"
-          release_tag="codex-latest-${branch_slug}-${short_sha}"
-          asset_prefix="codex-windows-x64-portable"
+          release_tag="codex-${short_sha}"
 
           {
             echo "branch=${branch}"
-            echo "branch_slug=${branch_slug}"
             echo "short_sha=${short_sha}"
             echo "release_tag=${release_tag}"
-            echo "asset_prefix=${asset_prefix}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Cargo build codex.exe
@@ -80,19 +66,18 @@ jobs:
             workspace="$(cygpath -u "$workspace")"
           fi
           dist="${workspace}/dist"
-          asset_prefix="${{ steps.meta.outputs.asset_prefix }}"
           mkdir -p "$dist"
 
-          cp "target/${TARGET}/release/codex.exe" "$dist/${asset_prefix}.exe"
+          cp "target/${TARGET}/release/codex.exe" "$dist/codex-portable.exe"
 
           dist_windows="$dist"
           if command -v cygpath >/dev/null 2>&1; then
             dist_windows="$(cygpath -w "$dist")"
           fi
           powershell -NoProfile -Command \
-            "Compress-Archive -LiteralPath '${dist_windows}\\${asset_prefix}.exe' -DestinationPath '${dist_windows}\\${asset_prefix}.zip' -Force"
+            "Compress-Archive -LiteralPath '${dist_windows}\\codex-portable.exe' -DestinationPath '${dist_windows}\\codex-portable.zip' -Force"
 
-          (cd "$dist" && sha256sum "${asset_prefix}.exe" "${asset_prefix}.zip" > "${asset_prefix}.sha256")
+          (cd "$dist" && sha256sum codex-portable.exe codex-portable.zip > SHA256SUMS.txt)
           ls -lh "$dist"
 
       - name: Publish GitHub latest release
@@ -104,7 +89,7 @@ jobs:
           set -euo pipefail
 
           release_tag="${{ steps.meta.outputs.release_tag }}"
-          release_name="Codex Windows portable build: ${{ steps.meta.outputs.branch }} @ ${{ steps.meta.outputs.short_sha }}"
+          release_name="Codex Windows ${{ steps.meta.outputs.short_sha }}"
           notes_path="${RUNNER_TEMP}/codex-dev-release-notes.md"
 
           cat > "$notes_path" <<EOF
@@ -116,7 +101,7 @@ jobs:
           - Binary: unsigned portable branch build
           - LTO: \`${CARGO_PROFILE_RELEASE_LTO}\`
 
-          This release is generated automatically from the downstream branch push and is marked as the repository latest release. Download \`codex-windows-x64-portable.exe\` for the standalone executable, or \`codex-windows-x64-portable.zip\` for the compressed portable package.
+          This release is generated automatically from the downstream branch push and is marked as the repository latest release. Download \`codex-portable.exe\` for the standalone executable, or \`codex-portable.zip\` for the compressed portable package.
           EOF
 
           if gh release view "$release_tag" >/dev/null 2>&1; then
