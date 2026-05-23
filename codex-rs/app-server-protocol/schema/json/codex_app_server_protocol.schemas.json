@@ -661,6 +661,54 @@
           "type": "object"
         },
         {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "chatTree/read"
+              ],
+              "title": "ChatTree/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ChatTreeReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ChatTree/readRequest",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "chatTree/setCurrent"
+              ],
+              "title": "ChatTree/setCurrentRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ChatTreeSetCurrentParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "ChatTree/setCurrentRequest",
+          "type": "object"
+        },
+        {
           "description": "Append raw Responses API items to the thread history without starting a user turn.",
           "properties": {
             "id": {
@@ -4131,6 +4179,26 @@
           "properties": {
             "method": {
               "enum": [
+                "chatTree/updated"
+              ],
+              "title": "ChatTree/updatedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ChatTreeUpdatedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "ChatTree/updatedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "thread/settings/updated"
               ],
               "title": "Thread/settings/updatedNotificationMethod",
@@ -6507,6 +6575,221 @@
           "notFound"
         ],
         "type": "string"
+      },
+      "ChatTreeChange": {
+        "properties": {
+          "nodeId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "type": {
+            "$ref": "#/definitions/v2/ChatTreeChangeKind"
+          }
+        },
+        "required": [
+          "type"
+        ],
+        "type": "object"
+      },
+      "ChatTreeChangeKind": {
+        "enum": [
+          "nodeStarted",
+          "nodeFinalized",
+          "nodeSummaryUpdated",
+          "currentNodeChanged",
+          "treeRebuilt"
+        ],
+        "type": "string"
+      },
+      "ChatTreeNode": {
+        "properties": {
+          "nodeId": {
+            "type": "string"
+          },
+          "order": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "parentNodeId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ChatTreeNodeStatus"
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "turnId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "nodeId",
+          "order",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ChatTreeNodeStatus": {
+        "enum": [
+          "pending",
+          "completed",
+          "interrupted",
+          "replaced",
+          "reviewEnded"
+        ],
+        "type": "string"
+      },
+      "ChatTreeProjection": {
+        "properties": {
+          "currentNodeId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "nodes": {
+            "items": {
+              "$ref": "#/definitions/v2/ChatTreeNode"
+            },
+            "type": "array"
+          },
+          "revision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "version": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "visibleNodeIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "visibleTurnIds": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "nodes",
+          "revision",
+          "version",
+          "visibleNodeIds",
+          "visibleTurnIds"
+        ],
+        "type": "object"
+      },
+      "ChatTreeReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "threadId"
+        ],
+        "title": "ChatTreeReadParams",
+        "type": "object"
+      },
+      "ChatTreeReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "chatTree": {
+            "$ref": "#/definitions/v2/ChatTreeProjection"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "chatTree",
+          "threadId"
+        ],
+        "title": "ChatTreeReadResponse",
+        "type": "object"
+      },
+      "ChatTreeSetCurrentParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "expectedRevision": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "nodeId": {
+            "type": "string"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "nodeId",
+          "threadId"
+        ],
+        "title": "ChatTreeSetCurrentParams",
+        "type": "object"
+      },
+      "ChatTreeSetCurrentResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "chatTree": {
+            "$ref": "#/definitions/v2/ChatTreeProjection"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "chatTree",
+          "threadId"
+        ],
+        "title": "ChatTreeSetCurrentResponse",
+        "type": "object"
+      },
+      "ChatTreeUpdatedNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "change": {
+            "$ref": "#/definitions/v2/ChatTreeChange"
+          },
+          "chatTree": {
+            "$ref": "#/definitions/v2/ChatTreeProjection"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "change",
+          "chatTree",
+          "threadId"
+        ],
+        "title": "ChatTreeUpdatedNotification",
+        "type": "object"
       },
       "CodexErrorInfo": {
         "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",

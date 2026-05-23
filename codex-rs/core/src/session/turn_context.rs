@@ -96,8 +96,25 @@ pub struct TurnContext {
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
     pub(crate) server_model_warning_emitted: AtomicBool,
     pub(crate) model_verification_emitted: AtomicBool,
+    pub(crate) chat_tree_summary_user_message: std::sync::Mutex<Option<String>>,
 }
 impl TurnContext {
+    pub(crate) fn capture_chat_tree_summary_user_message(&self, input: &[UserInput]) {
+        let message = chat_tree_summary_user_message(input);
+        let mut guard = match self.chat_tree_summary_user_message.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *guard = message;
+    }
+
+    pub(crate) fn chat_tree_summary_user_message(&self) -> Option<String> {
+        match self.chat_tree_summary_user_message.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
     pub(crate) fn permission_profile(&self) -> PermissionProfile {
         self.permission_profile.clone()
     }
@@ -256,6 +273,9 @@ impl TurnContext {
             ),
             model_verification_emitted: AtomicBool::new(
                 self.model_verification_emitted.load(Ordering::Relaxed),
+            ),
+            chat_tree_summary_user_message: std::sync::Mutex::new(
+                self.chat_tree_summary_user_message(),
             ),
         }
     }
@@ -536,6 +556,7 @@ impl Session {
             turn_timing_state: Arc::new(TurnTimingState::default()),
             server_model_warning_emitted: AtomicBool::new(false),
             model_verification_emitted: AtomicBool::new(false),
+            chat_tree_summary_user_message: std::sync::Mutex::new(None),
         }
     }
 
@@ -787,4 +808,23 @@ impl Session {
             turn_environment.cwd = runtime_cwd.clone();
         }
     }
+}
+
+fn chat_tree_summary_user_message(input: &[UserInput]) -> Option<String> {
+    let message = input
+        .iter()
+        .map(|item| match item {
+            UserInput::Text { text, .. } => text.clone(),
+            UserInput::Image { .. } => "[image]".to_string(),
+            UserInput::LocalImage { path, .. } => {
+                format!("[local image: {}]", path.display())
+            }
+            UserInput::Skill { name, .. } => format!("[skill: {name}]"),
+            UserInput::Mention { name, .. } => format!("[mention: {name}]"),
+            _ => "[input]".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message = message.trim();
+    (!message.is_empty()).then(|| message.to_string())
 }

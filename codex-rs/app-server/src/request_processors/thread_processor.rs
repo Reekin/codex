@@ -607,6 +607,24 @@ impl ThreadRequestProcessor {
             .map(|response| Some(response.into()))
     }
 
+    pub(crate) async fn chat_tree_read(
+        &self,
+        params: ChatTreeReadParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.chat_tree_read_response_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn chat_tree_set_current(
+        &self,
+        params: ChatTreeSetCurrentParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.chat_tree_set_current_response_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     pub(crate) async fn thread_turns_list(
         &self,
         params: ThreadTurnsListParams,
@@ -1925,6 +1943,80 @@ impl ThreadRequestProcessor {
             .await
             .map_err(thread_read_view_error)?;
         Ok(ThreadReadResponse { thread })
+    }
+
+    async fn chat_tree_read_response_inner(
+        &self,
+        params: ChatTreeReadParams,
+    ) -> Result<ChatTreeReadResponse, JSONRPCErrorError> {
+        let ChatTreeReadParams { thread_id } = params;
+        let thread_uuid = ThreadId::from_string(&thread_id)
+            .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
+        let chat_tree = if let Ok(loaded_thread) = self.thread_manager.get_thread(thread_uuid).await
+        {
+            crate::chat_tree_projection::chat_tree_projection_from_core(
+                loaded_thread.chat_tree_projection().await,
+            )
+        } else {
+            let history = self
+                .load_thread_turns_list_history(thread_uuid)
+                .await
+                .map_err(thread_read_view_error)?;
+            codex_app_server_protocol::build_chat_tree_projection_from_rollout_items(&history)
+        };
+        Ok(ChatTreeReadResponse {
+            thread_id,
+            chat_tree: Box::new(chat_tree),
+        })
+    }
+
+    async fn chat_tree_set_current_response_inner(
+        &self,
+        params: ChatTreeSetCurrentParams,
+    ) -> Result<ChatTreeSetCurrentResponse, JSONRPCErrorError> {
+        let ChatTreeSetCurrentParams {
+            thread_id,
+            node_id,
+            expected_revision,
+        } = params;
+        let thread_uuid = ThreadId::from_string(&thread_id).map_err(|err| {
+            chat_tree_error_with_kind(
+                format!("invalid thread id: {err}"),
+                "invalidThreadId",
+                &thread_id,
+                Some(&node_id),
+            )
+        })?;
+        let loaded_thread = self
+            .thread_manager
+            .get_thread(thread_uuid)
+            .await
+            .map_err(|_| {
+                chat_tree_error_with_kind(
+                    format!("thread not loaded: {thread_id}"),
+                    "threadNotLoaded",
+                    &thread_id,
+                    Some(&node_id),
+                )
+            })?;
+        if matches!(loaded_thread.agent_status().await, AgentStatus::Running) {
+            return Err(chat_tree_error_with_kind(
+                "Cannot switch chat tree nodes while a task is running.",
+                "taskRunning",
+                &thread_id,
+                Some(&node_id),
+            ));
+        }
+        loaded_thread
+            .set_current_chat_tree_node(&node_id, expected_revision)
+            .await
+            .map_err(|err| chat_tree_set_current_error(&thread_id, &node_id, err))?;
+        Ok(ChatTreeSetCurrentResponse {
+            thread_id,
+            chat_tree: Box::new(crate::chat_tree_projection::chat_tree_projection_from_core(
+                loaded_thread.chat_tree_projection().await,
+            )),
+        })
     }
 
     /// Builds the API view for `thread/read` from persisted metadata plus optional live state.
@@ -3582,6 +3674,72 @@ fn thread_read_view_error(err: ThreadReadViewError) -> JSONRPCErrorError {
 
 fn unsupported_thread_store_operation(operation: &'static str) -> JSONRPCErrorError {
     method_not_found(format!("{operation} is not supported yet"))
+}
+
+fn chat_tree_error_with_kind(
+    message: impl Into<String>,
+    kind: &'static str,
+    thread_id: &str,
+    node_id: Option<&str>,
+) -> JSONRPCErrorError {
+    let mut error = invalid_request(message);
+    error.data = Some(serde_json::json!({
+        "kind": kind,
+        "threadId": thread_id,
+        "nodeId": node_id,
+    }));
+    error
+}
+
+fn chat_tree_set_current_error(
+    thread_id: &str,
+    node_id: &str,
+    err: ChatTreeError,
+) -> JSONRPCErrorError {
+    match err {
+        ChatTreeError::UnknownNode(unknown_node_id) => chat_tree_error_with_kind(
+            format!("unknown chat tree node: {unknown_node_id}"),
+            "unknownNode",
+            thread_id,
+            Some(node_id),
+        ),
+        ChatTreeError::RevisionConflict { expected, actual } => {
+            let mut error = chat_tree_error_with_kind(
+                format!("chat tree revision conflict: expected {expected}, actual {actual}"),
+                "revisionConflict",
+                thread_id,
+                Some(node_id),
+            );
+            error.data = Some(serde_json::json!({
+                "kind": "revisionConflict",
+                "threadId": thread_id,
+                "nodeId": node_id,
+                "expectedRevision": expected,
+                "actualRevision": actual,
+            }));
+            error
+        }
+        ChatTreeError::MissingSnapshot(missing_node_id) => {
+            let mut error = internal_error(format!(
+                "chat tree history snapshot missing for node: {missing_node_id}"
+            ));
+            error.data = Some(serde_json::json!({
+                "kind": "internal",
+                "threadId": thread_id,
+                "nodeId": node_id,
+            }));
+            error
+        }
+        ChatTreeError::Persistence(message) => {
+            let mut error = internal_error(format!("failed to switch chat tree node: {message}"));
+            error.data = Some(serde_json::json!({
+                "kind": "internal",
+                "threadId": thread_id,
+                "nodeId": node_id,
+            }));
+            error
+        }
+    }
 }
 
 fn thread_store_list_error(err: ThreadStoreError) -> JSONRPCErrorError {

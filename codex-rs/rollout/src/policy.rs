@@ -148,6 +148,10 @@ fn event_msg_persistence_mode(ev: &EventMsg) -> Option<EventPersistenceMode> {
         | EventMsg::ThreadRolledBack(_)
         | EventMsg::TurnAborted(_)
         | EventMsg::TurnStarted(_)
+        | EventMsg::ChatTreeNodeStarted(_)
+        | EventMsg::ChatTreeNodeFinalized(_)
+        | EventMsg::ChatTreeNodeSummaryUpdated(_)
+        | EventMsg::ChatTreeCurrentNodeChanged(_)
         | EventMsg::TurnComplete(_)
         | EventMsg::WebSearchEnd(_)
         | EventMsg::ImageGenerationEnd(_) => Some(EventPersistenceMode::Limited),

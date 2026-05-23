@@ -11,7 +11,10 @@ use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use std::collections::HashMap;
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 /// Context for an initialized model agent
 ///
@@ -35,6 +38,8 @@ pub(crate) struct Session {
     pub(crate) input_queue: InputQueue,
     pub(crate) goal_runtime: GoalRuntimeState,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+    pub(crate) chat_tree_summary_jobs: Mutex<HashMap<String, CancellationToken>>,
+    pub(crate) chat_tree_summary_jobs_changed: Notify,
     pub(crate) services: SessionServices,
     pub(super) next_internal_sub_id: AtomicU64,
 }
@@ -1054,6 +1059,8 @@ impl Session {
                 input_queue: InputQueue::new(),
                 goal_runtime: GoalRuntimeState::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
+                chat_tree_summary_jobs: Mutex::new(HashMap::new()),
+                chat_tree_summary_jobs_changed: Notify::new(),
                 services,
                 next_internal_sub_id: AtomicU64::new(0),
             });

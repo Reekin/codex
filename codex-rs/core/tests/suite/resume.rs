@@ -13,15 +13,19 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
+use tokio::sync::oneshot;
 use wiremock::MockServer;
 
 async fn resume_until_initial_messages(
@@ -55,6 +59,235 @@ async fn resume_until_initial_messages(
         drop(resumed);
         tokio::time::sleep(poll_interval).await;
     }
+}
+
+async fn submit_turn_and_capture_chat_tree_node(
+    test: &TestCodex,
+    server: &MockServer,
+    response_id: &str,
+    message_id: &str,
+    prompt: &str,
+    answer: &str,
+) -> Result<String> {
+    let mock = mount_sse_sequence(
+        server,
+        vec![
+            sse(vec![
+                ev_response_created(response_id),
+                ev_assistant_message(message_id, answer),
+                ev_completed(response_id),
+            ]),
+            sse(vec![
+                ev_response_created(&format!("{response_id}-summary")),
+                ev_assistant_message(
+                    &format!("{message_id}-summary"),
+                    &format!("summary for {prompt}"),
+                ),
+                ev_completed(&format!("{response_id}-summary")),
+            ]),
+        ],
+    )
+    .await;
+    test.codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: prompt.into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            thread_settings: Default::default(),
+        })
+        .await?;
+
+    let node_id = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::ChatTreeNodeStarted(event) => Some(event.node_id.clone()),
+        _ => None,
+    })
+    .await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ChatTreeNodeSummaryUpdated(event) if event.node_id == node_id
+        )
+    })
+    .await;
+    assert_eq!(mock.requests().len(), 2);
+    Ok(node_id)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completed_chat_tree_turn_generates_llm_summary() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
+    let rollout_path = test
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-chat-tree-summary-main"),
+                ev_assistant_message(
+                    "msg-chat-tree-summary-main",
+                    "Implemented the frobnicator and added a regression test.",
+                ),
+                ev_completed("resp-chat-tree-summary-main"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-chat-tree-summary-title"),
+                ev_assistant_message(
+                    "msg-chat-tree-summary-title",
+                    "\"Implement frobnicator with regression coverage\"",
+                ),
+                ev_completed("resp-chat-tree-summary-title"),
+            ]),
+        ],
+    )
+    .await;
+
+    test.codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "Build the frobnicator".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            thread_settings: Default::default(),
+        })
+        .await?;
+
+    let node_id = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::ChatTreeNodeStarted(event) => Some(event.node_id.clone()),
+        _ => None,
+    })
+    .await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let summary = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::ChatTreeNodeSummaryUpdated(event) if event.node_id == node_id => {
+            event.summary.clone()
+        }
+        _ => None,
+    })
+    .await;
+    assert_eq!(summary, "Implement frobnicator with regression coverage");
+
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2);
+    let summary_request = &requests[1];
+    assert_eq!(
+        summary_request.instructions_text(),
+        "You generate a concise summary label for one completed assistant turn."
+    );
+    let summary_body = summary_request.body_json();
+    assert_eq!(summary_body["tools"].as_array().map(Vec::len), Some(0));
+    assert_eq!(summary_body["parallel_tool_calls"].as_bool(), Some(false));
+    if let Some(reasoning) = summary_body
+        .get("reasoning")
+        .and_then(|value| value.as_object())
+    {
+        assert!(
+            !reasoning.contains_key("summary"),
+            "summary request should disable reasoning summaries: {reasoning:#?}"
+        );
+    }
+    let summary_input = summary_request.message_input_texts("user").join("\n");
+    assert!(summary_input.contains("User message:\nBuild the frobnicator"));
+    assert!(
+        summary_input.contains(
+            "Assistant message:\nImplemented the frobnicator and added a regression test."
+        )
+    );
+
+    let rollout = tokio::fs::read_to_string(rollout_path).await?;
+    assert!(rollout.contains("Implement frobnicator with regression coverage"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_summary_before_completion_does_not_persist_update() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (summary_gate_tx, summary_gate_rx) = oneshot::channel();
+    let summary_text = "summary should not persist after cancellation";
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: None,
+            body: sse(vec![
+                ev_response_created("resp-summary-cancel-main"),
+                ev_assistant_message("msg-summary-cancel-main", "Main answer before shutdown."),
+                ev_completed("resp-summary-cancel-main"),
+            ]),
+        }],
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: sse(vec![ev_response_created("resp-summary-cancel-summary")]),
+            },
+            StreamingSseChunk {
+                gate: Some(summary_gate_rx),
+                body: sse(vec![
+                    ev_assistant_message("msg-summary-cancel-summary", summary_text),
+                    ev_completed("resp-summary-cancel-summary"),
+                ]),
+            },
+        ],
+    ])
+    .await;
+    let mut builder = test_codex();
+    let test = builder.build_with_streaming_server(&server).await?;
+    let rollout_path = test
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+
+    test.codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "Start a cancellable summary".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    server.wait_for_request_count(2).await;
+
+    test.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+    let _ = summary_gate_tx.send(());
+
+    let rollout = tokio::fs::read_to_string(rollout_path).await?;
+    assert!(!rollout.contains(summary_text));
+    server.shutdown().await;
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -141,6 +374,113 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
         }
         other => panic!("unexpected initial messages after resume: {other:#?}"),
     }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_chat_tree_branch_uses_current_node_history_for_next_request() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex();
+    let initial = builder.build(&server).await?;
+    let home = initial.home.clone();
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+
+    let node_a = submit_turn_and_capture_chat_tree_node(
+        &initial,
+        &server,
+        "resp-a",
+        "msg-a",
+        "chat tree prompt A",
+        "chat tree answer A",
+    )
+    .await?;
+    let _node_b = submit_turn_and_capture_chat_tree_node(
+        &initial,
+        &server,
+        "resp-b",
+        "msg-b",
+        "chat tree prompt B",
+        "chat tree answer B",
+    )
+    .await?;
+    let _node_c = submit_turn_and_capture_chat_tree_node(
+        &initial,
+        &server,
+        "resp-c",
+        "msg-c",
+        "chat tree prompt C",
+        "chat tree answer C",
+    )
+    .await?;
+
+    initial
+        .codex
+        .submit(Op::SetCurrentChatTreeNode {
+            node_id: node_a.clone(),
+            expected_revision: None,
+        })
+        .await?;
+    wait_for_event(&initial.codex, |event| {
+        matches!(event, EventMsg::ChatTreeCurrentNodeChanged(event) if event.node_id == node_a)
+    })
+    .await;
+
+    let _node_d = submit_turn_and_capture_chat_tree_node(
+        &initial,
+        &server,
+        "resp-d",
+        "msg-d",
+        "chat tree prompt D",
+        "chat tree answer D",
+    )
+    .await?;
+
+    let resumed_mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-resume-chat-tree"),
+            ev_assistant_message("msg-resume-chat-tree", "resumed chat tree answer"),
+            ev_completed("resp-resume-chat-tree"),
+        ]),
+    )
+    .await;
+    let mut resume_builder = test_codex();
+    let resumed = resume_builder.resume(&server, home, rollout_path).await?;
+    resumed
+        .codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "chat tree prompt after resume".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            thread_settings: Default::default(),
+        })
+        .await?;
+    wait_for_event(&resumed.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let request = resumed_mock.single_request();
+    assert!(request.body_contains_text("chat tree prompt A"));
+    assert!(request.body_contains_text("chat tree answer A"));
+    assert!(request.body_contains_text("chat tree prompt D"));
+    assert!(request.body_contains_text("chat tree answer D"));
+    assert!(request.body_contains_text("chat tree prompt after resume"));
+    assert!(!request.body_contains_text("chat tree prompt B"));
+    assert!(!request.body_contains_text("chat tree answer B"));
+    assert!(!request.body_contains_text("chat tree prompt C"));
+    assert!(!request.body_contains_text("chat tree answer C"));
 
     Ok(())
 }

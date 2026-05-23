@@ -1,5 +1,11 @@
 use super::*;
+use crate::chat_tree::ReplayedChatTree;
 use crate::context_manager::is_user_turn_boundary;
+use codex_protocol::chat_tree::ChatTreeEvent;
+use codex_protocol::chat_tree::ChatTreeState as DomainChatTreeState;
+use codex_protocol::chat_tree_protocol::chat_tree_event_from_protocol_event;
+use std::collections::HashSet;
+use tracing::warn;
 
 // Return value of `Session::reconstruct_history_from_rollout`, bundling the rebuilt history with
 // the resume/fork hydration metadata derived from the same replay.
@@ -8,6 +14,7 @@ pub(super) struct RolloutReconstruction {
     pub(super) history: Vec<ResponseItem>,
     pub(super) previous_turn_settings: Option<PreviousTurnSettings>,
     pub(super) reference_context_item: Option<TurnContextItem>,
+    pub(super) chat_tree: Option<ReplayedChatTree>,
 }
 
 #[derive(Debug, Default)]
@@ -296,6 +303,217 @@ impl Session {
             history: history.raw_items().to_vec(),
             previous_turn_settings,
             reference_context_item,
+            chat_tree: self.reconstruct_chat_tree_from_rollout(turn_context, rollout_items),
         }
+    }
+
+    fn reconstruct_chat_tree_from_rollout(
+        &self,
+        turn_context: &TurnContext,
+        rollout_items: &[RolloutItem],
+    ) -> Option<ReplayedChatTree> {
+        let mut domain = DomainChatTreeState::default();
+        let mut history_snapshots = HashMap::<String, ContextManager>::new();
+        let mut active_node_id = None::<String>;
+        let mut active_turn_id = None::<String>;
+        let mut active_history = ContextManager::new();
+        let mut legacy_history = ContextManager::new();
+        let mut saw_chat_tree_event = false;
+
+        for item in rollout_items {
+            match item {
+                RolloutItem::EventMsg(EventMsg::ChatTreeNodeStarted(payload)) => {
+                    let parent_history = payload
+                        .parent_node_id
+                        .as_ref()
+                        .and_then(|parent_node_id| history_snapshots.get(parent_node_id))
+                        .cloned()
+                        .unwrap_or_else(|| legacy_history.clone());
+                    active_history = parent_history.clone();
+                    let chat_tree_event = ChatTreeEvent::NodeStarted {
+                        revision: payload.revision,
+                        node_id: payload.node_id.clone(),
+                        parent_node_id: payload.parent_node_id.clone(),
+                        turn_id: payload.turn_id.clone(),
+                        order: payload.order,
+                    };
+                    if let Err(err) = domain.apply_event(&chat_tree_event) {
+                        warn!(
+                            ?err,
+                            "invalid durable chat tree event ignored while replaying rollout"
+                        );
+                        continue;
+                    }
+                    history_snapshots.insert(payload.node_id.clone(), parent_history);
+                    saw_chat_tree_event = true;
+                    active_node_id = payload
+                        .turn_id
+                        .as_deref()
+                        .is_none_or(|turn_id| {
+                            active_turn_id
+                                .as_deref()
+                                .is_none_or(|active_turn_id| active_turn_id == turn_id)
+                        })
+                        .then(|| payload.node_id.clone());
+                }
+                RolloutItem::ResponseItem(response_item) => {
+                    if let Some(active_node_id) = active_node_id.as_deref() {
+                        active_history.record_items(
+                            std::iter::once(response_item),
+                            turn_context.truncation_policy,
+                        );
+                        history_snapshots
+                            .insert(active_node_id.to_string(), active_history.clone());
+                    } else if !saw_chat_tree_event {
+                        legacy_history.record_items(
+                            std::iter::once(response_item),
+                            turn_context.truncation_policy,
+                        );
+                    }
+                }
+                RolloutItem::TurnContext(turn_context_item) => {
+                    if let Some(active_node_id) = active_node_id.as_deref() {
+                        active_history.set_reference_context_item(Some(turn_context_item.clone()));
+                        history_snapshots
+                            .insert(active_node_id.to_string(), active_history.clone());
+                    } else if saw_chat_tree_event
+                        && let Some(current_node_id) = domain.current_node_id()
+                        && let Some(history) = history_snapshots.get_mut(current_node_id)
+                    {
+                        history.set_reference_context_item(Some(turn_context_item.clone()));
+                    } else if !saw_chat_tree_event {
+                        legacy_history.set_reference_context_item(Some(turn_context_item.clone()));
+                    }
+                }
+                RolloutItem::Compacted(compacted) => {
+                    if let Some(active_node_id) = active_node_id.as_deref()
+                        && let Some(replacement_history) = &compacted.replacement_history
+                    {
+                        active_history.replace(replacement_history.clone());
+                        history_snapshots
+                            .insert(active_node_id.to_string(), active_history.clone());
+                    } else if saw_chat_tree_event
+                        && let Some(replacement_history) = &compacted.replacement_history
+                        && let Some(current_node_id) = domain.current_node_id()
+                    {
+                        let mut compacted_history = ContextManager::new();
+                        compacted_history.replace(replacement_history.clone());
+                        history_snapshots.insert(current_node_id.to_string(), compacted_history);
+                    } else if !saw_chat_tree_event
+                        && let Some(replacement_history) = &compacted.replacement_history
+                    {
+                        legacy_history.replace(replacement_history.clone());
+                    }
+                }
+                RolloutItem::EventMsg(EventMsg::ChatTreeNodeFinalized(payload)) => {
+                    let chat_tree_event = ChatTreeEvent::NodeFinalized {
+                        revision: payload.revision,
+                        node_id: payload.node_id.clone(),
+                        status: payload.status,
+                    };
+                    if let Err(err) = domain.apply_event(&chat_tree_event) {
+                        warn!(
+                            ?err,
+                            "invalid durable chat tree event ignored while replaying rollout"
+                        );
+                        continue;
+                    }
+                    saw_chat_tree_event = true;
+                    if active_node_id.as_deref() == Some(payload.node_id.as_str()) {
+                        history_snapshots.insert(payload.node_id.clone(), active_history.clone());
+                        active_node_id = None;
+                    }
+                }
+                RolloutItem::EventMsg(EventMsg::ChatTreeNodeSummaryUpdated(payload)) => {
+                    let chat_tree_event = ChatTreeEvent::NodeSummaryUpdated {
+                        revision: payload.revision,
+                        node_id: payload.node_id.clone(),
+                        summary: payload.summary.clone(),
+                    };
+                    if let Err(err) = domain.apply_event(&chat_tree_event) {
+                        warn!(
+                            ?err,
+                            "invalid durable chat tree event ignored while replaying rollout"
+                        );
+                    }
+                    saw_chat_tree_event = true;
+                }
+                RolloutItem::EventMsg(EventMsg::ChatTreeCurrentNodeChanged(payload)) => {
+                    let chat_tree_event = ChatTreeEvent::CurrentNodeChanged {
+                        revision: payload.revision,
+                        node_id: payload.node_id.clone(),
+                    };
+                    if let Err(err) = domain.apply_event(&chat_tree_event) {
+                        warn!(
+                            ?err,
+                            "invalid durable chat tree event ignored while replaying rollout"
+                        );
+                    }
+                    saw_chat_tree_event = true;
+                }
+                RolloutItem::EventMsg(EventMsg::TurnStarted(payload)) => {
+                    active_turn_id = Some(payload.turn_id.clone());
+                    if let Err(err) = domain.apply_event(&ChatTreeEvent::LegacyTurnStarted {
+                        turn_id: payload.turn_id.clone(),
+                    }) {
+                        warn!(
+                            ?err,
+                            "invalid durable chat tree event ignored while replaying rollout"
+                        );
+                    }
+                }
+                RolloutItem::EventMsg(EventMsg::TurnComplete(payload)) => {
+                    if active_turn_id.as_deref() == Some(payload.turn_id.as_str()) {
+                        active_turn_id = None;
+                        active_node_id = None;
+                    }
+                }
+                RolloutItem::EventMsg(EventMsg::TurnAborted(payload)) => {
+                    if payload.turn_id.as_deref() == active_turn_id.as_deref() {
+                        active_turn_id = None;
+                        active_node_id = None;
+                    }
+                }
+                RolloutItem::EventMsg(event_msg @ EventMsg::ThreadRolledBack(_)) => {
+                    if let Some(event) = chat_tree_event_from_protocol_event(event_msg)
+                        && let Err(err) = domain.apply_event(&event)
+                    {
+                        warn!(
+                            ?err,
+                            "invalid durable chat tree event ignored while replaying rollout"
+                        );
+                    }
+                    let surviving_node_ids = domain
+                        .projection()
+                        .nodes
+                        .into_iter()
+                        .map(|node| node.node_id)
+                        .collect::<HashSet<_>>();
+                    history_snapshots.retain(|node_id, _| surviving_node_ids.contains(node_id));
+                    active_turn_id = None;
+                    active_node_id = None;
+                    saw_chat_tree_event = !surviving_node_ids.is_empty();
+                }
+                RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => {}
+            }
+        }
+
+        if domain.projection().nodes.is_empty() {
+            return None;
+        }
+
+        let current_history = domain
+            .current_node_id()
+            .and_then(|node_id| history_snapshots.get(node_id))
+            .cloned();
+        let current_reference_context_item = current_history
+            .as_ref()
+            .and_then(ContextManager::reference_context_item);
+        Some(ReplayedChatTree {
+            domain,
+            history_snapshots,
+            current_history,
+            current_reference_context_item,
+        })
     }
 }

@@ -34,6 +34,8 @@ pub enum SlashCommand {
     Fork,
     Init,
     Compact,
+    #[strum(serialize = "chattree")]
+    ChatTree,
     Plan,
     Goal,
     Agent,
@@ -85,6 +87,7 @@ impl SlashCommand {
             SlashCommand::Compact => "summarize conversation to prevent hitting the context limit",
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Rename => "rename the current thread",
+            SlashCommand::ChatTree => "inspect and switch chat tree branches",
             SlashCommand::Resume => "resume a saved chat",
             SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
@@ -194,6 +197,7 @@ impl SlashCommand {
             | SlashCommand::Experimental
             | SlashCommand::Memories
             | SlashCommand::Review
+            | SlashCommand::ChatTree
             | SlashCommand::Plan
             | SlashCommand::Clear
             | SlashCommand::Logout

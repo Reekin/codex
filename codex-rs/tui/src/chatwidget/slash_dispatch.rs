@@ -200,6 +200,17 @@ impl ChatWidget {
                     .counter("codex.thread.rename", /*inc*/ 1, &[]);
                 self.show_rename_prompt();
             }
+            SlashCommand::ChatTree => {
+                if let Some(thread_id) = self.thread_id {
+                    self.app_event_tx.send(AppEvent::OpenChatTree { thread_id });
+                } else {
+                    self.add_info_message(
+                        "Chat tree is empty. Send a prompt first, then use /chattree to switch branches."
+                            .to_string(),
+                        /*hint*/ None,
+                    );
+                }
+            }
             SlashCommand::Model => {
                 self.open_model_popup();
             }
@@ -958,6 +969,7 @@ impl ChatWidget {
             | SlashCommand::Personality
             | SlashCommand::Plan
             | SlashCommand::Goal
+            | SlashCommand::ChatTree
             | SlashCommand::Side
             | SlashCommand::Btw
             | SlashCommand::Keymap
