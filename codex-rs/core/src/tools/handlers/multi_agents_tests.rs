@@ -161,12 +161,14 @@ where
 
 #[derive(Debug, Deserialize)]
 struct ListAgentsResult {
+    current_agent_name: String,
     agents: Vec<ListedAgentResult>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ListedAgentResult {
     agent_name: String,
+    is_current_agent: bool,
     agent_status: serde_json::Value,
     last_task_message: Option<String>,
 }
@@ -1561,6 +1563,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status_and_last_task_messa
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
+    assert_eq!(result.current_agent_name, "/root");
     let agent_names = result
         .agents
         .iter()
@@ -1572,12 +1575,14 @@ async fn multi_agent_v2_list_agents_returns_completed_status_and_last_task_messa
         .iter()
         .find(|agent| agent.agent_name == "/root")
         .expect("root agent should be listed");
+    assert!(root_agent.is_current_agent);
     assert_eq!(root_agent.last_task_message.as_deref(), Some("Main thread"));
     let worker = result
         .agents
         .iter()
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
+    assert!(!worker.is_current_agent);
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
     assert_eq!(
         worker.last_task_message.as_deref(),
@@ -1668,8 +1673,10 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
+    assert_eq!(result.current_agent_name, "/root/researcher");
     assert_eq!(result.agents.len(), 1);
     assert_eq!(result.agents[0].agent_name, worker_path.as_str());
+    assert!(!result.agents[0].is_current_agent);
     assert_eq!(result.agents[0].last_task_message.as_deref(), Some("build"));
 }
 
@@ -1729,8 +1736,10 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
+    assert_eq!(result.current_agent_name, "/root");
     assert_eq!(result.agents.len(), 1);
     assert_eq!(result.agents[0].agent_name, "/root");
+    assert!(result.agents[0].is_current_agent);
     assert_eq!(
         result.agents[0].last_task_message.as_deref(),
         Some("Main thread")

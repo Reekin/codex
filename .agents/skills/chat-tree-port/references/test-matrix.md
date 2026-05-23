@@ -43,6 +43,18 @@ Expected properties:
 - Parent snapshot is not polluted by child-turn context updates.
 - Subagent/side-thread turns are excluded unless product contract changes.
 
+## Multi-Agent Identity Static Audit
+
+This audit protects migrations that touch session context, rollout reconstruction, inter-agent communication, or multi-agent tools. A previous regression allowed spawned subagents to see `/root` and sibling entries through `list_agents` but gave no model-visible indication of which entry was the current subagent. The subagents then sometimes acted as if they were the root coordinator, waited on sibling tasks, or closed/managed the wrong agent.
+
+This is a model-behavior-sensitive issue, so unit tests or scripted tool calls may not reliably reproduce the failure. Treat it as a required static analysis item. If the upstream base already has an equivalent fix, record the upstream code path and do not duplicate it downstream. Otherwise preserve or reimplement this approach:
+
+- Inspect the code that builds subagent-visible initial context and confirm it states that the current thread is a spawned subagent and names its canonical agent path, parent thread id, and role/nickname when available.
+- Inspect the `list_agents` handler, output type, and schema and confirm the output includes the current caller identity, preferably both a top-level `current_agent_name` and an entry-level `is_current_agent` marker.
+- Confirm a subagent may still see `/root` and sibling agents when that is the product contract, but those entries are clearly distinguishable from the current agent.
+- Inspect inter-agent task rendering and confirm the first delegated task is presented as assigned work to the recipient subagent, not only as an ambiguous assistant-authored JSON envelope.
+- Confirm filtered `list_agents` results keep `current_agent_name` even when the current agent is not included in the filtered entries.
+
 ## Replay Tests
 
 - Replay reconstructs full tree from durable facts.

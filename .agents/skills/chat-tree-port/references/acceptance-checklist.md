@@ -17,6 +17,7 @@ Give the reviewer these facts before asking for acceptance:
 - direct previous chat-tree release branch that was compared;
 - older reference branches consulted, if any;
 - implementation brief: supported UI paths, persistence source, app-server contract, summary implementation, rollback/compaction strategy, runtime context strategy;
+- multi-agent/subagent identity regression status: whether the upstream base already exposes unambiguous current-agent identity to spawned subagents, or what downstream fix was carried forward;
 - list of changed files grouped by domain/core/persistence/app-server/UI/tests/release workflow;
 - focused validation commands and pass/fail results;
 - known residual risks classified as P0, P1, or P2.
@@ -37,6 +38,7 @@ All P0 gates must pass before the migration can be called complete.
 - Completed normal turns with non-empty assistant output spawn a separate async LLM summary request and persist a bounded summary update.
 - Summary request failure, cancellation, or empty output does not fail turn completion.
 - Subagent or side-thread turns are excluded unless the product contract is explicitly changed.
+- Spawned subagents keep unambiguous self identity after migration. A subagent that calls `list_agents` must be able to distinguish itself from `/root`, siblings, and children. If upstream already solves this, record the evidence; otherwise preserve or reimplement the identity hint and tool-output marker approach.
 - App-server `chatTree/read`, `chatTree/setCurrent`, and `chatTree/updated` preserve the stable wire contract when app-server exists.
 - App-server chat-tree errors expose stable `data.kind` values when supported by the current API layer.
 - Every supported UI path can open the tree, set current, block unsafe switching while a task runs, and refresh the visible transcript to the selected branch.
@@ -50,10 +52,11 @@ Run focused checks in this order where the current upstream layout supports them
 2. Core golden context test: A -> B -> C, switch A, send D, and assert the next model request includes A/D but excludes B/C.
 3. Replay tests: restart, current-node changes, late summaries, compaction/rollback behavior, missing parent/current diagnostics.
 4. Completed-turn LLM summary tests: separate model request, persistence, replay, failure, cancellation, and no request when assistant output is empty.
-5. App-server read/set-current tests and wire fixtures.
-6. `thread/read` and `thread/turns/list` selected-branch tests.
-7. TUI overlay and transcript-refresh tests for each supported UI path.
-8. Schema generation, snapshots, formatting, scoped lint/fix, and release workflow sanity checks as applicable.
+5. Multi-agent identity static audit: inspect the subagent-visible context construction, inter-agent task rendering, and `list_agents` schema/output code to verify the active subagent can identify its own canonical path instead of assuming it is `/root`.
+6. App-server read/set-current tests and wire fixtures.
+7. `thread/read` and `thread/turns/list` selected-branch tests.
+8. TUI overlay and transcript-refresh tests for each supported UI path.
+9. Schema generation, snapshots, formatting, scoped lint/fix, and release workflow sanity checks as applicable.
 
 ## Stop Conditions
 
@@ -65,6 +68,7 @@ Stop and return to implementation if any item is true:
 - A UI path switches future model context while still showing the old branch transcript.
 - Completed-turn LLM summary generation is missing, disabled, or only documented as future work.
 - Summary updates can alter stored context or branch projection.
+- A spawned subagent can see sibling agents but cannot tell which `list_agents` entry is itself, or receives only a raw inter-agent envelope without model-visible self identity.
 - Validation depends only on manual UI interaction without an equivalent CLI/RPC/test path.
 - External app-server clients would need a breaking schema or method change without an explicit compatibility plan.
 - Review feedback contains untriaged P0/P1/P2 items.
@@ -99,6 +103,7 @@ Migration context:
 - summary implementation hook and tests:
 - app-server methods/fixtures touched:
 - release workflow status:
+- multi-agent/subagent identity regression status:
 
 Changed files by area:
 - domain:
@@ -126,4 +131,5 @@ Review instructions:
 - P2 is follow-up debt and should not block acceptance.
 - Check actual next-turn model request bodies for context correctness, not only UI/API projections.
 - Check completed-turn LLM summary behavior against summary-implementation.md.
+- Statically audit spawned subagent identity behavior when the port touches session context, multi-agent tools, rollout replay, or inter-agent communication. This bug is model-behavior-sensitive and may not reproduce reliably in unit tests. If upstream solved it, cite the upstream code path; otherwise require explicit subagent identity context plus a `list_agents` current-agent marker.
 ```

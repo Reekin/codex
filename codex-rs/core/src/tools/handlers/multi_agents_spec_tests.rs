@@ -342,9 +342,19 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
             "Optional task-path prefix (not ending with trailing slash). Accepts the same relative or absolute task-path syntax."
         )
     );
+    let output_schema = output_schema.expect("list_agents output schema");
     assert_eq!(
-        output_schema.expect("list_agents output schema")["properties"]["agents"]["items"]["required"],
-        json!(["agent_name", "agent_status", "last_task_message"])
+        output_schema["required"],
+        json!(["current_agent_name", "agents"])
+    );
+    assert_eq!(
+        output_schema["properties"]["agents"]["items"]["required"],
+        json!([
+            "agent_name",
+            "is_current_agent",
+            "agent_status",
+            "last_task_message"
+        ])
     );
 }
 

@@ -412,6 +412,10 @@ fn list_agents_output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "current_agent_name": {
+                "type": "string",
+                "description": "Canonical task name for the agent that called list_agents. Entries in agents with a different agent_name are other agents."
+            },
             "agents": {
                 "type": "array",
                 "items": {
@@ -420,6 +424,10 @@ fn list_agents_output_schema() -> Value {
                         "agent_name": {
                             "type": "string",
                             "description": "Canonical task name for the agent when available, otherwise the agent id."
+                        },
+                        "is_current_agent": {
+                            "type": "boolean",
+                            "description": "Whether this entry is the agent that called list_agents."
                         },
                         "agent_status": {
                             "description": "Last known status of the agent.",
@@ -430,13 +438,13 @@ fn list_agents_output_schema() -> Value {
                             "description": "Most recent user or inter-agent instruction received by the agent, when available."
                         }
                     },
-                    "required": ["agent_name", "agent_status", "last_task_message"],
+                    "required": ["agent_name", "is_current_agent", "agent_status", "last_task_message"],
                     "additionalProperties": false
                 },
                 "description": "Live agents visible in the current root thread tree."
             }
         },
-        "required": ["agents"],
+        "required": ["current_agent_name", "agents"],
         "additionalProperties": false
     })
 }

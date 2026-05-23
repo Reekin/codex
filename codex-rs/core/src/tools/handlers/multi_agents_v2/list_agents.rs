@@ -37,8 +37,16 @@ impl ToolExecutor<ToolInvocation> for Handler {
             .list_agents(&turn.session_source, args.path_prefix.as_deref())
             .await
             .map_err(collab_spawn_error)?;
+        let current_agent_name = turn
+            .session_source
+            .get_agent_path()
+            .unwrap_or_else(codex_protocol::AgentPath::root)
+            .to_string();
 
-        Ok(boxed_tool_output(ListAgentsResult { agents }))
+        Ok(boxed_tool_output(ListAgentsResult {
+            current_agent_name,
+            agents,
+        }))
     }
 }
 
@@ -56,6 +64,7 @@ struct ListAgentsArgs {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ListAgentsResult {
+    current_agent_name: String,
     agents: Vec<ListedAgent>,
 }
 

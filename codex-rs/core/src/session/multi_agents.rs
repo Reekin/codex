@@ -1,5 +1,6 @@
 use crate::session::turn_context::TurnContext;
 use codex_features::Feature;
+use codex_protocol::AgentPath;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 
@@ -24,4 +25,34 @@ pub(super) fn usage_hint_text<'a>(
         | SessionSource::Unknown => multi_agent_v2.root_agent_usage_hint_text.as_deref(),
         SessionSource::Internal(_) | SessionSource::SubAgent(_) => None,
     }
+}
+
+pub(super) fn identity_hint_text(session_source: &SessionSource) -> Option<String> {
+    let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth,
+        agent_path,
+        agent_nickname,
+        agent_role,
+    }) = session_source
+    else {
+        return None;
+    };
+
+    let agent_path = agent_path.clone().unwrap_or_else(AgentPath::root);
+    let mut text = format!(
+        "You are a spawned subagent in the multi-agent tree. Your current canonical agent path is `{agent_path}`, your parent thread id is `{parent_thread_id}`, and your depth is {depth}. `list_agents` may show `/root`, sibling agents, and child agents; those entries are other agents unless their `agent_name` equals your current canonical agent path. Treat the latest inter-agent communication addressed to `{agent_path}` as your assigned work, while still following all system, developer, and user instructions."
+    );
+
+    if let Some(nickname) = agent_nickname
+        .as_deref()
+        .filter(|nickname| !nickname.is_empty())
+    {
+        text.push_str(&format!(" Your nickname is `{nickname}`."));
+    }
+    if let Some(role) = agent_role.as_deref().filter(|role| !role.is_empty()) {
+        text.push_str(&format!(" Your configured role is `{role}`."));
+    }
+
+    Some(text)
 }
