@@ -41,6 +41,10 @@ use codex_app_server_protocol::AuthMode;
 use codex_app_server_protocol::CancelLoginAccountParams;
 use codex_app_server_protocol::CancelLoginAccountResponse;
 use codex_app_server_protocol::CancelLoginAccountStatus;
+use codex_app_server_protocol::ChatTreeReadParams;
+use codex_app_server_protocol::ChatTreeReadResponse;
+use codex_app_server_protocol::ChatTreeSetCurrentParams;
+use codex_app_server_protocol::ChatTreeSetCurrentResponse;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponsePayload;
@@ -205,7 +209,6 @@ use codex_app_server_protocol::ThreadGoalSetParams;
 use codex_app_server_protocol::ThreadGoalSetResponse;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadGoalUpdatedNotification;
-use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::ThreadIncrementElicitationParams;
 use codex_app_server_protocol::ThreadIncrementElicitationResponse;
 use codex_app_server_protocol::ThreadInjectItemsParams;
@@ -301,6 +304,7 @@ use codex_config::CloudConfigBundleLoadErrorCode;
 use codex_config::ConfigLayerStack;
 use codex_config::loader::project_trust_key;
 use codex_config::types::McpServerTransportConfig;
+use codex_core::ChatTreeError;
 use codex_core::CodexThread;
 use codex_core::CodexThreadSettingsOverrides;
 use codex_core::ForkSnapshot;
@@ -609,11 +613,10 @@ pub(crate) use self::thread_summary::thread_settings_from_config_snapshot;
 pub(crate) use self::thread_summary::thread_settings_from_core_snapshot;
 
 pub(crate) fn build_api_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
-    let mut builder = ThreadHistoryBuilder::new();
-    for item in items {
-        if is_persisted_rollout_item(item) {
-            builder.handle_rollout_item(item);
-        }
-    }
-    builder.finish()
+    let persisted_items = items
+        .iter()
+        .filter(|item| is_persisted_rollout_item(item, EventPersistenceMode::Limited))
+        .cloned()
+        .collect::<Vec<_>>();
+    codex_app_server_protocol::build_projected_turns_from_rollout_items(&persisted_items)
 }

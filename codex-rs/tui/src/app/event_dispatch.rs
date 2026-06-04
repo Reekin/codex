@@ -289,6 +289,13 @@ impl App {
                     tui.frame_requester().schedule_frame();
                 }
             }
+            AppEvent::RefreshChatTreeTranscript {
+                thread_id,
+                chat_tree,
+            } => {
+                self.refresh_chat_tree_transcript(tui, app_server, thread_id, chat_tree)
+                    .await?;
+            }
             AppEvent::StartCommitAnimation => {
                 if self
                     .commit_anim_running
@@ -724,6 +731,18 @@ impl App {
             }
             AppEvent::OpenThreadGoalMenu { thread_id } => {
                 self.open_thread_goal_menu(app_server, thread_id).await;
+            }
+            AppEvent::OpenChatTree { thread_id } => {
+                match app_server.chat_tree_read(thread_id).await {
+                    Ok(response) => {
+                        self.chat_widget
+                            .set_chat_tree_projection(*response.chat_tree);
+                        self.chat_widget.open_chat_tree_popup();
+                    }
+                    Err(err) => self
+                        .chat_widget
+                        .add_error_message(format!("Failed to read chat tree: {err}")),
+                }
             }
             AppEvent::OpenThreadGoalEditor { thread_id } => {
                 self.open_thread_goal_editor(app_server, thread_id).await;

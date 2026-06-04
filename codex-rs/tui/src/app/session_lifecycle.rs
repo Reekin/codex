@@ -425,6 +425,7 @@ impl App {
         self.replace_chat_widget(ChatWidget::new_with_app_event(init));
 
         self.reset_for_thread_switch(tui)?;
+        self.seed_chat_tree_projection(app_server, thread_id).await;
         self.replay_thread_snapshot(snapshot, !is_replay_only);
         if is_replay_only {
             let message = if attached_replay_only {
@@ -440,6 +441,21 @@ impl App {
         self.refresh_pending_thread_approvals().await;
 
         Ok(())
+    }
+
+    pub(super) async fn seed_chat_tree_projection(
+        &mut self,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+    ) {
+        match app_server.chat_tree_read(thread_id).await {
+            Ok(response) => self
+                .chat_widget
+                .set_chat_tree_projection(*response.chat_tree),
+            Err(err) => {
+                tracing::warn!(thread_id = %thread_id, %err, "failed to seed chat tree projection");
+            }
+        }
     }
 
     pub(super) fn should_attach_live_thread_for_selection(&self, thread_id: ThreadId) -> bool {
@@ -610,7 +626,9 @@ impl App {
             self.config.clone(),
             initial_user_message,
         );
+        let thread_id = started.session.thread_id;
         self.replace_chat_widget(ChatWidget::new_with_app_event(init));
+        self.seed_chat_tree_projection(app_server, thread_id).await;
         self.enqueue_primary_thread_session(started.session, started.turns)
             .await?;
         self.backfill_loaded_subagent_threads(app_server).await;

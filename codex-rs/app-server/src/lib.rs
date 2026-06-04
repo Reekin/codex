@@ -83,6 +83,7 @@ mod analytics_utils;
 mod app_server_tracing;
 mod attestation;
 mod bespoke_event_handling;
+mod chat_tree_projection;
 mod command_exec;
 mod config;
 mod config_manager;
