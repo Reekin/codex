@@ -604,8 +604,48 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
     }
 }
 
+pub async fn set_current_chat_tree_node(
+    sess: &Arc<Session>,
+    sub_id: String,
+    node_id: String,
+    expected_revision: Option<u64>,
+) {
+    let task_running = sess
+        .active_turn
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|active_turn| !active_turn.tasks.is_empty());
+    if task_running {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: "Cannot switch chat tree nodes while a task is running.".to_string(),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            }),
+        })
+        .await;
+        return;
+    }
+
+    if let Err(err) = sess
+        .set_current_chat_tree_node(&node_id, expected_revision)
+        .await
+    {
+        sess.send_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: format!("Failed to switch chat tree node: {err:?}"),
+                codex_error_info: Some(CodexErrorInfo::BadRequest),
+            }),
+        })
+        .await;
+    }
+}
+
 async fn shutdown_session_runtime(sess: &Arc<Session>) {
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    sess.cancel_all_chat_tree_summary_jobs().await;
     let _ = sess.conversation.shutdown().await;
     sess.services
         .unified_exec_manager
@@ -818,6 +858,14 @@ pub(super) async fn submission_loop(
                 }
                 Op::SetThreadMemoryMode { mode } => {
                     set_thread_memory_mode(&sess, sub.id.clone(), mode).await;
+                    false
+                }
+                Op::SetCurrentChatTreeNode {
+                    node_id,
+                    expected_revision,
+                } => {
+                    set_current_chat_tree_node(&sess, sub.id.clone(), node_id, expected_revision)
+                        .await;
                     false
                 }
                 Op::RunUserShellCommand { command } => {

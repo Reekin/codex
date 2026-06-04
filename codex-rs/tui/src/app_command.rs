@@ -98,6 +98,10 @@ pub(crate) enum AppCommand {
     SetThreadName {
         name: String,
     },
+    SetCurrentChatTreeNode {
+        node_id: String,
+        expected_revision: Option<u64>,
+    },
     Shutdown,
     ThreadRollback {
         num_turns: u32,
@@ -257,6 +261,16 @@ impl AppCommand {
 
     pub(crate) fn set_thread_name(name: String) -> Self {
         Self::SetThreadName { name }
+    }
+
+    pub(crate) fn set_current_chat_tree_node(
+        node_id: String,
+        expected_revision: Option<u64>,
+    ) -> Self {
+        Self::SetCurrentChatTreeNode {
+            node_id,
+            expected_revision,
+        }
     }
 
     #[allow(dead_code)]

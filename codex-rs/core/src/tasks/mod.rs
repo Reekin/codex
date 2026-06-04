@@ -327,6 +327,8 @@ impl Session {
             .turn_metadata_state
             .set_turn_started_at_unix_ms(turn_started_at_unix_ms);
         let token_usage_at_turn_start = self.total_token_usage().await.unwrap_or_default();
+        self.start_chat_tree_node_for_turn(turn_context.as_ref(), &input)
+            .await;
 
         let cancellation_token = CancellationToken::new();
         let done = Arc::new(Notify::new());
@@ -785,6 +787,12 @@ impl Session {
         {
             warn!("failed to apply goal runtime turn-finished event: {err}");
         }
+        let summary_job = self
+            .complete_chat_tree_node_before_turn_complete(
+                turn_context.as_ref(),
+                last_agent_message.clone(),
+            )
+            .await;
         let event = EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: turn_context.sub_id.clone(),
             last_agent_message,
@@ -793,6 +801,8 @@ impl Session {
             time_to_first_token_ms,
         });
         self.send_event(turn_context.as_ref(), event).await;
+        self.spawn_chat_tree_summary_after_turn_complete(Arc::clone(&turn_context), summary_job)
+            .await;
         self.services
             .guardian_rejection_circuit_breaker
             .lock()
@@ -889,6 +899,8 @@ impl Session {
             .turn_context
             .turn_timing_state
             .completed_at_and_duration_ms()
+            .await;
+        self.abort_chat_tree_node(task.turn_context.as_ref(), &reason)
             .await;
         let event = EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some(task.turn_context.sub_id.clone()),

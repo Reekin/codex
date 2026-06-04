@@ -13,6 +13,7 @@ use crate::thread_status::ThreadWatchActiveGuard;
 use crate::thread_status::ThreadWatchManager;
 use codex_app_server_protocol::AccountRateLimitsUpdatedNotification;
 use codex_app_server_protocol::AdditionalPermissionProfile as V2AdditionalPermissionProfile;
+use codex_app_server_protocol::ChatTreeUpdatedNotification;
 use codex_app_server_protocol::CodexErrorInfo as V2CodexErrorInfo;
 use codex_app_server_protocol::CommandAction as V2ParsedCommand;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
@@ -81,6 +82,7 @@ use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::WarningNotification;
 use codex_app_server_protocol::build_item_from_guardian_event;
+use codex_app_server_protocol::chat_tree_change_from_event;
 use codex_app_server_protocol::guardian_auto_approval_review_notification;
 use codex_app_server_protocol::item_event_to_server_notification;
 use codex_core::CodexThread;
@@ -131,6 +133,29 @@ struct CommandExecutionCompletionItem {
     command_actions: Vec<V2ParsedCommand>,
 }
 
+async fn send_chat_tree_updated_notification(
+    event: &EventMsg,
+    conversation_id: ThreadId,
+    conversation: &CodexThread,
+    outgoing: &ThreadScopedOutgoingMessageSender,
+) {
+    let Some(change) = chat_tree_change_from_event(event) else {
+        return;
+    };
+    let chat_tree = crate::chat_tree_projection::chat_tree_projection_from_core(
+        conversation.chat_tree_projection().await,
+    );
+    outgoing
+        .send_server_notification(ServerNotification::ChatTreeUpdated(
+            ChatTreeUpdatedNotification {
+                thread_id: conversation_id.to_string(),
+                change,
+                chat_tree: Box::new(chat_tree),
+            },
+        ))
+        .await;
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_bespoke_event_handling(
     event: Event,
@@ -176,6 +201,13 @@ pub(crate) async fn apply_bespoke_event_handling(
             };
             outgoing
                 .send_server_notification(ServerNotification::TurnStarted(notification))
+                .await;
+        }
+        msg @ (EventMsg::ChatTreeNodeStarted(_)
+        | EventMsg::ChatTreeNodeFinalized(_)
+        | EventMsg::ChatTreeNodeSummaryUpdated(_)
+        | EventMsg::ChatTreeCurrentNodeChanged(_)) => {
+            send_chat_tree_updated_notification(&msg, conversation_id, &conversation, &outgoing)
                 .await;
         }
         EventMsg::TurnComplete(turn_complete_event) => {
@@ -1127,7 +1159,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             )
             .await;
         }
-        EventMsg::ThreadRolledBack(_rollback_event) => {
+        EventMsg::ThreadRolledBack(rollback_event) => {
             let pending = {
                 let mut state = thread_state.lock().await;
                 state.pending_rollbacks.take()
@@ -1189,6 +1221,13 @@ pub(crate) async fn apply_bespoke_event_handling(
 
                 outgoing.send_response(request_id, response).await;
             }
+            send_chat_tree_updated_notification(
+                &EventMsg::ThreadRolledBack(rollback_event),
+                conversation_id,
+                &conversation,
+                &outgoing,
+            )
+            .await;
         }
         EventMsg::ThreadGoalUpdated(thread_goal_event) => {
             let notification = ThreadGoalUpdatedNotification {

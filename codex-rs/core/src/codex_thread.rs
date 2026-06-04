@@ -233,6 +233,21 @@ impl CodexThread {
         self.codex.set_thread_memory_mode(mode).await
     }
 
+    pub async fn set_current_chat_tree_node(
+        &self,
+        node_id: &str,
+        expected_revision: Option<u64>,
+    ) -> Result<(), crate::ChatTreeError> {
+        self.codex
+            .session
+            .set_current_chat_tree_node(node_id, expected_revision)
+            .await
+    }
+
+    pub async fn chat_tree_projection(&self) -> crate::ChatTreeProjectionSnapshot {
+        self.codex.session.chat_tree_projection().await
+    }
+
     pub async fn steer_input(
         &self,
         input: Vec<UserInput>,

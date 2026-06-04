@@ -191,6 +191,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+mod chat_tree_lifecycle;
 mod config_lock;
 mod handlers;
 mod input_queue;
@@ -1256,11 +1257,33 @@ impl Session {
             .reconstruct_history_from_rollout(turn_context, rollout_items)
             .await;
         let previous_turn_settings = reconstructed_rollout.previous_turn_settings.clone();
-        self.replace_history(
-            reconstructed_rollout.history,
-            reconstructed_rollout.reference_context_item,
-        )
-        .await;
+        let (history, reference_context_item) = if let Some(chat_tree_current_history) =
+            reconstructed_rollout
+                .chat_tree
+                .as_ref()
+                .and_then(|chat_tree| chat_tree.current_history.as_ref())
+        {
+            let reference_context_item = reconstructed_rollout
+                .chat_tree
+                .as_ref()
+                .and_then(|chat_tree| chat_tree.current_reference_context_item.clone());
+            (
+                chat_tree_current_history.raw_items().to_vec(),
+                reference_context_item,
+            )
+        } else {
+            (
+                reconstructed_rollout.history,
+                reconstructed_rollout.reference_context_item,
+            )
+        };
+        self.replace_history(history, reference_context_item).await;
+        if let Some(chat_tree) = reconstructed_rollout.chat_tree {
+            let mut state = self.state.lock().await;
+            state
+                .chat_tree
+                .replace_from_replay(chat_tree.domain, chat_tree.history_snapshots);
+        }
         let prefix_tokens = if matches!(
             turn_context.config.model_auto_compact_token_limit_scope,
             AutoCompactTokenLimitScope::BodyAfterPrefix
@@ -2615,14 +2638,19 @@ impl Session {
         {
             let mut state = self.state.lock().await;
             state.replace_history(items, reference_context_item.clone());
+            let history_snapshot = state.clone_history();
+            state
+                .chat_tree
+                .update_current_history_snapshot(history_snapshot);
             state.start_next_auto_compact_window();
         }
 
-        self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
-            .await;
+        let mut rollout_items = vec![RolloutItem::Compacted(compacted_item)];
         if let Some(turn_context_item) = reference_context_item {
-            self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item)])
-                .await;
+            rollout_items.push(RolloutItem::TurnContext(turn_context_item));
+        }
+        if let Err(err) = self.persist_rollout_items_durable(&rollout_items).await {
+            warn!("failed to durably persist compacted chat history: {err}");
         }
         {
             let mut state = self.state.lock().await;
