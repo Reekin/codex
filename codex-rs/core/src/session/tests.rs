@@ -7930,6 +7930,20 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
         "expected standalone subagent usage hint developer message, got {developer_messages:?}"
     );
     assert!(
+        developer_messages
+            .iter()
+            .flatten()
+            .any(|text| text.contains("Your current canonical agent path is `/root/worker`")),
+        "expected subagent identity hint developer message, got {developer_messages:?}"
+    );
+    assert!(
+        developer_messages
+            .iter()
+            .flatten()
+            .any(|text| text.contains("inherited from another agent is context")),
+        "expected inherited-context boundary in subagent identity hint, got {developer_messages:?}"
+    );
+    assert!(
         !developer_messages
             .iter()
             .any(|message| message.as_slice() == ["Root guidance."]),

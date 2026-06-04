@@ -1,5 +1,7 @@
 use crate::config::MultiAgentV2Config;
 use crate::session::turn_context::TurnContext;
+use codex_features::Feature;
+use codex_protocol::AgentPath;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -56,4 +58,34 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
         | SessionSource::Unknown => Some(multi_agent_mode),
         SessionSource::Internal(_) | SessionSource::SubAgent(_) => None,
     }
+}
+
+pub(super) fn identity_hint_text(session_source: &SessionSource) -> Option<String> {
+    let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth,
+        agent_path,
+        agent_nickname,
+        agent_role,
+    }) = session_source
+    else {
+        return None;
+    };
+
+    let agent_path = agent_path.clone().unwrap_or_else(AgentPath::root);
+    let mut text = format!(
+        "You are a spawned subagent in the multi-agent tree. Your current canonical agent path is `{agent_path}`, your parent thread id is `{parent_thread_id}`, and your depth is {depth}. You are not `/root` unless your current canonical agent path is exactly `/root`. Any prior transcript inherited from another agent is context, not proof that you performed those actions; tool calls, spawned agents, waits, and decisions in inherited history may belong to your parent. `list_agents` may show `/root`, sibling agents, and child agents; those entries are other agents unless their `agent_name` equals your current canonical agent path or `is_current_agent` is true. Treat the latest inter-agent communication addressed to `{agent_path}` as your assigned work, while still following all system, developer, and user instructions."
+    );
+
+    if let Some(nickname) = agent_nickname
+        .as_deref()
+        .filter(|nickname| !nickname.is_empty())
+    {
+        text.push_str(&format!(" Your nickname is `{nickname}`."));
+    }
+    if let Some(role) = agent_role.as_deref().filter(|role| !role.is_empty()) {
+        text.push_str(&format!(" Your configured role is `{role}`."));
+    }
+
+    Some(text)
 }
