@@ -132,9 +132,25 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
 }
 
 fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
+    let version = format!("(v{})", crate::version::CODEX_CLI_VERSION);
+    let replacement = "(v0.0.0)";
     lines
         .into_iter()
         .map(|line| {
+            let mut line = if let Some(version_pos) = line.find(&version) {
+                let mut normalized = line;
+                normalized.replace_range(version_pos..version_pos + version.len(), replacement);
+                if let Some(pipe_idx) = normalized.rfind('│') {
+                    let pad = version.len().saturating_sub(replacement.len());
+                    if pad > 0 {
+                        normalized.insert_str(pipe_idx, &" ".repeat(pad));
+                    }
+                }
+                normalized
+            } else {
+                line
+            };
+
             if let (Some(dir_pos), Some(pipe_idx)) = (line.find("Directory: "), line.rfind('│')) {
                 let prefix = &line[..dir_pos + "Directory: ".len()];
                 let suffix = &line[pipe_idx..];
@@ -146,10 +162,10 @@ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
                     rebuilt.push_str(&" ".repeat(content_width - replacement.len()));
                 }
                 rebuilt.push_str(suffix);
-                rebuilt
-            } else {
-                line
+                line = rebuilt;
             }
+
+            line
         })
         .collect()
 }
