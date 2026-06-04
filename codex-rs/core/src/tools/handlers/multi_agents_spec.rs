@@ -245,7 +245,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
 pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. Does not return the content; returns either a summary of which agents have updates (if any), or a timeout summary if no mailbox update arrives before the deadline."
+        description: "Wait for a mailbox update delivered to the current agent, including queued messages and final-status notifications. Does not return the content; returns a summary naming the current agent mailbox, or a timeout summary if no mailbox update arrives before the deadline."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -412,6 +412,10 @@ fn list_agents_output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "current_agent_name": {
+                "type": "string",
+                "description": "Canonical task name for the agent that called list_agents. Entries in agents with a different agent_name are other agents."
+            },
             "agents": {
                 "type": "array",
                 "items": {
@@ -420,6 +424,10 @@ fn list_agents_output_schema() -> Value {
                         "agent_name": {
                             "type": "string",
                             "description": "Canonical task name for the agent when available, otherwise the agent id."
+                        },
+                        "is_current_agent": {
+                            "type": "boolean",
+                            "description": "Whether this entry is the agent that called list_agents."
                         },
                         "agent_status": {
                             "description": "Last known status of the agent.",
@@ -430,13 +438,13 @@ fn list_agents_output_schema() -> Value {
                             "description": "Most recent user or inter-agent instruction received by the agent, when available."
                         }
                     },
-                    "required": ["agent_name", "agent_status", "last_task_message"],
+                    "required": ["agent_name", "is_current_agent", "agent_status", "last_task_message"],
                     "additionalProperties": false
                 },
                 "description": "Live agents visible in the current root thread tree."
             }
         },
-        "required": ["agents"],
+        "required": ["current_agent_name", "agents"],
         "additionalProperties": false
     })
 }
@@ -475,6 +483,10 @@ fn wait_output_schema_v2() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "current_agent_name": {
+                "type": "string",
+                "description": "Canonical task path for the agent whose mailbox was observed by this wait call."
+            },
             "message": {
                 "type": "string",
                 "description": "Brief wait summary without the agent's final content."
@@ -484,7 +496,7 @@ fn wait_output_schema_v2() -> Value {
                 "description": "Whether the wait call returned because no mailbox update arrived before the timeout."
             }
         },
-        "required": ["message", "timed_out"],
+        "required": ["current_agent_name", "message", "timed_out"],
         "additionalProperties": false
     })
 }

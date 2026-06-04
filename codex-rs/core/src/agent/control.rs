@@ -67,6 +67,7 @@ pub(crate) struct LiveAgent {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
+    pub(crate) is_current_agent: bool,
     pub(crate) agent_status: AgentStatus,
     pub(crate) last_task_message: Option<String>,
 }
@@ -939,6 +940,9 @@ impl AgentControl {
                 })
         });
 
+        let current_agent_path = current_session_source
+            .get_agent_path()
+            .unwrap_or_else(AgentPath::root);
         let root_path = AgentPath::root();
         let mut agents = Vec::with_capacity(live_agents.len().saturating_add(1));
         if resolved_prefix
@@ -949,6 +953,7 @@ impl AgentControl {
         {
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
+                is_current_agent: current_agent_path == root_path,
                 agent_status: root_thread.agent_status().await,
                 last_task_message: Some(ROOT_LAST_TASK_MESSAGE.to_string()),
             });
@@ -973,9 +978,14 @@ impl AgentControl {
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
+            let is_current_agent = metadata
+                .agent_path
+                .as_ref()
+                .is_some_and(|agent_path| agent_path == &current_agent_path);
             let last_task_message = metadata.last_task_message.clone();
             agents.push(ListedAgent {
                 agent_name,
+                is_current_agent,
                 agent_status: thread.agent_status().await,
                 last_task_message,
             });
