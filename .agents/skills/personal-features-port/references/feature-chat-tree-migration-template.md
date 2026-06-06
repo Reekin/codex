@@ -40,6 +40,7 @@ If a reference branch conflicts with the contract, follow the contract and recor
 
 - strategy: rebase / clean port with reused modules
 - reason:
+- new feature branch uses `ft/chat-tree-<upstream-version>` naming: yes/no
 - old branch inventory completed: yes/no
 - integration-only changes excluded from feature branch: yes/no
 - release workflow left for integration branch: yes/no

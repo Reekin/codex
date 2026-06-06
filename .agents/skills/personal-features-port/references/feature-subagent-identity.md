@@ -7,7 +7,7 @@ This is a compact feature guide because the current scope is small compared with
 ## Feature Metadata
 
 - **Feature name**: subagent identity clarification.
-- **Feature branch pattern**: `feature/subagent-identity-labels`.
+- **Feature branch pattern**: `ft/subagent-identity-labels-<upstream-version>`; for example `ft/subagent-identity-labels-0.133`.
 - **Target integration branch pattern**: merge or replay into the versioned integration branch, for example `integration-0.133`.
 - **Primary purpose**: prevent spawned subagents from confusing inherited transcript history, root agent state, sibling agents, or wait/list output with their own identity.
 
@@ -66,7 +66,7 @@ Current implementation areas from the v0.133 port:
 Reference source priority:
 
 1. Behavior in this file.
-2. Direct previous `feature/subagent-identity-labels` branch.
+2. Direct previous versioned `ft/subagent-identity-labels-<upstream-version>` branch.
 3. Current upstream multi-agent tool schema and handler architecture.
 
 Do not copy chat tree feature documentation into this feature. If chat-tree docs mention subagent exclusion, that is chat-tree behavior, not this feature's runtime contract.
