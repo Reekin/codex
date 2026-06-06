@@ -90,6 +90,81 @@ fn exec_command_tool_matches_expected_spec() {
 }
 
 #[test]
+fn exec_argv_tool_matches_expected_spec() {
+    let tool = create_exec_argv_tool_with_environment_id(
+        CommandToolOptions {
+            allow_login_shell: true,
+            exec_permission_approvals_enabled: false,
+        },
+        /*include_environment_id*/ true,
+    );
+
+    let mut properties = BTreeMap::from([
+        (
+            "argv".to_string(),
+            JsonSchema::array(
+                JsonSchema::string(Some(
+                    "One command argument. The first item is the program to execute.".to_string(),
+                )),
+                Some(
+                    "Command argv vector to execute without shell interpretation. Use exec_command when the command needs pipes, redirects, glob expansion, shell variables, or shell builtins.".to_string(),
+                ),
+            ),
+        ),
+        (
+            "workdir".to_string(),
+            JsonSchema::string(Some(
+                "Optional working directory to run the command in; defaults to the turn cwd."
+                    .to_string(),
+            )),
+        ),
+        (
+            "tty".to_string(),
+            JsonSchema::boolean(Some(
+                "Whether to allocate a TTY for the command. Defaults to false (plain pipes); set to true to open a PTY and access TTY process.".to_string(),
+            )),
+        ),
+        (
+            "yield_time_ms".to_string(),
+            JsonSchema::number(Some(
+                "How long to wait (in milliseconds) for output before yielding.".to_string(),
+            )),
+        ),
+        (
+            "max_output_tokens".to_string(),
+            JsonSchema::number(Some(
+                "Maximum number of tokens to return. Excess output will be truncated.".to_string(),
+            )),
+        ),
+        (
+            "environment_id".to_string(),
+            JsonSchema::string(Some(
+                "Optional environment id from the <environment_context> block. If omitted, uses the primary environment.".to_string(),
+            )),
+        ),
+    ]);
+    properties.extend(create_approval_parameters(
+        /*exec_permission_approvals_enabled*/ false,
+    ));
+
+    assert_eq!(
+        tool,
+        ToolSpec::Function(ResponsesApiTool {
+            name: "exec_argv".to_string(),
+            description: "Runs one external program with an argv vector and returns output or a session ID for ongoing interaction. This does not invoke a shell or interpret shell syntax; use exec_command for pipes, redirects, glob expansion, shell variables, shell builtins, or shell control flow.".to_string(),
+            strict: false,
+            defer_loading: None,
+            parameters: JsonSchema::object(
+                properties,
+                Some(vec!["argv".to_string()]),
+                Some(false.into())
+            ),
+            output_schema: Some(unified_exec_output_schema()),
+        })
+    );
+}
+
+#[test]
 fn write_stdin_tool_matches_expected_spec() {
     let tool = create_write_stdin_tool();
 

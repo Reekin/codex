@@ -12,9 +12,7 @@ use crate::tools::handlers::implicit_granted_permissions;
 use crate::tools::handlers::normalize_and_validate_additional_permissions;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::parse_arguments_with_base_path;
-use crate::tools::handlers::resolve_tool_environment;
-use crate::tools::handlers::rewrite_function_string_argument;
-use crate::tools::handlers::updated_hook_command;
+use crate::tools::handlers::rewrite_function_arguments;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
@@ -27,35 +25,32 @@ use crate::unified_exec::UnifiedExecHookMetadata;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::generate_chunk_id;
 use codex_features::Feature;
-use codex_otel::SessionTelemetry;
-use codex_otel::TOOL_CALL_UNIFIED_EXEC_METRIC;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
+use serde_json::Value;
 
-use super::super::shell_spec::CommandToolOptions;
-use super::super::shell_spec::create_exec_command_tool_with_environment_id;
-use super::ExecCommandArgs;
+use super::ExecArgvArgs;
 use super::ExecCommandEnvironmentArgs;
-use super::get_command;
-use super::post_unified_exec_tool_use_payload;
+use super::exec_command::emit_unified_exec_tty_metric;
+use super::post_unified_exec_tool_use_payload_with_name;
+use crate::tools::handlers::shell_spec::CommandToolOptions;
+use crate::tools::handlers::shell_spec::create_exec_argv_tool_with_environment_id;
 
 #[derive(Clone, Copy)]
-pub(crate) struct ExecCommandHandlerOptions {
-    pub(crate) allow_login_shell: bool,
+pub(crate) struct ExecArgvHandlerOptions {
     pub(crate) exec_permission_approvals_enabled: bool,
     pub(crate) include_environment_id: bool,
 }
 
-pub struct ExecCommandHandler {
-    options: ExecCommandHandlerOptions,
+pub struct ExecArgvHandler {
+    options: ExecArgvHandlerOptions,
 }
 
-impl Default for ExecCommandHandler {
+impl Default for ExecArgvHandler {
     fn default() -> Self {
         Self {
-            options: ExecCommandHandlerOptions {
-                allow_login_shell: false,
+            options: ExecArgvHandlerOptions {
                 exec_permission_approvals_enabled: false,
                 include_environment_id: false,
             },
@@ -63,22 +58,22 @@ impl Default for ExecCommandHandler {
     }
 }
 
-impl ExecCommandHandler {
-    pub(crate) fn new(options: ExecCommandHandlerOptions) -> Self {
+impl ExecArgvHandler {
+    pub(crate) fn new(options: ExecArgvHandlerOptions) -> Self {
         Self { options }
     }
 }
 
 #[async_trait::async_trait]
-impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
+impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
     fn tool_name(&self) -> ToolName {
-        ToolName::plain("exec_command")
+        ToolName::plain("exec_argv")
     }
 
     fn spec(&self) -> Option<ToolSpec> {
-        Some(create_exec_command_tool_with_environment_id(
+        Some(create_exec_argv_tool_with_environment_id(
             CommandToolOptions {
-                allow_login_shell: self.options.allow_login_shell,
+                allow_login_shell: false,
                 exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
             },
             self.options.include_environment_id,
@@ -106,7 +101,7 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
             ToolPayload::Function { arguments } => arguments,
             _ => {
                 return Err(FunctionCallError::RespondToModel(
-                    "exec_command handler received unsupported payload".to_string(),
+                    "exec_argv handler received unsupported payload".to_string(),
                 ));
             }
         };
@@ -114,8 +109,10 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
         let manager: &UnifiedExecProcessManager = &session.services.unified_exec_manager;
         let context = UnifiedExecContext::new(session.clone(), turn.clone(), call_id.clone());
         let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
-        let Some(turn_environment) =
-            resolve_tool_environment(turn.as_ref(), environment_args.environment_id.as_deref())?
+        let Some(turn_environment) = super::super::resolve_tool_environment(
+            turn.as_ref(),
+            environment_args.environment_id.as_deref(),
+        )?
         else {
             return Err(FunctionCallError::RespondToModel(
                 "unified exec is unavailable in this session".to_string(),
@@ -131,8 +128,11 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
             );
         let environment = Arc::clone(&turn_environment.environment);
         let fs = environment.get_filesystem();
-        let args: ExecCommandArgs = parse_arguments_with_base_path(&arguments, &cwd)?;
-        let hook_command = args.cmd.clone();
+        let args: ExecArgvArgs = parse_arguments_with_base_path(&arguments, &cwd)?;
+        let command = validate_argv(args.argv)?;
+        let hook_command = codex_shell_command::parse_command::shlex_join(&command);
+        let hook_metadata =
+            UnifiedExecHookMetadata::exec_argv(hook_command.clone(), command.clone());
         maybe_emit_implicit_skill_invocation(
             session.as_ref(),
             context.turn.as_ref(),
@@ -141,18 +141,8 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
         )
         .await;
         let process_id = manager.allocate_process_id().await;
-        let resolved_command = get_command(
-            &args,
-            session.user_shell(),
-            &turn.unified_exec_shell_mode,
-            turn.config.permissions.allow_login_shell,
-        )
-        .map_err(FunctionCallError::RespondToModel)?;
-        let command = resolved_command.command;
-        let shell_type = resolved_command.shell_type;
-        let command_for_display = codex_shell_command::parse_command::shlex_join(&command);
 
-        let ExecCommandArgs {
+        let ExecArgvArgs {
             tty,
             yield_time_ms,
             max_output_tokens,
@@ -177,8 +167,6 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
             || (session.features().enabled(Feature::RequestPermissionsTool)
                 && effective_additional_permissions.permissions_preapproved);
 
-        // Sticky turn permissions have already been approved, so they should
-        // continue through the normal exec approval flow for the command.
         if effective_additional_permissions
             .sandbox_permissions
             .requests_sandbox_override()
@@ -229,7 +217,7 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
             context.turn.clone(),
             Some(&tracker),
             &context.call_id,
-            "exec_command",
+            "exec_argv",
         )
         .await?
         {
@@ -255,10 +243,10 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
             .exec_command(
                 ExecCommandRequest {
                     command,
-                    shell_type: Some(shell_type),
-                    tool_name: ToolName::plain("exec_command"),
+                    shell_type: None,
+                    tool_name: ToolName::plain("exec_argv"),
                     hook_command: hook_command.clone(),
-                    hook_metadata: UnifiedExecHookMetadata::bash(hook_command.clone()),
+                    hook_metadata: hook_metadata.clone(),
                     process_id,
                     yield_time_ms,
                     max_output_tokens,
@@ -289,24 +277,22 @@ impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
                     raw_output: output_text.into_bytes(),
                     truncation_policy: turn.truncation_policy,
                     max_output_tokens,
-                    // Sandbox denial is terminal, so there is no live
-                    // process for write_stdin to resume.
                     process_id: None,
                     exit_code: Some(output.exit_code),
                     original_token_count: Some(original_token_count),
-                    hook_command: Some(hook_command.clone()),
-                    hook_tool_name: Some("Bash".to_string()),
-                    hook_input: Some(serde_json::json!({ "command": hook_command })),
+                    hook_command: Some(hook_command),
+                    hook_tool_name: Some("exec_argv".to_string()),
+                    hook_input: Some(hook_metadata.tool_input),
                 }))
             }
             Err(err) => Err(FunctionCallError::RespondToModel(format!(
-                "exec_command failed for `{command_for_display}`: {err:?}"
+                "exec_argv failed for `{hook_command}`: {err:?}"
             ))),
         }
     }
 }
 
-impl CoreToolRuntime for ExecCommandHandler {
+impl CoreToolRuntime for ExecArgvHandler {
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }
@@ -315,32 +301,32 @@ impl CoreToolRuntime for ExecCommandHandler {
         let ToolPayload::Function { arguments } = &invocation.payload else {
             return None;
         };
-
-        parse_arguments::<ExecCommandArgs>(arguments)
-            .ok()
-            .map(|args| PreToolUsePayload {
-                tool_name: HookToolName::bash(),
-                tool_input: serde_json::json!({ "command": args.cmd }),
-            })
+        let args = parse_arguments::<ExecArgvArgs>(arguments).ok()?;
+        let argv = validate_argv(args.argv).ok()?;
+        Some(PreToolUsePayload {
+            tool_name: exec_argv_hook_name(),
+            tool_input: serde_json::json!({
+                "command": codex_shell_command::parse_command::shlex_join(&argv),
+                "argv": argv,
+            }),
+        })
     }
 
     fn with_updated_hook_input(
         &self,
         mut invocation: ToolInvocation,
-        updated_input: serde_json::Value,
+        updated_input: Value,
     ) -> Result<ToolInvocation, FunctionCallError> {
         let ToolPayload::Function { arguments } = invocation.payload else {
             return Err(FunctionCallError::RespondToModel(
-                "hook input rewrite received unsupported exec_command payload".to_string(),
+                "hook input rewrite received unsupported exec_argv payload".to_string(),
             ));
         };
+        let argv = updated_hook_argv(&updated_input)?;
         invocation.payload = ToolPayload::Function {
-            arguments: rewrite_function_string_argument(
-                &arguments,
-                "exec_command",
-                "cmd",
-                updated_hook_command(&updated_input)?,
-            )?,
+            arguments: rewrite_function_arguments(&arguments, "exec_argv", |arguments| {
+                arguments.insert("argv".to_string(), serde_json::json!(argv));
+            })?,
         };
         Ok(invocation)
     }
@@ -350,14 +336,48 @@ impl CoreToolRuntime for ExecCommandHandler {
         invocation: &ToolInvocation,
         result: &dyn crate::tools::context::ToolOutput,
     ) -> Option<PostToolUsePayload> {
-        post_unified_exec_tool_use_payload(invocation, result)
+        post_unified_exec_tool_use_payload_with_name(invocation, result, exec_argv_hook_name())
     }
 }
 
-pub(super) fn emit_unified_exec_tty_metric(session_telemetry: &SessionTelemetry, tty: bool) {
-    session_telemetry.counter(
-        TOOL_CALL_UNIFIED_EXEC_METRIC,
-        /*inc*/ 1,
-        &[("tty", if tty { "true" } else { "false" })],
-    );
+fn exec_argv_hook_name() -> HookToolName {
+    HookToolName::new("exec_argv")
+}
+
+fn validate_argv(argv: Vec<String>) -> Result<Vec<String>, FunctionCallError> {
+    let Some(program) = argv.first() else {
+        return Err(FunctionCallError::RespondToModel(
+            "exec_argv requires a non-empty argv array.".to_string(),
+        ));
+    };
+    if program.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "exec_argv requires argv[0] to name a program.".to_string(),
+        ));
+    }
+    if argv.iter().any(|arg| arg.contains('\0')) {
+        return Err(FunctionCallError::RespondToModel(
+            "exec_argv arguments must not contain NUL bytes.".to_string(),
+        ));
+    }
+    Ok(argv)
+}
+
+fn updated_hook_argv(updated_input: &Value) -> Result<Vec<String>, FunctionCallError> {
+    let Some(Value::Array(items)) = updated_input.get("argv") else {
+        return Err(FunctionCallError::RespondToModel(
+            "hook returned updatedInput for exec_argv without array field `argv`".to_string(),
+        ));
+    };
+    let mut argv = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(arg) = item.as_str() else {
+            return Err(FunctionCallError::RespondToModel(
+                "hook returned updatedInput.argv for exec_argv with a non-string argument"
+                    .to_string(),
+            ));
+        };
+        argv.push(arg.to_string());
+    }
+    validate_argv(argv)
 }

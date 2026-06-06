@@ -50,7 +50,7 @@ pub(crate) struct NetworkApprovalSpec {
     pub network: Option<NetworkProxy>,
     pub mode: NetworkApprovalMode,
     pub trigger: GuardianNetworkAccessTrigger,
-    pub command: String,
+    pub permission_request_payload: PermissionRequestPayload,
 }
 
 #[derive(Clone, Debug)]
@@ -223,7 +223,7 @@ struct ActiveNetworkApprovalCall {
     registration_id: String,
     turn_id: String,
     trigger: GuardianNetworkAccessTrigger,
-    command: String,
+    permission_request_payload: PermissionRequestPayload,
     cancellation_token: CancellationToken,
 }
 
@@ -266,7 +266,7 @@ impl NetworkApprovalService {
         registration_id: String,
         turn_id: String,
         trigger: GuardianNetworkAccessTrigger,
-        command: String,
+        permission_request_payload: PermissionRequestPayload,
         cancellation_token: CancellationToken,
     ) {
         let mut calls = self.calls.lock().await;
@@ -277,7 +277,7 @@ impl NetworkApprovalService {
                 registration_id,
                 turn_id,
                 trigger,
-                command,
+                permission_request_payload,
                 cancellation_token,
             }),
         );
@@ -461,14 +461,16 @@ impl NetworkApprovalService {
         };
         let guardian_approval_id = Self::approval_id_for_key(&key);
         let prompt_command = vec!["network-access".to_string(), target.clone()];
-        let command = owner_call
-            .as_ref()
-            .map_or_else(|| prompt_command.join(" "), |call| call.command.clone());
+        let fallback_command = prompt_command.join(" ");
+        let permission_request_payload = owner_call.as_ref().map_or_else(
+            || PermissionRequestPayload::bash(fallback_command, /*description*/ None),
+            |call| call.permission_request_payload.clone(),
+        );
         if let Some(permission_request_decision) = run_permission_request_hooks(
             &session,
             &turn_context,
             &guardian_approval_id,
-            PermissionRequestPayload::bash(command, Some(format!("network-access {target}"))),
+            permission_request_payload.with_description(format!("network-access {target}")),
         )
         .await
         {
@@ -710,7 +712,7 @@ pub(crate) async fn begin_network_approval(
         network,
         mode,
         trigger,
-        command,
+        permission_request_payload,
     } = spec?;
     if !managed_network_active || network.is_none() {
         return None;
@@ -725,7 +727,7 @@ pub(crate) async fn begin_network_approval(
             registration_id.clone(),
             turn_id.to_string(),
             trigger,
-            command,
+            permission_request_payload,
             cancellation_token.clone(),
         )
         .await;

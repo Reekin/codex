@@ -339,10 +339,14 @@ async fn shell_family_registers_visible_unified_exec_and_hidden_legacy_shell() {
     })
     .await;
 
-    plan.assert_visible_contains(&["exec_command", "write_stdin"]);
+    plan.assert_visible_contains(&["exec_command", "exec_argv", "write_stdin"]);
     plan.assert_visible_lacks(&["shell_command"]);
-    plan.assert_registered_contains(&["exec_command", "write_stdin", "shell_command"]);
+    plan.assert_registered_contains(&["exec_command", "exec_argv", "write_stdin", "shell_command"]);
     assert_eq!(plan.exposure("shell_command"), ToolExposure::Direct);
+    assert!(!has_parameter(
+        plan.visible_spec("exec_argv"),
+        "environment_id"
+    ));
 }
 
 #[tokio::test]
@@ -356,12 +360,14 @@ async fn environment_count_controls_environment_backed_tools() {
     no_environment.assert_visible_lacks(&[
         "shell_command",
         "exec_command",
+        "exec_argv",
         "apply_patch",
         "view_image",
     ]);
     no_environment.assert_registered_lacks(&[
         "shell_command",
         "exec_command",
+        "exec_argv",
         "apply_patch",
         "view_image",
     ]);
@@ -373,9 +379,18 @@ async fn environment_count_controls_environment_backed_tools() {
         turn.model_info.apply_patch_tool_type = Some(ApplyPatchToolType::Freeform);
     })
     .await;
-    multiple_environments.assert_visible_contains(&["exec_command", "apply_patch", "view_image"]);
+    multiple_environments.assert_visible_contains(&[
+        "exec_command",
+        "exec_argv",
+        "apply_patch",
+        "view_image",
+    ]);
     assert!(has_parameter(
         multiple_environments.visible_spec("exec_command"),
+        "environment_id"
+    ));
+    assert!(has_parameter(
+        multiple_environments.visible_spec("exec_argv"),
         "environment_id"
     ));
     assert!(apply_patch_accepts_environment_id(

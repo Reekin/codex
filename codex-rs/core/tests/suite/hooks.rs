@@ -104,6 +104,15 @@ fn trust_plugin_hooks(config: &mut Config, plugin_hook_sources: Vec<PluginHookSo
     trust_hooks(config, listed.hooks);
 }
 
+fn enable_unified_exec_hooks(config: &mut Config) {
+    config.use_experimental_unified_exec_tool = true;
+    trust_discovered_hooks(config);
+    config
+        .features
+        .enable(Feature::UnifiedExec)
+        .expect("test config should allow feature update");
+}
+
 fn write_stop_hook(home: &Path, block_prompts: &[&str]) -> Result<()> {
     let script_path = home.join("stop_hook.py");
     let log_path = home.join("stop_hook_log.jsonl");
@@ -2179,6 +2188,100 @@ async fn permission_request_hook_sees_raw_exec_command_input() -> Result<()> {
 }
 
 #[tokio::test]
+async fn permission_request_hook_sees_exec_argv_identity_and_argv() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "permissionrequest-exec-argv";
+    let marker = std::env::temp_dir().join("permissionrequest-exec-argv-marker");
+    let writer = "from pathlib import Path\nimport sys\nPath(sys.argv[1]).write_text('approved', encoding='utf-8')";
+    let argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        writer.to_string(),
+        marker.display().to_string(),
+    ];
+    let justification = "create the temporary argv marker";
+    let args = serde_json::json!({
+        "argv": argv.clone(),
+        "sandbox_permissions": "require_escalated",
+        "justification": justification,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "exec_argv",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "permission request hook allowed exec_argv"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) = write_permission_request_hook(
+                home,
+                Some("^exec_argv$"),
+                "allow",
+                PERMISSION_REQUEST_ALLOW_REASON,
+            ) {
+                panic!("failed to write permission request hook test fixture: {error}");
+            }
+        })
+        .with_config(enable_unified_exec_hooks);
+    let test = builder.build(&server).await?;
+
+    if marker.exists() {
+        fs::remove_file(&marker).context("remove stale exec_argv permission marker")?;
+    }
+
+    test.submit_turn_with_approval_and_permission_profile(
+        "run exec_argv after hook approval",
+        AskForApproval::OnRequest,
+        PermissionProfile::read_only(),
+    )
+    .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    requests[1].function_call_output(call_id);
+    assert_eq!(
+        fs::read_to_string(&marker).context("read exec_argv permission marker")?,
+        "approved"
+    );
+
+    let hook_inputs = read_permission_request_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["hook_event_name"], "PermissionRequest");
+    assert_eq!(hook_inputs[0]["tool_name"], "exec_argv");
+    assert_eq!(
+        hook_inputs[0]["tool_input"]["argv"],
+        serde_json::json!(argv)
+    );
+    assert_eq!(
+        hook_inputs[0]["tool_input"]["description"],
+        Value::from(justification)
+    );
+    assert!(
+        hook_inputs[0].get("tool_use_id").is_none(),
+        "PermissionRequest input should not include a tool_use_id",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn permission_request_hook_allows_network_approval_without_prompt() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -2291,6 +2394,156 @@ allow_local_binding = true
         command,
         Some("network-access http://codex-network-test.invalid:80"),
     )?;
+
+    test.codex.submit(Op::Shutdown {}).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn permission_request_hook_sees_exec_argv_managed_network_identity_and_argv() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let home = Arc::new(TempDir::new()?);
+    fs::write(
+        home.path().join("config.toml"),
+        r#"default_permissions = "workspace"
+
+[permissions.workspace.filesystem]
+":minimal" = "read"
+
+[permissions.workspace.network]
+enabled = true
+mode = "limited"
+allow_local_binding = true
+"#,
+    )?;
+    let call_id = "permissionrequest-exec-argv-network-approval";
+    let network_target = "http://codex-network-test.invalid";
+    let network_access_description = "network-access http://codex-network-test.invalid:80";
+    let argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import urllib.request, sys; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); print('OK:' + opener.open(sys.argv[1], timeout=2).read().decode(errors='replace'))"
+            .to_string(),
+        network_target.to_string(),
+    ];
+    let args = serde_json::json!({ "argv": argv.clone() });
+    let _responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "exec_argv",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message(
+                    "msg-1",
+                    "permission request hook allowed argv network access",
+                ),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let approval_policy = AskForApproval::OnFailure;
+    let permission_profile = network_workspace_write_profile();
+    let permission_profile_for_config = permission_profile.clone();
+    let test = test_codex()
+        .with_home(Arc::clone(&home))
+        .with_pre_build_hook(|home| {
+            if let Err(error) = write_permission_request_hook(
+                home,
+                Some("^exec_argv$"),
+                "allow",
+                PERMISSION_REQUEST_ALLOW_REASON,
+            ) {
+                panic!("failed to write permission request hook test fixture: {error}");
+            }
+        })
+        .with_cloud_requirements(managed_network_requirements_loader())
+        .with_config(move |config| {
+            enable_unified_exec_hooks(config);
+            config.permissions.approval_policy = Constrained::allow_any(approval_policy);
+            config
+                .permissions
+                .set_permission_profile(permission_profile_for_config)
+                .expect("set permission profile");
+        })
+        .build(&server)
+        .await?;
+    assert!(
+        test.config.managed_network_requirements_enabled(),
+        "expected managed network requirements to be enabled"
+    );
+    assert!(
+        test.config.permissions.network.is_some(),
+        "expected managed network proxy config to be present"
+    );
+    test.session_configured
+        .network_proxy
+        .as_ref()
+        .expect("expected runtime managed network proxy addresses");
+
+    test.submit_turn_with_approval_and_permission_profile(
+        "run the exec_argv command after network hook approval",
+        approval_policy,
+        permission_profile,
+    )
+    .await?;
+
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if test
+                .codex_home_path()
+                .join("permission_request_hook_log.jsonl")
+                .exists()
+            {
+                break;
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("expected exec_argv network approval hook to run");
+
+    assert!(
+        timeout(
+            Duration::from_secs(2),
+            wait_for_event(&test.codex, |event| matches!(
+                event,
+                EventMsg::ExecApprovalRequest(_)
+            ))
+        )
+        .await
+        .is_err(),
+        "expected the exec_argv network approval hook to bypass the approval prompt"
+    );
+
+    let hook_inputs = read_permission_request_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["hook_event_name"], "PermissionRequest");
+    assert_eq!(hook_inputs[0]["tool_name"], "exec_argv");
+    assert_eq!(
+        hook_inputs[0]["tool_input"]["argv"],
+        serde_json::json!(argv)
+    );
+    assert_eq!(
+        hook_inputs[0]["tool_input"]["description"],
+        Value::from(network_access_description)
+    );
 
     test.codex.submit(Op::Shutdown {}).await?;
     wait_for_event(&test.codex, |event| {
@@ -2738,6 +2991,348 @@ async fn pre_tool_use_rewrites_shell_command_before_execution() -> Result<()> {
 #[tokio::test]
 async fn pre_tool_use_rewrites_exec_command_before_execution() -> Result<()> {
     assert_pre_tool_use_rewrites_bash_surface(BashRewriteSurface::ExecCommand).await
+}
+
+#[tokio::test]
+async fn bash_pre_tool_use_hook_does_not_match_exec_argv() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "pretooluse-bash-does-not-match-exec-argv";
+    let literal = "$HOME | cat";
+    let argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import sys; print(sys.argv[1])".to_string(),
+        literal.to_string(),
+    ];
+    let args = serde_json::json!({ "argv": argv });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "exec_argv",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "exec_argv completed without Bash hook"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) =
+                write_pre_tool_use_hook(home, Some("^Bash$"), "json_deny", "blocked by Bash hook")
+            {
+                panic!("failed to write pre tool use hook test fixture: {error}");
+            }
+        })
+        .with_config(enable_unified_exec_hooks);
+    let test = builder.build(&server).await?;
+
+    test.submit_turn_with_permission_profile(
+        "run exec_argv while a Bash pre hook is configured",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output_item = requests[1].function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("exec_argv output string");
+    assert!(
+        output.contains(literal),
+        "exec_argv should pass shell metacharacters literally, got {output:?}",
+    );
+    assert!(
+        !test
+            .codex_home_path()
+            .join("pre_tool_use_hook_log.jsonl")
+            .exists(),
+        "Bash hook should not run for exec_argv",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn exec_argv_pre_tool_use_hook_matches_and_sees_argv() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "pretooluse-exec-argv-matches";
+    let literal = "$HOME | cat";
+    let argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import sys; print(sys.argv[1])".to_string(),
+        literal.to_string(),
+    ];
+    let args = serde_json::json!({ "argv": argv.clone() });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "exec_argv",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "exec_argv hook matched"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let pre_context = "Remember the exec_argv pre-tool note.";
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) =
+                write_pre_tool_use_hook(home, Some("^exec_argv$"), "context", pre_context)
+            {
+                panic!("failed to write pre tool use hook test fixture: {error}");
+            }
+        })
+        .with_config(enable_unified_exec_hooks);
+    let test = builder.build(&server).await?;
+
+    test.submit_turn_with_permission_profile(
+        "run exec_argv with an exec_argv pre hook",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output_item = requests[1].function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("exec_argv output string");
+    assert!(
+        output.contains(literal),
+        "exec_argv should pass shell metacharacters literally, got {output:?}",
+    );
+    assert!(
+        requests[1]
+            .message_input_texts("developer")
+            .contains(&pre_context.to_string()),
+        "follow-up request should include exec_argv pre hook context",
+    );
+
+    let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["hook_event_name"], "PreToolUse");
+    assert_eq!(hook_inputs[0]["tool_name"], "exec_argv");
+    assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
+    assert_eq!(
+        hook_inputs[0]["tool_input"]["argv"],
+        serde_json::json!(argv)
+    );
+    assert!(
+        hook_inputs[0]["tool_input"]["command"]
+            .as_str()
+            .is_some_and(|command| !command.is_empty()),
+        "exec_argv hook input should include a display command",
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_tool_use_rewrites_exec_argv_before_execution() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "pretooluse-exec-argv-rewrite";
+    let original_marker = std::env::temp_dir().join("pretooluse-exec-argv-original-marker");
+    let rewritten_marker = std::env::temp_dir().join("pretooluse-exec-argv-rewritten-marker");
+    let writer = "from pathlib import Path\nimport sys\nPath(sys.argv[1]).write_text(sys.argv[2], encoding='utf-8')";
+    let original_argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        writer.to_string(),
+        original_marker.display().to_string(),
+        "original".to_string(),
+    ];
+    let rewritten_argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        writer.to_string(),
+        rewritten_marker.display().to_string(),
+        "rewritten".to_string(),
+    ];
+    let args = serde_json::json!({ "argv": original_argv.clone() });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "exec_argv",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "exec_argv hook rewrote argv"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let updated_input = serde_json::json!({ "argv": rewritten_argv.clone() });
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |home| {
+            if let Err(error) =
+                write_updating_pre_tool_use_hook(home, "^exec_argv$", &updated_input)
+            {
+                panic!("failed to write updating pre tool use hook fixture: {error}");
+            }
+        })
+        .with_config(enable_unified_exec_hooks);
+    let test = builder.build(&server).await?;
+
+    if original_marker.exists() {
+        fs::remove_file(&original_marker).context("remove stale original exec_argv marker")?;
+    }
+    if rewritten_marker.exists() {
+        fs::remove_file(&rewritten_marker).context("remove stale rewritten exec_argv marker")?;
+    }
+
+    test.submit_turn_with_permission_profile(
+        "run the rewritten exec_argv command",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    requests[1].function_call_output(call_id);
+    assert!(
+        !original_marker.exists(),
+        "original exec_argv should not execute after rewrite",
+    );
+    assert_eq!(
+        fs::read_to_string(&rewritten_marker).context("read rewritten exec_argv marker")?,
+        "rewritten"
+    );
+
+    let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["tool_name"], "exec_argv");
+    assert_eq!(
+        hook_inputs[0]["tool_input"]["argv"],
+        serde_json::json!(original_argv)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_tool_use_exec_argv_command_only_rewrite_fails_before_execution() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "pretooluse-exec-argv-command-only-rewrite";
+    let marker = std::env::temp_dir().join("pretooluse-exec-argv-command-only-marker");
+    let writer = "from pathlib import Path\nimport sys\nPath(sys.argv[1]).write_text('executed', encoding='utf-8')";
+    let argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        writer.to_string(),
+        marker.display().to_string(),
+    ];
+    let args = serde_json::json!({ "argv": argv.clone() });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "exec_argv",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "exec_argv command-only rewrite failed"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let updated_input = serde_json::json!({ "command": "python3 -c pass" });
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |home| {
+            if let Err(error) =
+                write_updating_pre_tool_use_hook(home, "^exec_argv$", &updated_input)
+            {
+                panic!("failed to write updating pre tool use hook fixture: {error}");
+            }
+        })
+        .with_config(enable_unified_exec_hooks);
+    let test = builder.build(&server).await?;
+
+    if marker.exists() {
+        fs::remove_file(&marker).context("remove stale command-only rewrite marker")?;
+    }
+
+    test.submit_turn_with_permission_profile(
+        "run exec_argv with an invalid command-only hook rewrite",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let output_item = requests[1].function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("exec_argv output string");
+    assert!(
+        output.contains("hook returned updatedInput for exec_argv without array field `argv`"),
+        "invalid rewrite should be reported to the model, got {output:?}",
+    );
+    assert!(
+        !marker.exists(),
+        "exec_argv should not execute after invalid command-only rewrite",
+    );
+
+    let hook_inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["tool_name"], "exec_argv");
+    assert_eq!(
+        hook_inputs[0]["tool_input"]["argv"],
+        serde_json::json!(argv)
+    );
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -3825,6 +4420,104 @@ async fn post_tool_use_exit_two_replaces_one_shot_exec_command_output_with_feedb
 }
 
 #[tokio::test]
+async fn post_tool_use_records_exec_argv_identity_and_argv() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let call_id = "posttooluse-exec-argv";
+    let argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import sys; print(sys.argv[1])".to_string(),
+        "post-argv-output".to_string(),
+    ];
+    let args = serde_json::json!({ "argv": argv.clone() });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    call_id,
+                    "exec_argv",
+                    &serde_json::to_string(&args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "exec_argv post hook context observed"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    let post_context = "Remember the exec_argv post-tool note.";
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) =
+                write_post_tool_use_hook(home, Some("^exec_argv$"), "context", post_context)
+            {
+                panic!("failed to write post tool use hook test fixture: {error}");
+            }
+        })
+        .with_config(enable_unified_exec_hooks);
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("run exec_argv with post hook").await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .message_input_texts("developer")
+            .contains(&post_context.to_string()),
+        "follow-up request should include exec_argv post hook context",
+    );
+    let output_item = requests[1].function_call_output(call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("exec_argv output string");
+    assert!(
+        output.contains("post-argv-output"),
+        "exec_argv output should reach PostToolUse, got {output:?}",
+    );
+
+    let hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(hook_inputs.len(), 1);
+    assert_eq!(hook_inputs[0]["hook_event_name"], "PostToolUse");
+    assert_eq!(hook_inputs[0]["tool_name"], "exec_argv");
+    assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
+    assert_eq!(
+        hook_inputs[0]["tool_input"]["argv"],
+        serde_json::json!(argv)
+    );
+    assert!(
+        hook_inputs[0]["tool_response"]
+            .as_str()
+            .is_some_and(|tool_response| tool_response.contains("post-argv-output")),
+        "PostToolUse should see exec_argv output, got {:?}",
+        hook_inputs[0]["tool_response"]
+    );
+    let transcript_path = hook_inputs[0]["transcript_path"]
+        .as_str()
+        .expect("post tool use hook transcript_path");
+    assert!(
+        Path::new(transcript_path).exists(),
+        "post tool use hook transcript_path should be materialized on disk",
+    );
+    assert!(
+        hook_inputs[0]["turn_id"]
+            .as_str()
+            .is_some_and(|turn_id| !turn_id.is_empty())
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn post_tool_use_spills_large_feedback_message() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -3989,6 +4682,103 @@ async fn post_tool_use_blocks_when_exec_session_completes_via_write_stdin() -> R
             .as_str()
             .is_some_and(|tool_response| tool_response.contains("session-post-hook-output")),
         "PostToolUse should see the final session output, got {:?}",
+        post_hook_inputs[0]["tool_response"]
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_tool_use_preserves_exec_argv_session_identity_via_write_stdin() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_windows!(Ok(()));
+
+    let server = start_mock_server().await;
+    let start_call_id = "posttooluse-exec-argv-session-start";
+    let poll_call_id = "posttooluse-exec-argv-session-poll";
+    let argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import time; time.sleep(1); print('session-argv-post-hook-output')".to_string(),
+    ];
+    let start_args = serde_json::json!({
+        "argv": argv.clone(),
+        "tty": false,
+        "yield_time_ms": 250,
+    });
+    let poll_args = serde_json::json!({
+        "session_id": 1000,
+        "chars": "",
+        "yield_time_ms": 5_000,
+    });
+    let feedback = "blocked by exec_argv session post hook";
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                core_test_support::responses::ev_function_call(
+                    start_call_id,
+                    "exec_argv",
+                    &serde_json::to_string(&start_args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                core_test_support::responses::ev_function_call(
+                    poll_call_id,
+                    "write_stdin",
+                    &serde_json::to_string(&poll_args)?,
+                ),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-3"),
+                ev_assistant_message("msg-1", "exec_argv session post hook observed"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(error) =
+                write_post_tool_use_hook(home, Some("^exec_argv$"), "exit_2", feedback)
+            {
+                panic!("failed to write post tool use hook test fixture: {error}");
+            }
+        })
+        .with_config(enable_unified_exec_hooks);
+    let test = builder.build(&server).await?;
+
+    test.submit_turn("run the exec_argv session with post hook")
+        .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 3);
+    let output_item = requests[2].function_call_output(poll_call_id);
+    let output = output_item
+        .get("output")
+        .and_then(Value::as_str)
+        .expect("write_stdin output string");
+    assert_eq!(output, feedback);
+
+    let post_hook_inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(post_hook_inputs.len(), 1);
+    assert_eq!(post_hook_inputs[0]["hook_event_name"], "PostToolUse");
+    assert_eq!(post_hook_inputs[0]["tool_name"], "exec_argv");
+    assert_eq!(post_hook_inputs[0]["tool_use_id"], start_call_id);
+    assert_eq!(
+        post_hook_inputs[0]["tool_input"]["argv"],
+        serde_json::json!(argv)
+    );
+    assert!(
+        post_hook_inputs[0]["tool_response"]
+            .as_str()
+            .is_some_and(|tool_response| tool_response.contains("session-argv-post-hook-output")),
+        "PostToolUse should see final exec_argv session output, got {:?}",
         post_hook_inputs[0]["tool_response"]
     );
 

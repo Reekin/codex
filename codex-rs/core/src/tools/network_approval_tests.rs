@@ -1,5 +1,6 @@
 use super::*;
 use crate::sandboxing::SandboxPermissions;
+use crate::tools::sandboxing::PermissionRequestPayload;
 use codex_network_proxy::BlockedRequestArgs;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::permissions::NetworkSandboxPolicy;
@@ -236,7 +237,10 @@ async fn register_call_with_default_shell_trigger(
                 justification: None,
                 tty: None,
             },
-            "curl https://example.com".to_string(),
+            PermissionRequestPayload::bash(
+                "curl https://example.com".to_string(),
+                /*description*/ None,
+            ),
             cancellation_token.clone(),
         )
         .await;
@@ -262,7 +266,10 @@ async fn active_call_preserves_triggering_command_context() {
             "registration-1".to_string(),
             "turn-1".to_string(),
             expected.clone(),
-            "curl https://example.com".to_string(),
+            PermissionRequestPayload::bash(
+                "curl https://example.com".to_string(),
+                /*description*/ None,
+            ),
             CancellationToken::new(),
         )
         .await;
@@ -273,7 +280,13 @@ async fn active_call_preserves_triggering_command_context() {
         .expect("single active call should resolve");
 
     assert_eq!(&call.trigger, &expected);
-    assert_eq!(call.command, "curl https://example.com");
+    assert_eq!(
+        call.permission_request_payload,
+        PermissionRequestPayload::bash(
+            "curl https://example.com".to_string(),
+            /*description*/ None
+        )
+    );
 }
 
 #[tokio::test]
