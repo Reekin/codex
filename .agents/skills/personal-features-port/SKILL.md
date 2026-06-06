@@ -93,6 +93,7 @@ Packaging and branch release work is not part of any one feature's product contr
 Current feature-specific references:
 
 - `feature-guide-template.md`: common structure for every personal feature guide.
+- `feature-exec-argv.md`: argv-native unified exec tool contract, adapter map, porting checklist, and acceptance matrix.
 - `feature-subagent-identity.md`: compact guide for the subagent identity clarification feature.
 - `feature-chat-tree-contract.md`: stable chat tree product/API behavior.
 - `feature-chat-tree-architecture.md`: preferred stable core and adapter shape for chat tree.
