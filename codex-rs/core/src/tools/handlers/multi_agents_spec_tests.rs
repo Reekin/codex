@@ -299,9 +299,8 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
         .expect("wait_agent should use object params");
     assert!(!properties.contains_key("targets"));
     assert!(properties.contains_key("timeout_ms"));
-    assert!(description.contains(
-        "Does not return the content; returns either a summary of which agents have updates (if any)"
-    ));
+    assert!(description.contains("Wait for a mailbox update delivered to the current agent"));
+    assert!(description.contains("returns a summary naming the current agent mailbox"));
     assert_eq!(
         properties
             .get("timeout_ms")
@@ -309,8 +308,17 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
         Some("Optional timeout in milliseconds. Defaults to 30000, min 10000, max 3600000.")
     );
     assert_eq!(parameters.required.as_ref(), None);
+    let output_schema = output_schema.expect("wait output schema");
     assert_eq!(
-        output_schema.expect("wait output schema")["properties"]["message"]["description"],
+        output_schema["required"],
+        json!(["current_agent_name", "message", "timed_out"])
+    );
+    assert_eq!(
+        output_schema["properties"]["current_agent_name"]["description"],
+        json!("Canonical task path for the agent whose mailbox was observed by this wait call.")
+    );
+    assert_eq!(
+        output_schema["properties"]["message"]["description"],
         json!("Brief wait summary without the agent's final content.")
     );
 }
@@ -342,9 +350,19 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
             "Optional task-path prefix (not ending with trailing slash). Accepts the same relative or absolute task-path syntax."
         )
     );
+    let output_schema = output_schema.expect("list_agents output schema");
     assert_eq!(
-        output_schema.expect("list_agents output schema")["properties"]["agents"]["items"]["required"],
-        json!(["agent_name", "agent_status", "last_task_message"])
+        output_schema["required"],
+        json!(["current_agent_name", "agents"])
+    );
+    assert_eq!(
+        output_schema["properties"]["agents"]["items"]["required"],
+        json!([
+            "agent_name",
+            "is_current_agent",
+            "agent_status",
+            "last_task_message"
+        ])
     );
 }
 
