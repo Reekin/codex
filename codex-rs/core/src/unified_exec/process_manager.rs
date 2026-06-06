@@ -191,6 +191,7 @@ struct PreparedProcessHandles {
     network_approval: Option<DeferredNetworkApproval>,
     call_id: String,
     hook_command: String,
+    hook_metadata: crate::unified_exec::UnifiedExecHookMetadata,
     process_id: i32,
     tty: bool,
 }
@@ -442,6 +443,7 @@ impl UnifiedExecProcessManager {
                 context,
                 &request.command,
                 request.hook_command.clone(),
+                request.hook_metadata.clone(),
                 cwd.clone(),
                 start,
                 request.process_id,
@@ -616,6 +618,8 @@ impl UnifiedExecProcessManager {
             exit_code,
             original_token_count: Some(original_token_count),
             hook_command: Some(request.hook_command.clone()),
+            hook_tool_name: Some(request.hook_metadata.tool_name.name().to_string()),
+            hook_input: Some(request.hook_metadata.tool_input.clone()),
         };
 
         Ok(response)
@@ -639,6 +643,7 @@ impl UnifiedExecProcessManager {
             network_approval,
             call_id,
             hook_command,
+            hook_metadata,
             process_id,
             tty,
             ..
@@ -771,6 +776,8 @@ impl UnifiedExecProcessManager {
             exit_code,
             original_token_count: Some(original_token_count),
             hook_command: Some(hook_command),
+            hook_tool_name: Some(hook_metadata.tool_name.name().to_string()),
+            hook_input: Some(hook_metadata.tool_input),
         };
 
         Ok(response)
@@ -837,6 +844,7 @@ impl UnifiedExecProcessManager {
             network_approval: entry.network_approval.clone(),
             call_id: entry.call_id.clone(),
             hook_command: entry.hook_command.clone(),
+            hook_metadata: entry.hook_metadata.clone(),
             process_id: entry.process_id,
             tty: entry.tty,
         })
@@ -849,6 +857,7 @@ impl UnifiedExecProcessManager {
         context: &UnifiedExecContext,
         command: &[String],
         hook_command: String,
+        hook_metadata: crate::unified_exec::UnifiedExecHookMetadata,
         cwd: PathUri,
         started_at: Instant,
         process_id: i32,
@@ -864,6 +873,7 @@ impl UnifiedExecProcessManager {
             cwd: cwd.clone(),
             initial_exec_command_active,
             hook_command,
+            hook_metadata,
             tty,
             network_approval,
             session: Arc::downgrade(&context.session),
@@ -1130,8 +1140,9 @@ impl UnifiedExecProcessManager {
             .await;
         let req = UnifiedExecToolRequest {
             command: request.command.clone(),
-            shell_type: request.shell_type,
+            shell_type: request.shell_type.clone(),
             hook_command: request.hook_command.clone(),
+            hook_metadata: request.hook_metadata.clone(),
             process_id: request.process_id,
             cwd,
             sandbox_cwd: request.sandbox_cwd.clone(),
@@ -1158,7 +1169,7 @@ impl UnifiedExecProcessManager {
             session: context.session.clone(),
             turn: context.turn.clone(),
             call_id: context.call_id.clone(),
-            tool_name: ToolName::plain("exec_command"),
+            tool_name: request.tool_name.clone(),
         };
         orchestrator
             .run(

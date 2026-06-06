@@ -133,6 +133,7 @@ async fn exec_command_with_tty(
             cwd: cwd.clone().into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             hook_command: cmd.to_string(),
+            hook_metadata: UnifiedExecHookMetadata::bash(cmd.to_string()),
             tty,
             network_approval: None,
             session: Arc::downgrade(session),
@@ -198,6 +199,8 @@ async fn exec_command_with_tty(
         exit_code,
         original_token_count: Some(approx_token_count(&text)),
         hook_command: Some(cmd.to_string()),
+        hook_tool_name: Some("Bash".to_string()),
+        hook_input: Some(serde_json::json!({ "command": cmd })),
     })
 }
 

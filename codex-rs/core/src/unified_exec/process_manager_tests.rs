@@ -1,6 +1,23 @@
 use super::*;
+use crate::sandboxing::SandboxPermissions;
+use crate::session::tests::make_session_and_context;
+use crate::tools::runtimes::unified_exec::UnifiedExecRequest;
+use crate::tools::runtimes::unified_exec::UnifiedExecRuntime;
+use crate::tools::sandboxing::ExecApprovalRequirement;
+use crate::tools::sandboxing::SandboxAttempt;
+use crate::tools::sandboxing::ToolCtx;
+use crate::tools::sandboxing::ToolRuntime;
+use crate::unified_exec::UnifiedExecHookMetadata;
+use codex_exec_server::Environment;
+use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::models::PermissionProfile;
+use codex_sandboxing::SandboxManager;
+use codex_sandboxing::SandboxType;
+use codex_tools::ToolName;
+use codex_tools::UnifiedExecShellMode;
 use crate::unified_exec::clamp_yield_time;
 use pretty_assertions::assert_eq;
+use std::sync::Arc;
 use tokio::time::Duration;
 use tokio::time::Instant;
 
@@ -189,6 +206,95 @@ async fn late_network_denial_grace_observes_cancellation_after_exit() {
 }
 
 #[tokio::test]
+async fn shell_type_none_runtime_executes_literal_argv() -> anyhow::Result<()> {
+    let (session, turn) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let cwd_dir = tempfile::tempdir().expect("create cwd temp dir");
+    let cwd = AbsolutePathBuf::try_from(cwd_dir.path().to_path_buf()).expect("absolute temp dir");
+    let literal = "$HOME | cat";
+    let command = if cfg!(windows) {
+        vec![
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "[Console]::Out.Write('$HOME | cat')".to_string(),
+        ]
+    } else {
+        vec!["printf".to_string(), "%s".to_string(), literal.to_string()]
+    };
+    let manager = UnifiedExecProcessManager::default();
+    let mut runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
+    let request = UnifiedExecRequest {
+        command,
+        shell_type: None,
+        hook_metadata: UnifiedExecHookMetadata::exec_argv(
+            "printf '%s' '$HOME | cat'".to_string(),
+            vec!["printf".to_string(), "%s".to_string(), literal.to_string()],
+        ),
+        process_id: 1001,
+        cwd: cwd.clone(),
+        sandbox_cwd: cwd.clone(),
+        environment: Arc::new(Environment::default_for_tests()),
+        env: std::env::vars().collect(),
+        exec_server_env_config: None,
+        explicit_env_overrides: HashMap::new(),
+        network: None,
+        tty: false,
+        sandbox_permissions: SandboxPermissions::UseDefault,
+        additional_permissions: None,
+        #[cfg(unix)]
+        additional_permissions_preapproved: false,
+        justification: None,
+        exec_approval_requirement: ExecApprovalRequirement::Skip {
+            bypass_sandbox: false,
+            proposed_execpolicy_amendment: None,
+        },
+    };
+    let permissions = PermissionProfile::Disabled;
+    let sandbox_manager = SandboxManager::new();
+    let attempt = SandboxAttempt {
+        sandbox: SandboxType::None,
+        permissions: &permissions,
+        enforce_managed_network: false,
+        manager: &sandbox_manager,
+        sandbox_cwd: &cwd,
+        codex_linux_sandbox_exe: None,
+        use_legacy_landlock: false,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+        windows_sandbox_private_desktop: false,
+        network_denial_cancellation_token: None,
+    };
+    let ctx = ToolCtx {
+        session: Arc::clone(&session),
+        turn: Arc::clone(&turn),
+        call_id: "call-argv-runtime".to_string(),
+        tool_name: ToolName::plain("exec_argv"),
+    };
+
+    let process = runtime
+        .run(&request, &attempt, &ctx)
+        .await
+        .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+    let handles = process.output_handles();
+    let output = UnifiedExecProcessManager::collect_output_until_deadline(
+        &handles.output_buffer,
+        &handles.output_notify,
+        &handles.output_closed,
+        &handles.output_closed_notify,
+        &handles.cancellation_token,
+        Some(session.subscribe_out_of_band_elicitation_pause_state()),
+        Instant::now() + Duration::from_millis(1_000),
+    )
+    .await;
+
+    assert_eq!(process.exit_code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output), literal);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
     let (session, turn, rx_event) = crate::session::tests::make_session_and_context_with_rx().await;
     let context = UnifiedExecContext::new(
@@ -202,8 +308,10 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
             "-lc".to_string(),
             "echo before".to_string(),
         ],
-        shell_type: crate::shell::ShellType::Sh,
+        shell_type: Some(crate::shell::ShellType::Sh),
+        tool_name: codex_tools::ToolName::plain("exec_command"),
         hook_command: "echo before".to_string(),
+        hook_metadata: UnifiedExecHookMetadata::bash("echo before".to_string()),
         process_id: 123,
         yield_time_ms: 1000,
         max_output_tokens: None,

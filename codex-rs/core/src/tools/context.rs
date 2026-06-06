@@ -317,6 +317,8 @@ pub struct ExecCommandToolOutput {
     pub exit_code: Option<i32>,
     pub original_token_count: Option<usize>,
     pub hook_command: Option<String>,
+    pub hook_tool_name: Option<String>,
+    pub hook_input: Option<JsonValue>,
 }
 
 impl ToolOutput for ExecCommandToolOutput {
@@ -348,9 +350,11 @@ impl ToolOutput for ExecCommandToolOutput {
     }
 
     fn post_tool_use_input(&self, _payload: &ToolPayload) -> Option<JsonValue> {
-        self.hook_command
-            .as_ref()
-            .map(|command| serde_json::json!({ "command": command }))
+        self.hook_input.clone()
+    }
+
+    fn post_tool_use_tool_name(&self) -> Option<String> {
+        self.hook_tool_name.clone()
     }
 
     fn post_tool_use_response(&self, _call_id: &str, _payload: &ToolPayload) -> Option<JsonValue> {

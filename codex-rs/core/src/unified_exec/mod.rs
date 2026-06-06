@@ -29,6 +29,7 @@ use std::sync::Weak;
 
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_tools::ToolName;
 use codex_tools::UnifiedExecShellMode;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_path_uri::PathUri;
@@ -41,6 +42,7 @@ use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
 use crate::shell::ShellType;
+use crate::tools::hook_names::HookToolName;
 use crate::tools::network_approval::DeferredNetworkApproval;
 
 mod async_watcher;
@@ -88,11 +90,51 @@ impl UnifiedExecContext {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct UnifiedExecHookMetadata {
+    pub tool_name: HookToolName,
+    pub tool_input: serde_json::Value,
+}
+
+impl UnifiedExecHookMetadata {
+    pub(crate) fn bash(command: String) -> Self {
+        Self {
+            tool_name: HookToolName::bash(),
+            tool_input: serde_json::json!({ "command": command }),
+        }
+    }
+
+    pub(crate) fn exec_argv(command: String, argv: Vec<String>) -> Self {
+        Self {
+            tool_name: HookToolName::new("exec_argv"),
+            tool_input: serde_json::json!({
+                "command": command,
+                "argv": argv,
+            }),
+        }
+    }
+
+    pub(crate) fn with_description(&self, description: Option<String>) -> serde_json::Value {
+        let mut tool_input = self.tool_input.clone();
+        if let Some(description) = description
+            && let Some(object) = tool_input.as_object_mut()
+        {
+            object.insert(
+                "description".to_string(),
+                serde_json::Value::String(description),
+            );
+        }
+        tool_input
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ExecCommandRequest {
     pub command: Vec<String>,
-    pub shell_type: ShellType,
+    pub shell_type: Option<ShellType>,
+    pub tool_name: ToolName,
     pub hook_command: String,
+    pub hook_metadata: UnifiedExecHookMetadata,
     pub process_id: i32,
     pub yield_time_ms: u64,
     pub max_output_tokens: Option<usize>,
@@ -159,6 +201,7 @@ struct ProcessEntry {
     cwd: PathUri,
     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
     hook_command: String,
+    hook_metadata: UnifiedExecHookMetadata,
     tty: bool,
     network_approval: Option<DeferredNetworkApproval>,
     session: Weak<Session>,
