@@ -35,6 +35,7 @@ use crate::tools::sandboxing::managed_network_for_sandbox_permissions;
 use crate::tools::sandboxing::with_cached_approval;
 use crate::unified_exec::NoopSpawnLifecycle;
 use crate::unified_exec::UnifiedExecError;
+use crate::unified_exec::UnifiedExecHookMetadata;
 use crate::unified_exec::UnifiedExecProcess;
 use crate::unified_exec::UnifiedExecProcessManager;
 use codex_exec_server::Environment;
@@ -57,8 +58,8 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Debug)]
 pub struct UnifiedExecRequest {
     pub command: Vec<String>,
-    pub shell_type: ShellType,
-    pub hook_command: String,
+    pub shell_type: Option<ShellType>,
+    pub hook_metadata: UnifiedExecHookMetadata,
     pub process_id: i32,
     pub cwd: AbsolutePathBuf,
     pub sandbox_cwd: AbsolutePathBuf,
@@ -207,10 +208,12 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
         &self,
         req: &UnifiedExecRequest,
     ) -> Option<PermissionRequestPayload> {
-        Some(PermissionRequestPayload::bash(
-            req.hook_command.clone(),
-            req.justification.clone(),
-        ))
+        Some(PermissionRequestPayload {
+            tool_name: req.hook_metadata.tool_name.clone(),
+            tool_input: req
+                .hook_metadata
+                .with_description(req.justification.clone()),
+        })
     }
 
     fn sandbox_permissions(&self, req: &UnifiedExecRequest) -> SandboxPermissions {
@@ -243,7 +246,10 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                 justification: req.justification.clone(),
                 tty: Some(req.tty),
             },
-            command: req.hook_command.clone(),
+            permission_request_payload: PermissionRequestPayload {
+                tool_name: req.hook_metadata.tool_name.clone(),
+                tool_input: req.hook_metadata.tool_input.clone(),
+            },
         })
     }
 
@@ -262,30 +268,29 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
             network.apply_to_env(&mut env);
         }
         let environment_is_remote = req.environment.is_remote();
-        let command = if environment_is_remote {
-            base_command.to_vec()
-        } else {
-            maybe_wrap_shell_lc_with_snapshot(
-                base_command,
-                session_shell.as_ref(),
-                &req.cwd,
-                &req.explicit_env_overrides,
-                &env,
-            )
-        };
+        let command = command_with_optional_shell_snapshot(
+            base_command,
+            req.shell_type.as_ref(),
+            environment_is_remote,
+            session_shell.as_ref(),
+            &req.cwd,
+            &req.explicit_env_overrides,
+            &env,
+        );
         let command = disable_powershell_profile_for_elevated_windows_sandbox(
             &command,
-            Some(&req.shell_type),
+            req.shell_type.as_ref(),
             attempt.sandbox,
             attempt.windows_sandbox_level,
         );
-        let command = if matches!(session_shell.shell_type, ShellType::PowerShell) {
-            prefix_powershell_script_with_utf8(&command)
-        } else {
-            command
-        };
+        let command = maybe_prefix_powershell_script_with_utf8_for_shell_type(
+            command,
+            req.shell_type.clone(),
+        );
 
-        if let UnifiedExecShellMode::ZshFork(zsh_fork_config) = &self.shell_mode {
+        if req.shell_type.is_some()
+            && let UnifiedExecShellMode::ZshFork(zsh_fork_config) = &self.shell_mode
+        {
             let command =
                 build_sandbox_command(&command, &req.cwd, &env, req.additional_permissions.clone())
                     .map_err(|_| ToolError::Rejected("missing command line for PTY".to_string()))?;
@@ -366,14 +371,96 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
     }
 }
 
+fn command_with_optional_shell_snapshot(
+    base_command: &[String],
+    shell_type: Option<&ShellType>,
+    environment_is_remote: bool,
+    session_shell: &crate::shell::Shell,
+    cwd: &AbsolutePathBuf,
+    explicit_env_overrides: &HashMap<String, String>,
+    env: &HashMap<String, String>,
+) -> Vec<String> {
+    if environment_is_remote || shell_type.is_none() {
+        base_command.to_vec()
+    } else {
+        maybe_wrap_shell_lc_with_snapshot(
+            base_command,
+            session_shell,
+            cwd,
+            explicit_env_overrides,
+            env,
+        )
+    }
+}
+
+fn maybe_prefix_powershell_script_with_utf8_for_shell_type(
+    command: Vec<String>,
+    shell_type: Option<ShellType>,
+) -> Vec<String> {
+    if shell_type == Some(ShellType::PowerShell) {
+        prefix_powershell_script_with_utf8(&command)
+    } else {
+        command
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
+    use crate::session::tests::make_session_and_context;
+    use crate::shell::Shell;
+    use crate::shell_snapshot::ShellSnapshot;
+    use crate::tools::hook_names::HookToolName;
     use crate::tools::sandboxing::ToolRuntime;
     use codex_exec_server::Environment;
+    use codex_network_proxy::ConfigReloader;
+    use codex_network_proxy::ConfigState;
+    use codex_network_proxy::NetworkProxyConfig;
+    use codex_network_proxy::NetworkProxyConstraints;
+    use codex_network_proxy::NetworkProxyState;
+    use codex_tools::ToolName;
+    use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Duration;
     use tempfile::tempdir;
+    use tokio::sync::watch;
+
+    struct StaticReloader;
+
+    #[async_trait::async_trait]
+    impl ConfigReloader for StaticReloader {
+        fn source_label(&self) -> String {
+            "test config state".to_string()
+        }
+
+        async fn maybe_reload(&self) -> anyhow::Result<Option<ConfigState>> {
+            Ok(None)
+        }
+
+        async fn reload_now(&self) -> anyhow::Result<ConfigState> {
+            Err(anyhow::anyhow!("force reload is not supported in tests"))
+        }
+    }
+
+    async fn test_network_proxy() -> NetworkProxy {
+        let state = codex_network_proxy::build_config_state(
+            NetworkProxyConfig::default(),
+            NetworkProxyConstraints::default(),
+        )
+        .expect("build network proxy config state");
+        NetworkProxy::builder()
+            .state(Arc::new(NetworkProxyState::with_reloader(
+                state,
+                Arc::new(StaticReloader),
+            )))
+            .managed_by_codex(/*managed_by_codex*/ false)
+            .http_addr("127.0.0.1:43128".parse().expect("http proxy addr"))
+            .socks_addr("127.0.0.1:48081".parse().expect("socks proxy addr"))
+            .build()
+            .await
+            .expect("build test network proxy")
+    }
 
     #[test]
     fn unified_exec_options_combines_default_timeout_with_network_denial_cancellation() {
@@ -397,6 +484,198 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shell_type_none_does_not_rewrite_powershell_argv() {
+        let command = vec![
+            "powershell.exe".to_string(),
+            "-NoProfile".to_string(),
+            "-Command".to_string(),
+            "Write-Output test".to_string(),
+        ];
+
+        assert_eq!(
+            maybe_prefix_powershell_script_with_utf8_for_shell_type(command.clone(), None),
+            command
+        );
+    }
+
+    #[test]
+    fn shell_type_none_skips_shell_snapshot_wrapping() {
+        let cwd_dir = tempdir().expect("create cwd temp dir");
+        let snapshot_dir = tempdir().expect("create snapshot temp dir");
+        let snapshot_path = snapshot_dir.path().join("snapshot.sh");
+        std::fs::write(&snapshot_path, "# Snapshot file\n").expect("write snapshot");
+        let cwd =
+            AbsolutePathBuf::try_from(cwd_dir.path().to_path_buf()).expect("absolute temp dir");
+        let snapshot_path =
+            AbsolutePathBuf::try_from(snapshot_path).expect("absolute snapshot path");
+        let (_tx, shell_snapshot) = watch::channel(Some(Arc::new(ShellSnapshot {
+            path: snapshot_path,
+            cwd: cwd.clone(),
+        })));
+        let session_shell = Shell {
+            shell_type: ShellType::Zsh,
+            shell_path: PathBuf::from("/bin/zsh"),
+            shell_snapshot,
+        };
+        let command = vec![
+            "printf".to_string(),
+            "%s".to_string(),
+            "$HOME | cat".to_string(),
+        ];
+
+        assert_eq!(
+            command_with_optional_shell_snapshot(
+                &command,
+                None,
+                /*environment_is_remote*/ false,
+                &session_shell,
+                &cwd,
+                &HashMap::new(),
+                &HashMap::new(),
+            ),
+            command
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_argv_permission_request_uses_exec_argv_hook_identity_and_input() {
+        let cwd_dir = tempdir().expect("create cwd temp dir");
+        let cwd =
+            AbsolutePathBuf::try_from(cwd_dir.path().to_path_buf()).expect("absolute temp dir");
+        let manager = UnifiedExecProcessManager::default();
+        let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
+        let hook_metadata = UnifiedExecHookMetadata::exec_argv(
+            "printf '%s' '$HOME | cat'".to_string(),
+            vec![
+                "printf".to_string(),
+                "%s".to_string(),
+                "$HOME | cat".to_string(),
+            ],
+        );
+        let request = UnifiedExecRequest {
+            command: vec![
+                "printf".to_string(),
+                "%s".to_string(),
+                "$HOME | cat".to_string(),
+            ],
+            shell_type: None,
+            hook_metadata,
+            process_id: 1002,
+            cwd: cwd.clone(),
+            sandbox_cwd: cwd,
+            environment: Arc::new(Environment::default_for_tests()),
+            env: HashMap::new(),
+            exec_server_env_config: None,
+            explicit_env_overrides: HashMap::new(),
+            network: None,
+            tty: false,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            additional_permissions: None,
+            #[cfg(unix)]
+            additional_permissions_preapproved: false,
+            justification: Some("Need literal argv execution".to_string()),
+            exec_approval_requirement: ExecApprovalRequirement::Skip {
+                bypass_sandbox: false,
+                proposed_execpolicy_amendment: None,
+            },
+        };
+
+        let payload = runtime
+            .permission_request_payload(&request)
+            .expect("permission request payload");
+
+        assert_eq!(payload.tool_name, HookToolName::new("exec_argv"));
+        assert_eq!(
+            payload.tool_input,
+            serde_json::json!({
+                "command": "printf '%s' '$HOME | cat'",
+                "argv": ["printf", "%s", "$HOME | cat"],
+                "description": "Need literal argv execution",
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_argv_network_approval_spec_uses_exec_argv_permission_payload() {
+        let (session, turn) = make_session_and_context().await;
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let cwd_dir = tempdir().expect("create cwd temp dir");
+        let cwd =
+            AbsolutePathBuf::try_from(cwd_dir.path().to_path_buf()).expect("absolute temp dir");
+        let manager = UnifiedExecProcessManager::default();
+        let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
+        let hook_metadata = UnifiedExecHookMetadata::exec_argv(
+            "python3 -c 'print(1)'".to_string(),
+            vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                "print(1)".to_string(),
+            ],
+        );
+        let request = UnifiedExecRequest {
+            command: vec![
+                "python3".to_string(),
+                "-c".to_string(),
+                "print(1)".to_string(),
+            ],
+            shell_type: None,
+            hook_metadata,
+            process_id: 1003,
+            cwd: cwd.clone(),
+            sandbox_cwd: cwd,
+            environment: Arc::new(Environment::default_for_tests()),
+            env: HashMap::new(),
+            exec_server_env_config: None,
+            explicit_env_overrides: HashMap::new(),
+            network: Some(test_network_proxy().await),
+            tty: false,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            additional_permissions: None,
+            #[cfg(unix)]
+            additional_permissions_preapproved: false,
+            justification: Some("Need managed network".to_string()),
+            exec_approval_requirement: ExecApprovalRequirement::Skip {
+                bypass_sandbox: false,
+                proposed_execpolicy_amendment: None,
+            },
+        };
+        let ctx = ToolCtx {
+            session,
+            turn,
+            call_id: "call-argv-network".to_string(),
+            tool_name: ToolName::plain("exec_argv"),
+        };
+
+        let spec = runtime
+            .network_approval_spec(&request, &ctx)
+            .expect("network approval spec");
+
+        assert_eq!(spec.mode, NetworkApprovalMode::Deferred);
+        assert_eq!(
+            spec.permission_request_payload.tool_name,
+            HookToolName::new("exec_argv")
+        );
+        assert_eq!(
+            spec.permission_request_payload.tool_input,
+            serde_json::json!({
+                "command": "python3 -c 'print(1)'",
+                "argv": ["python3", "-c", "print(1)"],
+            })
+        );
+        assert_eq!(
+            spec.permission_request_payload
+                .with_description("network-access http://example.test:80".to_string())
+                .tool_input,
+            serde_json::json!({
+                "command": "python3 -c 'print(1)'",
+                "argv": ["python3", "-c", "print(1)"],
+                "description": "network-access http://example.test:80",
+            })
+        );
+    }
+
     #[tokio::test]
     async fn unified_exec_uses_the_trusted_sandbox_cwd() {
         let cwd_dir = tempdir().expect("create process temp dir");
@@ -409,8 +688,8 @@ mod tests {
         let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
         let request = UnifiedExecRequest {
             command: vec!["pwd".to_string()],
-            shell_type: ShellType::Sh,
-            hook_command: "pwd".to_string(),
+            shell_type: Some(ShellType::Sh),
+            hook_metadata: UnifiedExecHookMetadata::bash("pwd".to_string()),
             process_id: 1000,
             cwd,
             sandbox_cwd: sandbox_cwd.clone(),

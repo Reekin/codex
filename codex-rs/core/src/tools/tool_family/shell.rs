@@ -4,6 +4,8 @@ use codex_protocol::openai_models::ConfigShellToolType;
 use codex_tools::ShellCommandBackendConfig;
 use codex_tools::ToolEnvironmentMode;
 
+use crate::tools::handlers::ExecArgvHandler;
+use crate::tools::handlers::ExecArgvHandlerOptions;
 use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ExecCommandHandlerOptions;
 use crate::tools::handlers::ShellCommandHandler;
@@ -33,6 +35,13 @@ pub(crate) fn build_shell_tools(options: ShellToolsOptions) -> Vec<Arc<dyn CoreT
                 &mut runtimes,
                 ExecCommandHandler::new(ExecCommandHandlerOptions {
                     allow_login_shell: options.allow_login_shell,
+                    exec_permission_approvals_enabled: options.exec_permission_approvals_enabled,
+                    include_environment_id,
+                }),
+            );
+            add_runtime(
+                &mut runtimes,
+                ExecArgvHandler::new(ExecArgvHandlerOptions {
                     exec_permission_approvals_enabled: options.exec_permission_approvals_enabled,
                     include_environment_id,
                 }),

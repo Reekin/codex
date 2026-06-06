@@ -72,6 +72,7 @@ use crate::tools::ToolRouter;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::CreateGoalHandler;
+use crate::tools::handlers::ExecArgvHandler;
 use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::handlers::UpdateGoalHandler;
@@ -10313,6 +10314,54 @@ async fn unified_exec_rejects_escalated_permissions_when_policy_not_on_request()
             payload: ToolPayload::Function {
                 arguments: serde_json::json!({
                     "cmd": "echo hi",
+                    "sandbox_permissions": SandboxPermissions::RequireEscalated,
+                    "justification": "need unsandboxed execution",
+                })
+                .to_string(),
+            },
+        })
+        .await;
+
+    let Err(FunctionCallError::RespondToModel(output)) = resp else {
+        panic!("expected error result");
+    };
+
+    let expected = format!(
+        "approval policy is {policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {policy:?}",
+        policy = turn_context.approval_policy.value()
+    );
+
+    pretty_assertions::assert_eq!(output, expected);
+}
+
+#[tokio::test]
+async fn exec_argv_rejects_escalated_permissions_when_policy_not_on_request() {
+    use crate::sandboxing::SandboxPermissions;
+    use crate::turn_diff_tracker::TurnDiffTracker;
+    use codex_protocol::protocol::AskForApproval;
+
+    let (session, mut turn_context_raw) = make_session_and_context().await;
+    turn_context_raw
+        .approval_policy
+        .set(AskForApproval::OnFailure)
+        .expect("test setup should allow updating approval policy");
+    let session = Arc::new(session);
+    let turn_context = Arc::new(turn_context_raw);
+    let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+
+    let handler = ExecArgvHandler::default();
+    let resp = handler
+        .handle(ToolInvocation {
+            session: Arc::clone(&session),
+            turn: Arc::clone(&turn_context),
+            cancellation_token: CancellationToken::new(),
+            tracker: Arc::clone(&tracker),
+            call_id: "exec-argv-call".to_string(),
+            tool_name: codex_tools::ToolName::plain("exec_argv"),
+            source: crate::tools::context::ToolCallSource::Direct,
+            payload: ToolPayload::Function {
+                arguments: serde_json::json!({
+                    "argv": ["echo", "hi"],
                     "sandbox_permissions": SandboxPermissions::RequireEscalated,
                     "justification": "need unsandboxed execution",
                 })

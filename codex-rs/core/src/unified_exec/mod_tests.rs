@@ -116,6 +116,7 @@ async fn exec_command_with_tty(
             call_id: context.call_id.clone(),
             process_id,
             hook_command: cmd.to_string(),
+            hook_metadata: UnifiedExecHookMetadata::bash(cmd.to_string()),
             tty,
             network_approval: None,
             session: Arc::downgrade(session),
@@ -169,6 +170,8 @@ async fn exec_command_with_tty(
         exit_code,
         original_token_count: Some(approx_token_count(&text)),
         hook_command: Some(cmd.to_string()),
+        hook_tool_name: Some("Bash".to_string()),
+        hook_input: Some(serde_json::json!({ "command": cmd })),
     })
 }
 

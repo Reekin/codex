@@ -16,9 +16,12 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::tools::handlers::parse_arguments;
 
+mod exec_argv;
 mod exec_command;
 mod write_stdin;
 
+pub use exec_argv::ExecArgvHandler;
+pub(crate) use exec_argv::ExecArgvHandlerOptions;
 pub use exec_command::ExecCommandHandler;
 pub(crate) use exec_command::ExecCommandHandlerOptions;
 pub use write_stdin::WriteStdinHandler;
@@ -49,7 +52,26 @@ pub(crate) struct ExecCommandArgs {
 }
 
 #[derive(Debug, Deserialize)]
-struct ExecCommandEnvironmentArgs {
+pub(crate) struct ExecArgvArgs {
+    argv: Vec<String>,
+    #[serde(default = "default_tty")]
+    tty: bool,
+    #[serde(default = "default_exec_yield_time_ms")]
+    yield_time_ms: u64,
+    #[serde(default)]
+    max_output_tokens: Option<usize>,
+    #[serde(default)]
+    sandbox_permissions: SandboxPermissions,
+    #[serde(default)]
+    additional_permissions: Option<AdditionalPermissionProfile>,
+    #[serde(default)]
+    justification: Option<String>,
+    #[serde(default)]
+    prefix_rule: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ExecCommandEnvironmentArgs {
     #[serde(default)]
     environment_id: Option<String>,
     // Keep this raw until after environment selection; relative paths must be
@@ -76,9 +98,10 @@ pub(crate) struct ResolvedCommand {
     pub(crate) shell_type: ShellType,
 }
 
-fn post_unified_exec_tool_use_payload(
+fn post_unified_exec_tool_use_payload_with_name(
     invocation: &ToolInvocation,
     result: &dyn ToolOutput,
+    tool_name: HookToolName,
 ) -> Option<PostToolUsePayload> {
     let ToolPayload::Function { .. } = &invocation.payload else {
         return None;
@@ -87,12 +110,23 @@ fn post_unified_exec_tool_use_payload(
     let tool_input = result.post_tool_use_input(&invocation.payload)?;
     let tool_use_id = result.post_tool_use_id(&invocation.call_id);
     let tool_response = result.post_tool_use_response(&tool_use_id, &invocation.payload)?;
+    let tool_name = result
+        .post_tool_use_tool_name()
+        .map(HookToolName::new)
+        .unwrap_or(tool_name);
     Some(PostToolUsePayload {
-        tool_name: HookToolName::bash(),
+        tool_name,
         tool_use_id,
         tool_input,
         tool_response,
     })
+}
+
+fn post_unified_exec_tool_use_payload(
+    invocation: &ToolInvocation,
+    result: &dyn ToolOutput,
+) -> Option<PostToolUsePayload> {
+    post_unified_exec_tool_use_payload_with_name(invocation, result, HookToolName::bash())
 }
 
 pub(crate) fn get_command(
