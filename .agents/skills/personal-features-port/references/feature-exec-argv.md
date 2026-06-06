@@ -3,11 +3,11 @@
 ## Feature Metadata
 
 - **Feature name**: `exec_argv` argv-native unified exec tool
-- **Feature branch pattern**: `ft/exec-argv` or `ft/exec-argv-<upstream-version>`
+- **Feature branch pattern**: `ft/exec-argv-<upstream-version>`; for example `ft/exec-argv-0.133`
 - **Target integration branch pattern**: `integration-<upstream-version>`
 - **Primary owner / purpose**: Provide an argv-first execution surface for agents that need literal process arguments without shell interpretation.
 - **Current upstream base**: Record the upstream stable tag used by the active integration branch before each port.
-- **Direct previous feature branch**: Use the latest completed `ft/exec-argv*` branch as the first code reference.
+- **Direct previous feature branch**: Use the latest completed versioned `ft/exec-argv-<upstream-version>` branch as the first code reference.
 
 ## 1. Requirement Goal
 
@@ -77,7 +77,7 @@ Treat these as current adapter locations, not permanent file-path truth. On a ne
 Reference source priority:
 
 1. This feature contract and acceptance section define behavior.
-2. The direct previous `ft/exec-argv*` branch is the first implementation reference.
+2. The direct previous versioned `ft/exec-argv-<upstream-version>` branch is the first implementation reference.
 3. `codex-rs/EXEC_ARGV_TAKEOVER.md` on the feature branch is an implementation-history reference, not the long-term contract.
 4. Current upstream architecture decides adapter placement.
 5. When old code conflicts with this contract, follow this contract and record the deviation.
@@ -172,7 +172,7 @@ Before porting to a new upstream base, fill:
 
 Feature branches should carry only the `exec_argv` behavior, tests, and feature-owned docs. The integration branch should:
 
-- merge or replay the completed `ft/exec-argv*` branch after feature acceptance;
+- merge or replay the completed versioned `ft/exec-argv-<upstream-version>` branch after feature acceptance;
 - keep release packaging and downstream artifact automation separate from the feature branch;
 - run integration smoke tests after composing this feature with other personal features;
 - preserve this reference file and the `personal-features-port` skill index so future ports start from the contract instead of rediscovering the review history.

@@ -34,6 +34,7 @@ Read only the references needed for the current phase:
 - Treat this repo/fork as the downstream personal-feature maintenance line.
 - Use upstream stable tags as the base for each release train.
 - For each feature, create a focused migration branch from the relevant upstream stable tag or from the previous release's feature branch, depending on which gives the cleanest isolated diff.
+- Include the target upstream version in every feature branch name, for example `ft/<feature>-0.133`.
 - After a feature branch passes its own acceptance checks, merge or replay it into the integration branch for that upstream version.
 - Name integration branches by upstream version, for example `integration-0.133`.
 - The integration branch carries:
