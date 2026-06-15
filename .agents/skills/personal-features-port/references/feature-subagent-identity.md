@@ -17,7 +17,8 @@ Spawned agents must be able to determine their current canonical agent path and 
 
 Required behavior:
 
-- subagent developer context states the current canonical agent path, parent thread id, depth, nickname, and role when available;
+- subagent developer context states the current canonical agent path when one exists, otherwise clearly states that the path is absent and the agent is still not the `/root` main agent;
+- subagent developer context states parent thread id, depth, nickname, and role when available;
 - inherited transcript history is described as context, not proof that the current subagent performed those actions;
 - `list_agents` output identifies the current agent and exposes the current agent name/path;
 - `wait_agent` output makes clear which mailbox is being observed;
@@ -36,6 +37,8 @@ Keep the feature as a thin multi-agent/tool contract change.
 Stable contract:
 
 - `SessionSource::SubAgent` drives identity hints;
+- full-history forked subagents receive the identity hint as a developer message in the forked history even when a parent `TurnContextItem` baseline prevents normal initial-context reinjection;
+- v1/full-history subagents without a canonical `AgentPath` must be told that they have no canonical path and are not `/root`;
 - listed-agent output includes an explicit current-agent marker;
 - wait output names the current agent/mailbox;
 - tests cover v1 and v2 multi-agent tools where both exist.
@@ -82,6 +85,8 @@ Do not copy chat tree feature documentation into this feature. If chat-tree docs
 ## 5. Lessons And Pitfalls
 
 - Full-history forked subagents inherit transcript content from parents; identity hints must explicitly say inherited history is context, not current-agent action.
+- Do not rely only on `build_initial_context` for subagent identity hints. Full-history fork preserves the parent reference-context baseline, so the child may skip initial context and only receive settings diffs.
+- In v1 `fork_context` flows, `agent_path` may be absent. Never fall back to `/root` for identity wording in that case; say the path is absent and the child is still not the root main agent.
 - `/root`, sibling agents, and child agents may appear in list output; current-agent identity must be explicit rather than inferred from transcript order.
 - Waiting for the current agent is easy to misinterpret as waiting for children; reject or explain this path clearly.
 - Documentation edits can accidentally mix with feature commits. Keep feature runtime changes separate from chat-tree or personal-features-port documentation.
@@ -90,7 +95,8 @@ Do not copy chat tree feature documentation into this feature. If chat-tree docs
 
 P0 gates:
 
-- spawned subagent context includes current canonical agent path and parent/depth identity facts;
+- spawned subagent context includes current canonical agent path when present, or explicit no-path/not-root wording when absent, plus parent/depth identity facts;
+- full-history forked subagent history appends the identity hint even when the parent reference-context baseline is preserved;
 - list output exposes current agent identity and marks the current agent;
 - wait output clarifies the current mailbox/agent being observed;
 - self-wait behavior is rejected or otherwise impossible to confuse;

@@ -698,18 +698,19 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .await
         .expect("parent rollout should flush");
 
+    let child_session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
     let child_thread_id = harness
         .control
         .spawn_agent_with_metadata(
             child_config,
             text_input("child task"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: None,
-            })),
+            Some(child_session_source.clone()),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
@@ -726,6 +727,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .await
         .expect("child thread should be registered");
     assert_ne!(child_thread_id, parent_thread_id);
+    let child_session_source = child_thread.config_snapshot().await.session_source;
     let history = child_thread.codex.session.clone_history().await;
     let expected_history = [
         ResponseItem::Message {
@@ -742,6 +744,15 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
                 text: "Child subagent guidance.".to_string(),
+            }],
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: crate::session::multi_agents::identity_hint_text(&child_session_source)
+                    .expect("thread-spawn child should have an identity hint"),
             }],
             phase: None,
         },
@@ -778,6 +789,99 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .into_iter()
         .find(|entry| *entry == expected);
     assert_eq!(captured, Some(expected));
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should submit");
+    let _ = parent_thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("parent shutdown should submit");
+}
+
+#[tokio::test]
+async fn spawn_agent_full_history_fork_adds_subagent_identity_hint_without_multi_agent_v2() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .inject_user_message_without_turn("parent seed context".to_string())
+        .await;
+    let turn_context = parent_thread.codex.session.new_default_turn().await;
+    let parent_spawn_call_id = "spawn-call-identity-hint".to_string();
+    parent_thread
+        .codex
+        .session
+        .record_conversation_items(
+            turn_context.as_ref(),
+            &[
+                assistant_message("parent final answer", Some(MessagePhase::FinalAnswer)),
+                spawn_agent_call(&parent_spawn_call_id),
+            ],
+        )
+        .await;
+    parent_thread
+        .codex
+        .session
+        .persist_rollout_items(&[RolloutItem::TurnContext(
+            turn_context.to_turn_context_item(),
+        )])
+        .await;
+    parent_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    parent_thread
+        .codex
+        .session
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush");
+
+    let child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("forked spawn should add subagent identity hint")
+        .thread_id;
+
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should be registered");
+    let history = child_thread.codex.session.clone_history().await;
+    assert!(
+        history_contains_text(
+            history.raw_items(),
+            "You do not have a canonical agent path in this session, but you are still not the `/root` main agent"
+        ),
+        "full-history forked child should get a subagent identity hint even without MultiAgentV2 usage hints"
+    );
+    assert!(
+        history_contains_text(
+            history.raw_items(),
+            "Any prior transcript inherited from another agent is context"
+        ),
+        "identity hint should label inherited parent history as context"
+    );
 
     let _ = harness
         .control
