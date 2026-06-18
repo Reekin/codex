@@ -111,6 +111,19 @@ fn message_input_text_contains(request: &ResponsesRequest, role: &str, needle: &
         .any(|text| text.contains(needle))
 }
 
+fn ev_empty_final_answer(id: &str) -> serde_json::Value {
+    json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "id": id,
+            "content": [{"type": "output_text", "text": ""}]
+        }
+    })
+}
+
 /// Writes an `auth.json` into the provided `codex_home` with the specified parameters.
 /// Returns the fake JWT string written to `tokens.id_token`.
 #[expect(clippy::unwrap_used)]
@@ -3160,5 +3173,58 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
         serde_json::Value::Array(actual_tail.to_vec()),
         r3_tail_expected,
         "request 3 tail mismatch",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_final_answer_retries_once_before_turn_complete() {
+    let server = MockServer::start().await;
+    let first_response = sse(vec![
+        ev_response_created("resp-empty"),
+        ev_empty_final_answer("msg-empty"),
+        ev_completed("resp-empty"),
+    ]);
+    let second_response = sse(vec![
+        ev_response_created("resp-retry"),
+        ev_assistant_message("msg-retry", "Recovered final answer."),
+        ev_completed("resp-retry"),
+    ]);
+    let response_log = mount_sse_sequence(&server, vec![first_response, second_response]).await;
+    let test = test_codex().build(&server).await.unwrap();
+    let codex = test.codex.clone();
+
+    codex
+        .submit(Op::UserInput {
+            environments: None,
+            items: vec![UserInput::Text {
+                text: "please answer".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            thread_settings: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let turn_complete =
+        wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    let EventMsg::TurnComplete(turn_complete) = turn_complete else {
+        unreachable!("wait_for_event returned a non-matching event");
+    };
+    assert_eq!(
+        turn_complete.last_agent_message.as_deref(),
+        Some("Recovered final answer.")
+    );
+
+    let requests = response_log.requests();
+    assert_eq!(requests.len(), 2, "empty final answer should retry once");
+    assert!(
+        message_input_text_contains(
+            &requests[1],
+            "user",
+            "previous assistant final answer was empty"
+        ),
+        "retry request should include the internal empty-final recovery prompt"
     );
 }
