@@ -309,6 +309,7 @@ pub(crate) type InFlightFuture<'f> =
 #[derive(Default)]
 pub(crate) struct OutputItemResult {
     pub last_agent_message: Option<String>,
+    pub empty_final_answer: bool,
     pub needs_follow_up: bool,
     pub tool_future: Option<InFlightFuture<'static>>,
 }
@@ -351,6 +352,7 @@ pub(crate) struct FinalizedTurnItem {
 pub(crate) struct FinalizedTurnItemFacts {
     pub(crate) memory_citation: Option<MemoryCitation>,
     pub(crate) last_agent_message: Option<String>,
+    pub(crate) empty_final_answer: bool,
     pub(crate) defers_mailbox_delivery_to_next_turn: bool,
 }
 
@@ -364,38 +366,43 @@ pub(crate) async fn finalize_non_tool_response_item(
     let turn_item =
         handle_non_tool_response_item(sess, turn_context, contributor_policy, item, plan_mode)
             .await?;
-    let (memory_citation, last_agent_message, defers_mailbox_delivery_to_next_turn) =
-        match &turn_item {
-            TurnItem::AgentMessage(agent_message) => {
-                let combined = agent_message
-                    .content
-                    .iter()
-                    .map(|entry| match entry {
-                        codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
-                    })
-                    .collect::<String>();
-                let last_agent_message = if combined.trim().is_empty() {
-                    None
-                } else {
-                    Some(combined)
-                };
-                let defers_mailbox_delivery_to_next_turn =
-                    !matches!(agent_message.phase, Some(MessagePhase::Commentary))
-                        && last_agent_message.is_some();
-                (
-                    agent_message.memory_citation.clone(),
-                    last_agent_message,
-                    defers_mailbox_delivery_to_next_turn,
-                )
-            }
-            TurnItem::ImageGeneration(_) => (None, None, true),
-            _ => (None, None, false),
-        };
+    let (
+        memory_citation,
+        last_agent_message,
+        empty_final_answer,
+        defers_mailbox_delivery_to_next_turn,
+    ) = match &turn_item {
+        TurnItem::AgentMessage(agent_message) => {
+            let combined = agent_message
+                .content
+                .iter()
+                .map(|entry| match entry {
+                    codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
+                })
+                .collect::<String>();
+            let empty_message = combined.trim().is_empty();
+            let last_agent_message = if empty_message { None } else { Some(combined) };
+            let empty_final_answer =
+                !matches!(agent_message.phase, Some(MessagePhase::Commentary)) && empty_message;
+            let defers_mailbox_delivery_to_next_turn =
+                !matches!(agent_message.phase, Some(MessagePhase::Commentary))
+                    && last_agent_message.is_some();
+            (
+                agent_message.memory_citation.clone(),
+                last_agent_message,
+                empty_final_answer,
+                defers_mailbox_delivery_to_next_turn,
+            )
+        }
+        TurnItem::ImageGeneration(_) => (None, None, false, true),
+        _ => (None, None, false, false),
+    };
     Some(FinalizedTurnItem {
         turn_item,
         facts: FinalizedTurnItemFacts {
             memory_citation,
             last_agent_message,
+            empty_final_answer,
             defers_mailbox_delivery_to_next_turn,
         },
     })
@@ -481,7 +488,10 @@ pub(crate) async fn handle_output_item_done(
             )
             .await;
 
-            output.last_agent_message = finalized_facts.and_then(|facts| facts.last_agent_message);
+            if let Some(facts) = finalized_facts {
+                output.last_agent_message = facts.last_agent_message;
+                output.empty_final_answer = facts.empty_final_answer;
+            }
         }
         // The tool request should be answered directly (or was denied); push that response into the transcript.
         Err(FunctionCallError::RespondToModel(message)) => {
