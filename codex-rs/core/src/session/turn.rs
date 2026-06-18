@@ -114,6 +114,13 @@ use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
 
+const EMPTY_FINAL_ANSWER_RETRY_PROMPT: &str = concat!(
+    "The previous assistant final answer was empty. ",
+    "Continue the same turn and provide a non-empty final answer to the user's request. ",
+    "Do not call tools unless necessary."
+);
+const MAX_EMPTY_FINAL_ANSWER_RETRIES: u8 = 1;
+
 /// Takes a user message as input and runs a loop where, at each sampling request, the model
 /// replies with either:
 ///
@@ -235,6 +242,7 @@ pub(crate) async fn run_turn(
     // 1. At the start of a turn, so the fresh user prompt in `input` gets sampled first.
     // 2. After auto-compact, when model/tool continuation needs to resume before any steer.
     let mut can_drain_pending_input = input.is_empty();
+    let mut empty_final_answer_retries = 0;
 
     loop {
         // Note that pending_input would be something like a message the user
@@ -294,6 +302,7 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    empty_final_answer,
                 } = sampling_request_output;
                 can_drain_pending_input = true;
                 let has_pending_input = sess.input_queue.has_pending_input(&sess.active_turn).await;
@@ -359,6 +368,25 @@ pub(crate) async fn run_turn(
                 }
 
                 if !needs_follow_up {
+                    if sampling_request_last_agent_message.is_none()
+                        && empty_final_answer
+                        && empty_final_answer_retries < MAX_EMPTY_FINAL_ANSWER_RETRIES
+                    {
+                        empty_final_answer_retries += 1;
+                        let retry_prompt = ResponseItem::from(ResponseInputItem::Message {
+                            role: "user".to_string(),
+                            content: vec![ContentItem::InputText {
+                                text: EMPTY_FINAL_ANSWER_RETRY_PROMPT.to_string(),
+                            }],
+                            phase: None,
+                        });
+                        sess.record_conversation_items(
+                            &turn_context,
+                            std::slice::from_ref(&retry_prompt),
+                        )
+                        .await;
+                        continue;
+                    }
                     last_agent_message = sampling_request_last_agent_message;
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
@@ -1142,6 +1170,7 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    empty_final_answer: bool,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -1755,6 +1784,7 @@ async fn try_run_sampling_request(
         FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
+    let mut empty_final_answer = false;
     let mut active_item: Option<TurnItem> = None;
     let mut active_tool_argument_diff_consumer: Option<(
         String,
@@ -1897,12 +1927,14 @@ async fn try_run_sampling_request(
                 if let Some(agent_message) = output_result.last_agent_message {
                     last_agent_message = Some(agent_message);
                 }
+                empty_final_answer |= output_result.empty_final_answer;
                 needs_follow_up |= output_result.needs_follow_up;
                 // todo: remove before stabilizing multi-agent v2
                 if preempt_for_mailbox_mail && sess.input_queue.has_pending_mailbox_items().await {
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        empty_final_answer,
                     });
                 }
             }
@@ -2036,6 +2068,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    empty_final_answer,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {

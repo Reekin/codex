@@ -25,6 +25,7 @@ Read only the references needed for the current phase:
 - For chat tree work, read `references/feature-chat-tree-contract.md` first, then the other `feature-chat-tree-*` files needed by the touched surface.
 - For chat tree migration execution, fill `references/feature-chat-tree-migration-template.md` before implementation edits.
 - For subagent identity work, read `references/feature-subagent-identity.md`.
+- For empty final-answer retry work, read `references/feature-empty-final-answer-retry.md`.
 - For integration branch work, read `references/integration-release-automation.md`.
 - For final chat tree acceptance, read `references/feature-chat-tree-acceptance.md`.
 
@@ -95,6 +96,7 @@ Current feature-specific references:
 
 - `feature-guide-template.md`: common structure for every personal feature guide.
 - `feature-exec-argv.md`: argv-native unified exec tool contract, adapter map, porting checklist, and acceptance matrix.
+- `feature-empty-final-answer-retry.md`: single-turn recovery for upstream model responses that complete with an empty final answer.
 - `feature-subagent-identity.md`: compact guide for the subagent identity clarification feature.
 - `feature-chat-tree-contract.md`: stable chat tree product/API behavior.
 - `feature-chat-tree-architecture.md`: preferred stable core and adapter shape for chat tree.
