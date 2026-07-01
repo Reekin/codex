@@ -82,6 +82,7 @@ use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppInfo;
 use codex_app_server_protocol::AppSummary;
+use codex_app_server_protocol::ChatTreeChangeKind;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
 use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
@@ -336,6 +337,8 @@ use self::exec_state::UnifiedExecWaitStreak;
 use self::exec_state::command_execution_command_and_parsed;
 use self::exec_state::is_standard_tool_call;
 use self::exec_state::is_unified_exec_source;
+mod chat_tree;
+use self::chat_tree::ChatTreeUiState;
 mod goal_status;
 use self::goal_status::GoalStatusState;
 #[cfg(test)]
@@ -642,6 +645,7 @@ pub(crate) struct ChatWidget {
     dismissed_plan_mode_nudge_scopes: HashSet<PlanModeNudgeScope>,
     thread_name: Option<String>,
     thread_rename_block_message: Option<String>,
+    chat_tree: ChatTreeUiState,
     active_side_conversation: bool,
     normal_placeholder_text: String,
     side_placeholder_text: String,
@@ -1993,6 +1997,33 @@ impl ChatWidget {
     /// runtime overrides applied via TUI, e.g., model or approval policy).
     pub(crate) fn config_ref(&self) -> &Config {
         &self.config
+    }
+
+    pub(crate) fn open_chat_tree_popup(&mut self) {
+        if self.bottom_pane.is_task_running() {
+            self.add_error_message(
+                "Cannot switch chat tree nodes while a task is running.".to_string(),
+            );
+            return;
+        }
+        let Some(view) = self.chat_tree.view(self.app_event_tx.clone()) else {
+            self.add_info_message(
+                "Chat tree is empty. Send a prompt first, then use /chattree to switch branches."
+                    .to_string(),
+                /*hint*/ None,
+            );
+            return;
+        };
+        self.bottom_pane.show_view(Box::new(view));
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_chat_tree_projection(
+        &mut self,
+        projection: codex_app_server_protocol::ChatTreeProjection,
+    ) {
+        self.chat_tree.set_projection(projection);
+        self.request_redraw();
     }
 
     #[cfg(test)]

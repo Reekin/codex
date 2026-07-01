@@ -11,6 +11,7 @@ use super::AdditionalContextStore;
 use super::auto_compact_window::AutoCompactWindow;
 use super::auto_compact_window::AutoCompactWindowIds;
 use super::auto_compact_window::AutoCompactWindowSnapshot;
+use crate::chat_tree::ChatTreeState;
 use crate::context_manager::ContextManager;
 use crate::session::PreviousTurnSettings;
 use crate::session::session::SessionConfiguration;
@@ -26,6 +27,7 @@ use codex_utils_output_truncation::TruncationPolicy;
 pub(crate) struct SessionState {
     pub(crate) session_configuration: SessionConfiguration,
     pub(crate) history: ContextManager,
+    pub(crate) chat_tree: ChatTreeState,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) server_reasoning_included: bool,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
@@ -52,6 +54,7 @@ impl SessionState {
         Self {
             session_configuration,
             history,
+            chat_tree: ChatTreeState::default(),
             latest_rate_limits: None,
             server_reasoning_included: false,
             mcp_dependency_prompted: HashSet::new(),

@@ -1220,6 +1220,12 @@ impl MessageProcessor {
             ClientRequest::ThreadRead { params, .. } => {
                 self.thread_processor.thread_read(params).await
             }
+            ClientRequest::ChatTreeRead { params, .. } => {
+                self.thread_processor.chat_tree_read(params).await
+            }
+            ClientRequest::ChatTreeSetCurrent { params, .. } => {
+                self.thread_processor.chat_tree_set_current(params).await
+            }
             ClientRequest::ThreadTurnsList { params, .. } => {
                 self.thread_processor.thread_turns_list(params).await
             }

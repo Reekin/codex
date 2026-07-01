@@ -10,6 +10,8 @@ pub use thread_id::ThreadId;
 pub use tool_name::ToolName;
 pub mod approvals;
 pub mod capabilities;
+pub mod chat_tree;
+pub mod chat_tree_protocol;
 mod compacted_item;
 pub mod config_types;
 pub mod dynamic_tools;

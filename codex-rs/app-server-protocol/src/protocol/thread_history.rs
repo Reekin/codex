@@ -4,6 +4,11 @@ use crate::protocol::item_builders::build_file_change_approval_request_item;
 use crate::protocol::item_builders::build_file_change_begin_item;
 use crate::protocol::item_builders::build_file_change_end_item;
 use crate::protocol::item_builders::build_item_from_guardian_event;
+use crate::protocol::v2::ChatTreeChange;
+use crate::protocol::v2::ChatTreeChangeKind;
+use crate::protocol::v2::ChatTreeNode;
+use crate::protocol::v2::ChatTreeNodeStatus;
+use crate::protocol::v2::ChatTreeProjection;
 use crate::protocol::v2::CollabAgentState;
 use crate::protocol::v2::CollabAgentTool;
 use crate::protocol::v2::CollabAgentToolCallStatus;
@@ -22,6 +27,11 @@ use crate::protocol::v2::TurnItemsView;
 use crate::protocol::v2::TurnStatus;
 use crate::protocol::v2::UserInput;
 use crate::protocol::v2::WebSearchAction;
+use codex_protocol::chat_tree::ChatTreeNode as DomainChatTreeNode;
+use codex_protocol::chat_tree::ChatTreeProjection as DomainChatTreeProjection;
+use codex_protocol::chat_tree::ChatTreeState as DomainChatTreeState;
+use codex_protocol::chat_tree::overlay_entries_from_projection;
+use codex_protocol::chat_tree_protocol::chat_tree_event_from_protocol_event;
 use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::AgentReasoningEvent;
@@ -56,6 +66,7 @@ use codex_protocol::protocol::ViewImageToolCallEvent;
 use codex_protocol::protocol::WebSearchBeginEvent;
 use codex_protocol::protocol::WebSearchEndEvent;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -223,6 +234,163 @@ impl ThreadHistoryChangeAccumulator {
             }
         }
     }
+}
+
+pub fn build_projected_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
+    let turns = build_turns_from_rollout_items(items);
+    let projection = build_chat_tree_projection_from_rollout_items(items);
+    if projection.nodes.is_empty() {
+        return turns;
+    }
+    let visible_turn_ids: HashSet<&str> = projection
+        .visible_turn_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    turns
+        .into_iter()
+        .filter(|turn| visible_turn_ids.contains(turn.id.as_str()))
+        .collect()
+}
+
+pub fn build_chat_tree_projection_from_rollout_items(items: &[RolloutItem]) -> ChatTreeProjection {
+    let mut state = DomainChatTreeState::default();
+    for item in items {
+        if let RolloutItem::EventMsg(event_msg) = item
+            && let Some(event) = chat_tree_event_from_protocol_event(event_msg)
+            && let Err(err) = state.apply_event(&event)
+        {
+            warn!(
+                ?err,
+                "invalid durable chat tree event ignored while building projection"
+            );
+        }
+    }
+    chat_tree_projection_from_domain(state.projection())
+}
+
+pub fn chat_tree_projection_from_domain(
+    projection: DomainChatTreeProjection,
+) -> ChatTreeProjection {
+    ChatTreeProjection {
+        version: projection.version,
+        revision: projection.revision,
+        current_node_id: projection.current_node_id,
+        visible_node_ids: projection.visible_node_ids,
+        visible_turn_ids: projection.visible_turn_ids,
+        nodes: projection
+            .nodes
+            .into_iter()
+            .map(|node| ChatTreeNode {
+                node_id: node.node_id,
+                parent_node_id: node.parent_node_id,
+                turn_id: node.turn_id,
+                order: node.order,
+                status: node.status.into(),
+                summary: node.summary,
+            })
+            .collect(),
+    }
+}
+
+fn domain_projection_from_chat_tree_projection(
+    projection: ChatTreeProjection,
+) -> DomainChatTreeProjection {
+    DomainChatTreeProjection {
+        version: projection.version,
+        revision: projection.revision,
+        current_node_id: projection.current_node_id,
+        visible_node_ids: projection.visible_node_ids,
+        visible_turn_ids: projection.visible_turn_ids,
+        nodes: projection
+            .nodes
+            .into_iter()
+            .map(|node| DomainChatTreeNode {
+                node_id: node.node_id,
+                parent_node_id: node.parent_node_id,
+                turn_id: node.turn_id,
+                order: node.order,
+                status: node.status.to_core(),
+                summary: node.summary,
+            })
+            .collect(),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatTreeOverlayEntry {
+    pub node_id: String,
+    pub depth: usize,
+    pub summary: String,
+    pub is_current: bool,
+}
+
+pub fn chat_tree_overlay_entries(projection: &ChatTreeProjection) -> Vec<ChatTreeOverlayEntry> {
+    overlay_entries_from_projection(&domain_projection_from_chat_tree_projection(
+        projection.clone(),
+    ))
+    .into_iter()
+    .map(|entry| ChatTreeOverlayEntry {
+        node_id: entry.node_id,
+        depth: entry.depth,
+        summary: entry.summary,
+        is_current: entry.is_current,
+    })
+    .collect()
+}
+
+pub fn refresh_chat_tree_projection(projection: &mut ChatTreeProjection) {
+    let state = DomainChatTreeState::from_projection(domain_projection_from_chat_tree_projection(
+        projection.clone(),
+    ));
+    *projection = chat_tree_projection_from_domain(state.projection());
+}
+
+pub fn apply_chat_tree_event_to_projection(projection: &mut ChatTreeProjection, event: &EventMsg) {
+    let mut state = DomainChatTreeState::from_projection(
+        domain_projection_from_chat_tree_projection(projection.clone()),
+    );
+    let Some(event) = chat_tree_event_from_protocol_event(event) else {
+        return;
+    };
+    if let Err(err) = state.apply_event(&event) {
+        warn!(
+            ?err,
+            "invalid chat tree event ignored while updating projection"
+        );
+        return;
+    }
+    *projection = chat_tree_projection_from_domain(state.projection());
+}
+
+pub fn chat_tree_change_from_event(event: &EventMsg) -> Option<ChatTreeChange> {
+    match event {
+        EventMsg::ChatTreeNodeStarted(payload) => Some(ChatTreeChange {
+            r#type: ChatTreeChangeKind::NodeStarted,
+            node_id: Some(payload.node_id.clone()),
+        }),
+        EventMsg::ChatTreeNodeFinalized(payload) => Some(ChatTreeChange {
+            r#type: ChatTreeChangeKind::NodeFinalized,
+            node_id: Some(payload.node_id.clone()),
+        }),
+        EventMsg::ChatTreeNodeSummaryUpdated(payload) => Some(ChatTreeChange {
+            r#type: ChatTreeChangeKind::NodeSummaryUpdated,
+            node_id: Some(payload.node_id.clone()),
+        }),
+        EventMsg::ChatTreeCurrentNodeChanged(payload) => Some(ChatTreeChange {
+            r#type: ChatTreeChangeKind::CurrentNodeChanged,
+            node_id: Some(payload.node_id.clone()),
+        }),
+        EventMsg::ThreadRolledBack(_) => Some(ChatTreeChange {
+            r#type: ChatTreeChangeKind::TreeRebuilt,
+            node_id: None,
+        }),
+        _ => None,
+    }
+}
+
+pub fn chat_tree_default_summary(status: ChatTreeNodeStatus) -> &'static str {
+    status.to_core().default_summary()
 }
 
 pub struct ThreadHistoryBuilder {

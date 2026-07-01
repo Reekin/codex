@@ -209,6 +209,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::exec_output::StreamOutput;
 
 mod code_mode_warning;
+mod chat_tree_lifecycle;
 mod config_lock;
 mod handlers;
 mod inject;
@@ -1367,14 +1368,23 @@ impl Session {
         let rollout_reconstruction::RolloutReconstruction {
             mut history,
             previous_turn_settings,
-            reference_context_item,
+            mut reference_context_item,
             window_number,
             first_window_id,
             previous_window_id,
             window_id,
+            chat_tree,
         } = self
             .reconstruct_history_from_rollout(turn_context, rollout_items)
             .await;
+        if let Some(chat_tree_current_history) =
+            chat_tree.as_ref().and_then(|tree| tree.current_history.as_ref())
+        {
+            history = chat_tree_current_history.raw_items().to_vec();
+            reference_context_item = chat_tree
+                .as_ref()
+                .and_then(|tree| tree.current_reference_context_item.clone());
+        }
         // Keep the recorded rollout unchanged. Prepare its reconstructed history before
         // installing it, so legacy images are processed once for this resume or fork and
         // will be processed again if the rollout is reconstructed in a future session.
@@ -1400,6 +1410,11 @@ impl Session {
                 },
             );
             state.set_previous_turn_settings(previous_turn_settings.clone());
+            if let Some(chat_tree) = chat_tree {
+                state
+                    .chat_tree
+                    .replace_from_replay(chat_tree.domain, chat_tree.history_snapshots);
+            }
         }
         let prefix_tokens = if matches!(
             turn_context.config.model_auto_compact_token_limit_scope,
@@ -2904,13 +2919,19 @@ impl Session {
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
             }
+            let history_snapshot = state.clone_history();
+            state
+                .chat_tree
+                .update_current_history_snapshot(history_snapshot);
+            state.start_next_auto_compact_window();
         }
 
-        self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
-            .await;
+        let mut rollout_items = vec![RolloutItem::Compacted(compacted_item)];
         if let Some(turn_context_item) = reference_context_item {
-            self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item)])
-                .await;
+            rollout_items.push(RolloutItem::TurnContext(turn_context_item));
+        }
+        if let Err(err) = self.persist_rollout_items_durable(&rollout_items).await {
+            warn!("failed to durably persist compacted chat history: {err}");
         }
         {
             let mut state = self.state.lock().await;

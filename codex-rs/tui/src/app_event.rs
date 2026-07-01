@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppInfo;
+use codex_app_server_protocol::ChatTreeProjection;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountTokenUsageResponse;
@@ -203,6 +204,12 @@ pub(crate) enum AppEvent {
         enabled: bool,
     },
 
+    /// Re-read the active transcript after the selected chat-tree branch changes.
+    RefreshChatTreeTranscript {
+        thread_id: ThreadId,
+        chat_tree: ChatTreeProjection,
+    },
+
     /// Clear the current context, start a fresh session, and submit an initial user message.
     ///
     /// This is the Plan Mode handoff path: the previous thread remains resumable, but the model
@@ -277,6 +284,11 @@ pub(crate) enum AppEvent {
 
     /// Open the current thread goal summary/action menu.
     OpenThreadGoalMenu {
+        thread_id: ThreadId,
+    },
+
+    /// Read the current chat-tree projection and open the branch switcher.
+    OpenChatTree {
         thread_id: ThreadId,
     },
 
