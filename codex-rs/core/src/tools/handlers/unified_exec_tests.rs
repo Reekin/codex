@@ -257,6 +257,128 @@ async fn exec_command_pre_tool_use_payload_uses_raw_command() {
 }
 
 #[tokio::test]
+async fn exec_argv_pre_tool_use_payload_uses_argv_and_display_command() {
+    let payload = ToolPayload::Function {
+        arguments: serde_json::json!({ "argv": ["printf", "%s", "two words"] }).to_string(),
+    };
+    let (session, turn) = make_session_and_context().await;
+    let handler = ExecArgvHandler::default();
+
+    assert_eq!(
+        handler.pre_tool_use_payload(&ToolInvocation {
+            session: session.into(),
+            turn: turn.into(),
+            cancellation_token: tokio_util::sync::CancellationToken::new(),
+            tracker: Arc::new(Mutex::new(TurnDiffTracker::new())),
+            call_id: "call-argv".to_string(),
+            tool_name: codex_tools::ToolName::plain("exec_argv"),
+            source: crate::tools::context::ToolCallSource::Direct,
+            payload,
+        }),
+        Some(crate::tools::registry::PreToolUsePayload {
+            tool_name: HookToolName::new("exec_argv"),
+            tool_input: serde_json::json!({
+                "command": "printf '%s' 'two words'",
+                "argv": ["printf", "%s", "two words"],
+            }),
+        })
+    );
+}
+
+#[tokio::test]
+async fn exec_argv_hook_rewrite_requires_argv_array() {
+    let payload = ToolPayload::Function {
+        arguments: serde_json::json!({ "argv": ["printf", "one"] }).to_string(),
+    };
+    let invocation = invocation_for_payload("exec_argv", "call-argv-rewrite", payload).await;
+    let handler = ExecArgvHandler::default();
+
+    let err = match handler
+        .with_updated_hook_input(invocation, serde_json::json!({ "command": "printf two" }))
+    {
+        Ok(_) => panic!("exec_argv should not parse rewritten command strings"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains("without array field `argv`"),
+        "unexpected error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn exec_argv_hook_rewrite_updates_argv_array() {
+    let payload = ToolPayload::Function {
+        arguments: serde_json::json!({ "argv": ["printf", "one"] }).to_string(),
+    };
+    let invocation = invocation_for_payload("exec_argv", "call-argv-rewrite", payload).await;
+    let handler = ExecArgvHandler::default();
+
+    let updated = handler
+        .with_updated_hook_input(
+            invocation,
+            serde_json::json!({ "argv": ["printf", "two words"] }),
+        )
+        .expect("argv rewrite should succeed");
+
+    let ToolPayload::Function { arguments } = updated.payload else {
+        panic!("expected function payload");
+    };
+    let value: serde_json::Value = serde_json::from_str(&arguments).expect("valid json");
+    assert_eq!(value["argv"], serde_json::json!(["printf", "two words"]));
+}
+
+#[tokio::test]
+async fn exec_argv_pre_tool_use_payload_skips_empty_argv() {
+    let payload = ToolPayload::Function {
+        arguments: serde_json::json!({ "argv": [] }).to_string(),
+    };
+    let invocation = invocation_for_payload("exec_argv", "call-empty-argv", payload).await;
+    let handler = ExecArgvHandler::default();
+
+    assert_eq!(handler.pre_tool_use_payload(&invocation), None);
+}
+
+#[tokio::test]
+async fn exec_argv_post_tool_use_payload_uses_exec_argv_hook_identity() {
+    let payload = ToolPayload::Function {
+        arguments: serde_json::json!({ "argv": ["printf", "three"], "tty": false }).to_string(),
+    };
+    let output = ExecCommandToolOutput {
+        event_call_id: "call-argv-post".to_string(),
+        chunk_id: "chunk-argv".to_string(),
+        wall_time: std::time::Duration::from_millis(498),
+        raw_output: b"three".to_vec(),
+        truncation_policy: TEST_TRUNCATION_POLICY,
+        max_output_tokens: None,
+        process_id: None,
+        exit_code: Some(0),
+        original_token_count: None,
+        hook_command: Some("printf three".to_string()),
+        hook_tool_name: Some("exec_argv".to_string()),
+        hook_input: Some(serde_json::json!({
+            "command": "printf three",
+            "argv": ["printf", "three"],
+        })),
+    };
+    let invocation = invocation_for_payload("exec_argv", "call-argv-post", payload).await;
+    let handler = ExecArgvHandler::default();
+
+    assert_eq!(
+        handler.post_tool_use_payload(&invocation, &output),
+        Some(crate::tools::registry::PostToolUsePayload {
+            tool_name: HookToolName::new("exec_argv"),
+            tool_use_id: "call-argv-post".to_string(),
+            tool_input: serde_json::json!({
+                "command": "printf three",
+                "argv": ["printf", "three"],
+            }),
+            tool_response: serde_json::json!("three"),
+        })
+    );
+}
+
+#[tokio::test]
 async fn exec_command_pre_tool_use_payload_skips_write_stdin() {
     let payload = ToolPayload::Function {
         arguments: serde_json::json!({ "chars": "echo hi" }).to_string(),
@@ -295,6 +417,8 @@ async fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_s
         exit_code: Some(0),
         original_token_count: None,
         hook_command: Some("echo three".to_string()),
+        hook_tool_name: Some("Bash".to_string()),
+        hook_input: Some(serde_json::json!({ "command": "echo three" })),
     };
     let invocation = invocation_for_payload("exec_command", "call-43", payload).await;
     let handler = ExecCommandHandler::default();
@@ -325,6 +449,8 @@ async fn exec_command_post_tool_use_payload_uses_output_for_interactive_completi
         exit_code: Some(0),
         original_token_count: None,
         hook_command: Some("echo three".to_string()),
+        hook_tool_name: Some("Bash".to_string()),
+        hook_input: Some(serde_json::json!({ "command": "echo three" })),
     };
     let invocation = invocation_for_payload("exec_command", "call-44", payload).await;
     let handler = ExecCommandHandler::default();
@@ -356,6 +482,8 @@ async fn exec_command_post_tool_use_payload_skips_running_sessions() {
         exit_code: None,
         original_token_count: None,
         hook_command: Some("echo three".to_string()),
+        hook_tool_name: Some("Bash".to_string()),
+        hook_input: Some(serde_json::json!({ "command": "echo three" })),
     };
     let invocation = invocation_for_payload("exec_command", "call-45", payload).await;
     let handler = ExecCommandHandler::default();
@@ -382,6 +510,8 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
         exit_code: Some(0),
         original_token_count: None,
         hook_command: Some("sleep 1; echo finished".to_string()),
+        hook_tool_name: Some("Bash".to_string()),
+        hook_input: Some(serde_json::json!({ "command": "sleep 1; echo finished" })),
     };
     let invocation = invocation_for_payload("write_stdin", "write-stdin-call", payload).await;
     let handler = WriteStdinHandler;
@@ -393,6 +523,49 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
             tool_use_id: "exec-call-45".to_string(),
             tool_input: serde_json::json!({ "command": "sleep 1; echo finished" }),
             tool_response: serde_json::json!("finished\n"),
+        })
+    );
+}
+
+#[tokio::test]
+async fn write_stdin_post_tool_use_payload_preserves_exec_argv_contract_on_completion() {
+    let payload = ToolPayload::Function {
+        arguments: serde_json::json!({
+            "session_id": 45,
+            "chars": "",
+        })
+        .to_string(),
+    };
+    let output = ExecCommandToolOutput {
+        event_call_id: "exec-argv-call".to_string(),
+        chunk_id: "chunk-argv".to_string(),
+        wall_time: std::time::Duration::from_millis(498),
+        raw_output: b"literal\n".to_vec(),
+        truncation_policy: TEST_TRUNCATION_POLICY,
+        max_output_tokens: None,
+        process_id: None,
+        exit_code: Some(0),
+        original_token_count: None,
+        hook_command: Some("printf literal".to_string()),
+        hook_tool_name: Some("exec_argv".to_string()),
+        hook_input: Some(serde_json::json!({
+            "command": "printf literal",
+            "argv": ["printf", "literal"],
+        })),
+    };
+    let invocation = invocation_for_payload("write_stdin", "write-stdin-call", payload).await;
+    let handler = WriteStdinHandler;
+
+    assert_eq!(
+        handler.post_tool_use_payload(&invocation, &output),
+        Some(crate::tools::registry::PostToolUsePayload {
+            tool_name: HookToolName::new("exec_argv"),
+            tool_use_id: "exec-argv-call".to_string(),
+            tool_input: serde_json::json!({
+                "command": "printf literal",
+                "argv": ["printf", "literal"],
+            }),
+            tool_response: serde_json::json!("literal\n"),
         })
     );
 }
@@ -413,6 +586,8 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
         exit_code: Some(0),
         original_token_count: None,
         hook_command: Some("sleep 2; echo alpha".to_string()),
+        hook_tool_name: Some("Bash".to_string()),
+        hook_input: Some(serde_json::json!({ "command": "sleep 2; echo alpha" })),
     };
     let output_b = ExecCommandToolOutput {
         event_call_id: "exec-call-b".to_string(),
@@ -425,6 +600,8 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
         exit_code: Some(0),
         original_token_count: None,
         hook_command: Some("sleep 1; echo beta".to_string()),
+        hook_tool_name: Some("Bash".to_string()),
+        hook_input: Some(serde_json::json!({ "command": "sleep 1; echo beta" })),
     };
     let invocation_b = invocation_for_payload("write_stdin", "write-call-b", payload.clone()).await;
     let invocation_a = invocation_for_payload("write_stdin", "write-call-a", payload).await;

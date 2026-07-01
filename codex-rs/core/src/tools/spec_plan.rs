@@ -9,6 +9,8 @@ use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::CurrentTimeHandler;
 use crate::tools::handlers::DynamicToolHandler;
+use crate::tools::handlers::ExecArgvHandler;
+use crate::tools::handlers::ExecArgvHandlerOptions;
 use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ExecCommandHandlerOptions;
 use crate::tools::handlers::GetContextRemainingHandler;
@@ -645,6 +647,10 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mut Planne
 
     match shell_type_for_model_and_features(&turn_context.model_info, features) {
         ConfigShellToolType::UnifiedExec => {
+            planned_tools.add(ExecArgvHandler::new(ExecArgvHandlerOptions {
+                exec_permission_approvals_enabled,
+                include_environment_id,
+            }));
             planned_tools.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
                 allow_login_shell,
                 exec_permission_approvals_enabled,

@@ -235,8 +235,11 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
                 justification: req.justification.clone(),
                 tty: None,
             },
-            command: req.hook_command.clone(),
             environment_id: req.turn_environment.environment_id.clone(),
+            permission_request_payload: PermissionRequestPayload::bash(
+                req.hook_command.clone(),
+                /*description*/ None,
+            ),
         })
     }
 

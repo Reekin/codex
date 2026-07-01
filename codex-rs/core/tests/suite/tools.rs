@@ -82,7 +82,13 @@ async fn empty_turn_environments_omits_environment_backed_tools() -> Result<()> 
         tools.contains(&"update_plan".to_string()),
         "non-environment tool should remain available; got {tools:?}"
     );
-    for environment_tool in ["exec_command", "write_stdin", "apply_patch", "view_image"] {
+    for environment_tool in [
+        "exec_command",
+        "exec_argv",
+        "write_stdin",
+        "apply_patch",
+        "view_image",
+    ] {
         assert!(
             !tools.contains(&environment_tool.to_string()),
             "{environment_tool} should be omitted for explicit empty turn environments; got {tools:?}"
@@ -125,6 +131,10 @@ async fn turn_environment_selection_keeps_environment_backed_tools() -> Result<(
     assert!(
         tools.contains(&"exec_command".to_string()),
         "environment tool should remain available with selected local environment; got {tools:?}"
+    );
+    assert!(
+        tools.contains(&"exec_argv".to_string()),
+        "argv environment tool should remain available with selected local environment; got {tools:?}"
     );
 
     Ok(())
