@@ -7071,6 +7071,20 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
     assert!(
         !developer_messages
             .iter()
+            .flatten()
+            .any(|text| text.contains("forked parent conversation history ends")),
+        "did not expect fork-history boundary marker in non-fork initial context, got {developer_messages:?}"
+    );
+    assert!(
+        !developer_messages
+            .iter()
+            .flatten()
+            .any(|text| text.contains("forked parent conversation history begins")),
+        "did not expect fork-history start marker in non-fork initial context, got {developer_messages:?}"
+    );
+    assert!(
+        !developer_messages
+            .iter()
             .any(|message| message.as_slice() == ["Root guidance."]),
         "did not expect root usage hint for subagent thread, got {developer_messages:?}"
     );

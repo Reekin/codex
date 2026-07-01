@@ -469,6 +469,7 @@ impl AgentControl {
                 });
             }
         }
+        let mut inserted_child_usage_hint = false;
         if preserve_reference_context_item
             && config.features.enabled(Feature::MultiAgentV2)
             && let Some(subagent_usage_hint_text) =
@@ -478,11 +479,24 @@ impl AgentControl {
                     subagent_usage_hint_text,
                 ])
         {
-            forked_rollout_items.push(RolloutItem::ResponseItem(subagent_usage_hint_message));
+            forked_rollout_items.insert(0, RolloutItem::ResponseItem(subagent_usage_hint_message));
+            inserted_child_usage_hint = true;
+        }
+        if preserve_reference_context_item
+            && let Some(start_hint_text) =
+                crate::session::multi_agents::forked_history_start_hint_text(&session_source)
+            && let Some(start_hint_message) =
+                crate::context_manager::updates::build_developer_update_item(vec![start_hint_text])
+        {
+            let insertion_index = usize::from(inserted_child_usage_hint);
+            forked_rollout_items.insert(
+                insertion_index,
+                RolloutItem::ResponseItem(start_hint_message),
+            );
         }
         if preserve_reference_context_item
             && let Some(identity_hint_text) =
-                crate::session::multi_agents::identity_hint_text(&session_source)
+                crate::session::multi_agents::forked_history_boundary_hint_text(&session_source)
             && let Some(identity_hint_message) =
                 crate::context_manager::updates::build_developer_update_item(vec![
                     identity_hint_text,
