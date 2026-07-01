@@ -732,6 +732,25 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     let expected_history = [
         ResponseItem::Message {
             id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Child subagent guidance.".to_string(),
+            }],
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: crate::session::multi_agents::forked_history_start_hint_text(
+                    &child_session_source,
+                )
+                .expect("thread-spawn child should have a fork start identity hint"),
+            }],
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
                 text: "parent seed context".to_string(),
@@ -743,16 +762,10 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
-                text: "Child subagent guidance.".to_string(),
-            }],
-            phase: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "developer".to_string(),
-            content: vec![ContentItem::InputText {
-                text: crate::session::multi_agents::identity_hint_text(&child_session_source)
-                    .expect("thread-spawn child should have an identity hint"),
+                text: crate::session::multi_agents::forked_history_boundary_hint_text(
+                    &child_session_source,
+                )
+                .expect("thread-spawn child should have a fork boundary identity hint"),
             }],
             phase: None,
         },
@@ -878,9 +891,30 @@ async fn spawn_agent_full_history_fork_adds_subagent_identity_hint_without_multi
     assert!(
         history_contains_text(
             history.raw_items(),
-            "Any prior transcript inherited from another agent is context"
+            "==== forked parent conversation history begins ===="
         ),
-        "identity hint should label inherited parent history as context"
+        "forked identity hint should mark the inherited parent history start"
+    );
+    assert!(
+        history_contains_text(
+            history.raw_items(),
+            "==== forked parent conversation history ends ===="
+        ),
+        "forked identity hint should mark the inherited parent history boundary"
+    );
+    assert!(
+        history_contains_text(
+            history.raw_items(),
+            "It is not the current task you should answer directly"
+        ),
+        "forked identity hint should distinguish inherited history from the current assignment"
+    );
+    assert!(
+        history_contains_text(
+            history.raw_items(),
+            "Treat the next task message sent directly to you as your assignment"
+        ),
+        "forked identity hint should identify the next direct task message as the assignment"
     );
 
     let _ = harness
