@@ -3325,6 +3325,9 @@ impl Session {
 
         let multi_agent_v2_usage_hint_text =
             multi_agents::usage_hint_text(turn_context, &session_source);
+        if let Some(identity_hint_text) = multi_agents::identity_hint_text(&session_source) {
+            developer_sections.push(identity_hint_text);
+        }
 
         let mut items = Vec::with_capacity(4);
         if let Some(developer_message) =

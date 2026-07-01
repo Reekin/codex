@@ -91,7 +91,11 @@ impl Handler {
 
         let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
         let outcome = wait_for_activity(&mut activity_rx, pending_activity, deadline).await;
-        let result = WaitAgentResult::from_outcome(outcome);
+        let current_agent_path = turn
+            .session_source
+            .get_agent_path()
+            .unwrap_or_else(AgentPath::root);
+        let result = WaitAgentResult::from_outcome(outcome, current_agent_path.to_string());
 
         session
             .send_event(
@@ -125,19 +129,27 @@ struct WaitArgs {
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct WaitAgentResult {
+    pub(crate) current_agent_name: String,
     pub(crate) message: String,
     pub(crate) timed_out: bool,
 }
 
 impl WaitAgentResult {
-    fn from_outcome(outcome: WaitOutcome) -> Self {
+    fn from_outcome(outcome: WaitOutcome, current_agent_name: String) -> Self {
         let message = match outcome {
-            WaitOutcome::MailboxActivity => "Wait completed.",
-            WaitOutcome::Steered => "Wait interrupted by new input.",
-            WaitOutcome::TimedOut => "Wait timed out.",
+            WaitOutcome::MailboxActivity => format!(
+                "Wait completed for your mailbox as `{current_agent_name}`. This wait only observed an update delivered to your own mailbox; it did not wait for another agent's mailbox."
+            ),
+            WaitOutcome::Steered => format!(
+                "Wait interrupted by new input for your mailbox as `{current_agent_name}`."
+            ),
+            WaitOutcome::TimedOut => format!(
+                "Wait timed out for your mailbox as `{current_agent_name}`. This wait only observes updates delivered to your own mailbox; it does not wait for `/root`'s child tasks unless you are `/root`."
+            ),
         };
         Self {
-            message: message.to_string(),
+            current_agent_name,
+            message,
             timed_out: outcome == WaitOutcome::TimedOut,
         }
     }
