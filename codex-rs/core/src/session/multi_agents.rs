@@ -1,7 +1,5 @@
 use crate::config::MultiAgentV2Config;
 use crate::session::turn_context::TurnContext;
-use codex_features::Feature;
-use codex_protocol::AgentPath;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::MultiAgentVersion;
