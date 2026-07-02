@@ -615,7 +615,7 @@ pub(crate) use self::thread_summary::thread_settings_from_core_snapshot;
 pub(crate) fn build_api_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
     let persisted_items = items
         .iter()
-        .filter(|item| is_persisted_rollout_item(item, EventPersistenceMode::Limited))
+        .filter(|item| is_persisted_rollout_item(item))
         .cloned()
         .collect::<Vec<_>>();
     codex_app_server_protocol::build_projected_turns_from_rollout_items(&persisted_items)

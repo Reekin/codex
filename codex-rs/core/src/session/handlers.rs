@@ -595,7 +595,7 @@ pub async fn set_current_chat_tree_node(
         .lock()
         .await
         .as_ref()
-        .is_some_and(|active_turn| !active_turn.tasks.is_empty());
+        .is_some_and(|active_turn| active_turn.task.is_some());
     if task_running {
         sess.send_event_raw(Event {
             id: sub_id,

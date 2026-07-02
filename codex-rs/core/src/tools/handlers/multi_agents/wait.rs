@@ -63,12 +63,12 @@ impl Handler {
         let arguments = function_arguments(payload)?;
         let args: WaitArgs = parse_arguments(&arguments)?;
         let receiver_thread_ids = parse_agent_id_targets(args.targets)?;
-        if receiver_thread_ids.contains(&session.conversation_id) {
+        if receiver_thread_ids.contains(&session.thread_id()) {
             let current_agent_name = turn
                 .session_source
                 .get_agent_path()
                 .map(String::from)
-                .unwrap_or_else(|| session.conversation_id.to_string());
+                .unwrap_or_else(|| session.thread_id().to_string());
             return Err(FunctionCallError::RespondToModel(format!(
                 "wait_agent cannot wait for the current agent `{current_agent_name}`. Return your result if your task is complete, or wait for a different agent."
             )));

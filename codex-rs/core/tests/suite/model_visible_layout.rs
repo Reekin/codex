@@ -184,7 +184,7 @@ async fn snapshot_model_visible_layout_turn_overrides() -> Result<()> {
     })
     .await;
 
-    let requests = responses.requests();
+    let requests = responses.turn_requests();
     assert_eq!(requests.len(), 2, "expected two requests");
     insta::assert_snapshot!(
         "model_visible_layout_turn_overrides",
@@ -307,7 +307,7 @@ async fn snapshot_model_visible_layout_cwd_change_does_not_refresh_agents() -> R
     })
     .await;
 
-    let requests = responses.requests();
+    let requests = responses.turn_requests();
     assert_eq!(requests.len(), 2, "expected two requests");
     assert_eq!(
         user_instructions_wrapper_count(&requests[0]),

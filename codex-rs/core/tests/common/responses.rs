@@ -48,15 +48,30 @@ impl ResponseMock {
     }
 
     pub fn single_request(&self) -> ResponsesRequest {
-        let requests = self.requests.lock().unwrap();
+        let requests = self.turn_requests();
         if requests.len() != 1 {
-            panic!("expected 1 request, got {}", requests.len());
+            let summaries = requests
+                .iter()
+                .map(ResponsesRequest::debug_summary)
+                .collect::<Vec<_>>()
+                .join("\n");
+            panic!("expected 1 request, got {}\n{summaries}", requests.len());
         }
         requests.first().unwrap().clone()
     }
 
     pub fn requests(&self) -> Vec<ResponsesRequest> {
         self.requests.lock().unwrap().clone()
+    }
+
+    pub fn turn_requests(&self) -> Vec<ResponsesRequest> {
+        self.requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|request| !request.is_chat_tree_summary_request())
+            .cloned()
+            .collect()
     }
 
     pub fn last_request(&self) -> Option<ResponsesRequest> {
@@ -141,6 +156,31 @@ impl ResponsesRequest {
 
     pub fn body_bytes(&self) -> Vec<u8> {
         self.0.body.clone()
+    }
+
+    pub fn request_kind(&self) -> Option<String> {
+        let body = self.body_json();
+        if let Some(request_kind) = body["client_metadata"]["request_kind"].as_str() {
+            return Some(request_kind.to_string());
+        }
+        body["client_metadata"]["x-codex-turn-metadata"]
+            .as_str()
+            .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+            .and_then(|metadata| metadata["request_kind"].as_str().map(str::to_owned))
+    }
+
+    fn is_chat_tree_summary_request(&self) -> bool {
+        self.request_kind().as_deref() == Some("chat_tree_summary")
+    }
+
+    fn debug_summary(&self) -> String {
+        let user_texts = self.message_input_texts("user");
+        let preview = user_texts
+            .iter()
+            .take(3)
+            .map(|text| text.chars().take(120).collect::<String>())
+            .collect::<Vec<_>>();
+        format!("kind={:?}; user_texts={preview:?}", self.request_kind())
     }
 
     pub fn body_contains_text(&self, text: &str) -> bool {

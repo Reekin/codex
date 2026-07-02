@@ -221,7 +221,8 @@ fn read_hook_inputs(path: &Path) -> Vec<Value> {
 }
 
 fn python_hook_command(script_path: &Path) -> String {
-    format!("python3 \"{}\"", script_path.display())
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    format!("{python} \"{}\"", script_path.display())
 }
 
 fn write_unsupported_blocking_pre_compact_hook(home: &Path) {

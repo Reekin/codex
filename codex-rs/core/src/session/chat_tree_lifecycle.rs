@@ -4,8 +4,10 @@ use std::time::Instant;
 use crate::chat_tree::ChatTreeError;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
+use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
+use codex_features::Feature;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -345,6 +347,13 @@ impl Session {
         let finalized_chat_tree_node = self
             .finalize_chat_tree_node(turn_context, ChatTreeNodeStatus::Completed)
             .await;
+        if !turn_context
+            .config
+            .features
+            .enabled(Feature::ChatTreeSummary)
+        {
+            return None;
+        }
         if last_agent_message_for_summary.is_none() || !finalized_chat_tree_node {
             return None;
         }
@@ -485,18 +494,22 @@ impl Session {
                         text: request_payload,
                     }],
                     phase: None,
+                    internal_chat_message_metadata_passthrough: None,
                 }],
                 tools: Vec::new(),
                 parallel_tool_calls: false,
                 base_instructions: BaseInstructions {
                     text: CHAT_TREE_SUMMARY_SYSTEM_INSTRUCTIONS.to_string(),
                 },
-                personality: None,
                 output_schema: None,
                 output_schema_strict: true,
             };
             let mut client_session = self.services.model_client.new_session();
-            let turn_metadata_header = turn_context.turn_metadata_state.current_header_value();
+            let responses_metadata = turn_context.turn_metadata_state.to_responses_metadata(
+                self.installation_id.clone(),
+                node_id.to_string(),
+                CodexResponsesRequestKind::ChatTreeSummary,
+            );
             let inference_trace_context = InferenceTraceContext::disabled();
             let started_at = Instant::now();
             let mut stream = match tokio::select! {
@@ -514,7 +527,7 @@ impl Session {
                     None,
                     ReasoningSummaryConfig::None,
                     turn_context.config.service_tier.clone(),
-                    turn_metadata_header.as_deref(),
+                    &responses_metadata,
                     &inference_trace_context,
                 ) => stream,
             } {

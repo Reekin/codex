@@ -208,8 +208,8 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
-mod code_mode_warning;
 mod chat_tree_lifecycle;
+mod code_mode_warning;
 mod config_lock;
 mod handlers;
 mod inject;
@@ -1377,8 +1377,10 @@ impl Session {
         } = self
             .reconstruct_history_from_rollout(turn_context, rollout_items)
             .await;
-        if let Some(chat_tree_current_history) =
-            chat_tree.as_ref().and_then(|tree| tree.current_history.as_ref())
+        if let Some(chat_tree_current_history) = chat_tree
+            .as_ref()
+            .filter(|tree| tree.current_node_was_explicitly_selected)
+            .and_then(|tree| tree.current_history.as_ref())
         {
             history = chat_tree_current_history.raw_items().to_vec();
             reference_context_item = chat_tree
@@ -2882,7 +2884,6 @@ impl Session {
             .await;
     }
 
-    #[cfg(test)]
     pub(crate) async fn replace_history(
         &self,
         items: Vec<ResponseItem>,
@@ -2923,7 +2924,6 @@ impl Session {
             state
                 .chat_tree
                 .update_current_history_snapshot(history_snapshot);
-            state.start_next_auto_compact_window();
         }
 
         let mut rollout_items = vec![RolloutItem::Compacted(compacted_item)];

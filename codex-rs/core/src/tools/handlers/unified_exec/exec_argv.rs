@@ -28,6 +28,7 @@ use codex_features::Feature;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
+use codex_utils_path_uri::PathConvention;
 use serde_json::Value;
 
 use super::ExecArgvArgs;
@@ -64,27 +65,32 @@ impl ExecArgvHandler {
     }
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain("exec_argv")
     }
 
-    fn spec(&self) -> Option<ToolSpec> {
-        Some(create_exec_argv_tool_with_environment_id(
+    fn spec(&self) -> ToolSpec {
+        create_exec_argv_tool_with_environment_id(
             CommandToolOptions {
                 allow_login_shell: false,
                 exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
             },
             self.options.include_environment_id,
-        ))
+        )
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
         true
     }
 
-    async fn handle(
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation))
+    }
+}
+
+impl ExecArgvHandler {
+    async fn handle_call(
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
@@ -118,17 +124,31 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                 "unified exec is unavailable in this session".to_string(),
             ));
         };
+        let native_environment_cwd = turn_environment.cwd().clone();
         let cwd = environment_args
             .workdir
             .as_deref()
             .filter(|workdir| !workdir.is_empty())
             .map_or_else(
-                || turn_environment.cwd.clone(),
-                |workdir| turn_environment.cwd.join(workdir),
-            );
+                || Ok(native_environment_cwd.clone()),
+                |workdir| native_environment_cwd.join(workdir),
+            )
+            .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
         let environment = Arc::clone(&turn_environment.environment);
         let fs = environment.get_filesystem();
-        let args: ExecArgvArgs = parse_arguments_with_base_path(&arguments, &cwd)?;
+        let cwd_uses_native_convention =
+            cwd.infer_path_convention() == Some(PathConvention::native());
+        let native_cwd = match cwd.to_abs_path() {
+            Ok(cwd) if cwd_uses_native_convention => cwd,
+            Err(err) => return Err(FunctionCallError::RespondToModel(err.to_string())),
+            Ok(_) => {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "path URI `{cwd}` does not use the host's native {} path convention",
+                    PathConvention::native()
+                )));
+            }
+        };
+        let args: ExecArgvArgs = parse_arguments_with_base_path(&arguments, &native_cwd)?;
         let command = validate_argv(args.argv)?;
         let hook_command = codex_shell_command::parse_command::shlex_join(&command);
         let hook_metadata =
@@ -137,7 +157,7 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
             session.as_ref(),
             context.turn.as_ref(),
             &hook_command,
-            &cwd,
+            &native_cwd,
         )
         .await;
         let process_id = manager.allocate_process_id().await;
@@ -156,9 +176,11 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
         let exec_permission_approvals_enabled =
             session.features().enabled(Feature::ExecPermissionApprovals);
         let requested_additional_permissions = additional_permissions.clone();
+        let permission_cwd = &native_cwd;
         let effective_additional_permissions = apply_granted_turn_permissions(
             context.session.as_ref(),
-            cwd.as_path(),
+            &turn_environment.environment_id,
+            permission_cwd.as_path(),
             sandbox_permissions,
             additional_permissions,
         )
@@ -196,7 +218,7 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                     effective_additional_permissions.sandbox_permissions,
                     effective_additional_permissions.additional_permissions,
                     effective_additional_permissions.permissions_preapproved,
-                    &cwd,
+                    permission_cwd,
                 )
             },
             |permissions| Ok(Some(permissions)),
@@ -227,7 +249,7 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                 chunk_id: String::new(),
                 wall_time: std::time::Duration::ZERO,
                 raw_output: output.into_text().into_bytes(),
-                truncation_policy: turn.truncation_policy,
+                truncation_policy: turn.model_info.truncation_policy.into(),
                 max_output_tokens,
                 process_id: None,
                 exit_code: None,
@@ -251,8 +273,9 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                     yield_time_ms,
                     max_output_tokens,
                     cwd,
-                    sandbox_cwd: turn_environment.cwd.clone(),
-                    environment,
+                    sandbox_cwd: native_environment_cwd,
+                    turn_environment: turn_environment.clone(),
+                    shell_mode: turn.unified_exec_shell_mode.clone(),
                     network: context.turn.network.clone(),
                     tty,
                     sandbox_permissions: effective_additional_permissions.sandbox_permissions,
@@ -275,7 +298,7 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                     chunk_id: generate_chunk_id(),
                     wall_time: output.duration,
                     raw_output: output_text.into_bytes(),
-                    truncation_policy: turn.truncation_policy,
+                    truncation_policy: turn.model_info.truncation_policy.into(),
                     max_output_tokens,
                     process_id: None,
                     exit_code: Some(output.exit_code),

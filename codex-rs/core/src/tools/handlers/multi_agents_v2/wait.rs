@@ -140,9 +140,9 @@ impl WaitAgentResult {
             WaitOutcome::MailboxActivity => format!(
                 "Wait completed for your mailbox as `{current_agent_name}`. This wait only observed an update delivered to your own mailbox; it did not wait for another agent's mailbox."
             ),
-            WaitOutcome::Steered => format!(
-                "Wait interrupted by new input for your mailbox as `{current_agent_name}`."
-            ),
+            WaitOutcome::Steered => {
+                format!("Wait interrupted by new input for your mailbox as `{current_agent_name}`.")
+            }
             WaitOutcome::TimedOut => format!(
                 "Wait timed out for your mailbox as `{current_agent_name}`. This wait only observes updates delivered to your own mailbox; it does not wait for `/root`'s child tasks unless you are `/root`."
             ),

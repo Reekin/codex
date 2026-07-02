@@ -491,40 +491,70 @@ impl AgentControl {
                 });
             }
         }
-        let mut inserted_child_usage_hint = false;
-        if preserve_reference_context_item
-            && multi_agent_version == MultiAgentVersion::V2
-            && let Some(subagent_usage_hint_text) =
-                config.multi_agent_v2.subagent_usage_hint_text.clone()
-            && let Some(subagent_usage_hint_message) =
-                crate::context_manager::updates::build_developer_update_item(vec![
-                    subagent_usage_hint_text,
-                ])
-        {
-            forked_rollout_items.insert(0, RolloutItem::ResponseItem(subagent_usage_hint_message));
-            inserted_child_usage_hint = true;
-        }
-        if preserve_reference_context_item
-            && let Some(start_hint_text) =
+        if preserve_reference_context_item {
+            let child_usage_hint_message = if multi_agent_version == MultiAgentVersion::V2 {
+                config
+                    .multi_agent_v2
+                    .subagent_usage_hint_text
+                    .clone()
+                    .and_then(|subagent_usage_hint_text| {
+                        crate::context_manager::updates::build_developer_update_item(vec![
+                            subagent_usage_hint_text,
+                        ])
+                    })
+            } else {
+                None
+            };
+            let start_hint_message =
                 crate::session::multi_agents::forked_history_start_hint_text(&session_source)
-            && let Some(start_hint_message) =
-                crate::context_manager::updates::build_developer_update_item(vec![start_hint_text])
-        {
-            let insertion_index = usize::from(inserted_child_usage_hint);
-            forked_rollout_items.insert(
-                insertion_index,
-                RolloutItem::ResponseItem(start_hint_message),
-            );
-        }
-        if preserve_reference_context_item
-            && let Some(boundary_hint_text) =
+                    .and_then(|start_hint_text| {
+                        crate::context_manager::updates::build_developer_update_item(vec![
+                            start_hint_text,
+                        ])
+                    });
+            let boundary_hint_message =
                 crate::session::multi_agents::forked_history_boundary_hint_text(&session_source)
-            && let Some(boundary_hint_message) =
-                crate::context_manager::updates::build_developer_update_item(vec![
-                    boundary_hint_text,
-                ])
-        {
-            forked_rollout_items.push(RolloutItem::ResponseItem(boundary_hint_message));
+                    .and_then(|boundary_hint_text| {
+                        crate::context_manager::updates::build_developer_update_item(vec![
+                            boundary_hint_text,
+                        ])
+                    });
+            let mut inserted_into_compacted_history = false;
+            for item in &mut forked_rollout_items {
+                if let RolloutItem::Compacted(compacted) = item
+                    && let Some(replacement_history) = compacted.replacement_history.as_mut()
+                {
+                    if let Some(boundary_hint_message) = boundary_hint_message.clone() {
+                        replacement_history.push(boundary_hint_message);
+                    }
+                    if let Some(start_hint_message) = start_hint_message.clone() {
+                        replacement_history.insert(0, start_hint_message);
+                    }
+                    if let Some(child_usage_hint_message) = child_usage_hint_message.clone() {
+                        replacement_history.insert(0, child_usage_hint_message);
+                    }
+                    inserted_into_compacted_history = true;
+                }
+            }
+            if !inserted_into_compacted_history {
+                let mut insertion_index = 0;
+                if let Some(child_usage_hint_message) = child_usage_hint_message {
+                    forked_rollout_items.insert(
+                        insertion_index,
+                        RolloutItem::ResponseItem(child_usage_hint_message),
+                    );
+                    insertion_index += 1;
+                }
+                if let Some(start_hint_message) = start_hint_message {
+                    forked_rollout_items.insert(
+                        insertion_index,
+                        RolloutItem::ResponseItem(start_hint_message),
+                    );
+                }
+                if let Some(boundary_hint_message) = boundary_hint_message {
+                    forked_rollout_items.push(RolloutItem::ResponseItem(boundary_hint_message));
+                }
+            }
         }
 
         state

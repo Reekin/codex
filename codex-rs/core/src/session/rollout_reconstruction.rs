@@ -385,6 +385,7 @@ impl Session {
         let mut active_history = ContextManager::new();
         let mut legacy_history = ContextManager::new();
         let mut saw_chat_tree_event = false;
+        let mut saw_current_node_change = false;
 
         for item in rollout_items {
             match item {
@@ -426,14 +427,14 @@ impl Session {
                     if let Some(active_node_id) = active_node_id.as_deref() {
                         active_history.record_items(
                             std::iter::once(response_item),
-                            turn_context.truncation_policy,
+                            turn_context.model_info.truncation_policy.into(),
                         );
                         history_snapshots
                             .insert(active_node_id.to_string(), active_history.clone());
                     } else if !saw_chat_tree_event {
                         legacy_history.record_items(
                             std::iter::once(response_item),
-                            turn_context.truncation_policy,
+                            turn_context.model_info.truncation_policy.into(),
                         );
                     }
                 }
@@ -516,6 +517,7 @@ impl Session {
                         );
                     }
                     saw_chat_tree_event = true;
+                    saw_current_node_change = true;
                 }
                 RolloutItem::EventMsg(EventMsg::TurnStarted(payload)) => {
                     active_turn_id = Some(payload.turn_id.clone());
@@ -560,7 +562,9 @@ impl Session {
                     active_node_id = None;
                     saw_chat_tree_event = !surviving_node_ids.is_empty();
                 }
-                RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => {}
+                RolloutItem::EventMsg(_)
+                | RolloutItem::SessionMeta(_)
+                | RolloutItem::InterAgentCommunication(_) => {}
             }
         }
 
@@ -580,6 +584,7 @@ impl Session {
             history_snapshots,
             current_history,
             current_reference_context_item,
+            current_node_was_explicitly_selected: saw_current_node_change,
         })
     }
 }

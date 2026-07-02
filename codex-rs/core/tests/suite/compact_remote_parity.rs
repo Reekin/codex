@@ -849,7 +849,8 @@ with Path(r"{log_path}").open("a", encoding="utf-8") as handle:
 }
 
 fn python_hook_command(script_path: &Path) -> String {
-    format!("python3 \"{}\"", script_path.display())
+    let python = if cfg!(windows) { "python" } else { "python3" };
+    format!("{python} \"{}\"", script_path.display())
 }
 
 fn hook_log_view(path: &Path) -> Result<Value> {

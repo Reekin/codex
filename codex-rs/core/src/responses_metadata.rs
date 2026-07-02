@@ -101,6 +101,7 @@ pub(crate) enum CodexResponsesRequestKind {
     Prewarm,
     Compaction(CompactionTurnMetadata),
     Memory,
+    ChatTreeSummary,
 }
 
 impl CodexResponsesRequestKind {
@@ -110,6 +111,7 @@ impl CodexResponsesRequestKind {
             CodexResponsesRequestKind::Prewarm => ("prewarm", None),
             CodexResponsesRequestKind::Compaction(metadata) => ("compaction", Some(metadata)),
             CodexResponsesRequestKind::Memory => ("memory", None),
+            CodexResponsesRequestKind::ChatTreeSummary => ("chat_tree_summary", None),
         }
     }
 

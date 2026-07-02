@@ -644,7 +644,6 @@ pub enum Op {
     /// Set the current chat-tree node for future turns.
     SetCurrentChatTreeNode {
         node_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<u64>,
     },
 

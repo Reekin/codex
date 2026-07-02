@@ -28,6 +28,25 @@ use tempfile::TempDir;
 use tokio::sync::oneshot;
 use wiremock::MockServer;
 
+const CHAT_TREE_SUMMARY_INSTRUCTIONS: &str =
+    "You generate a concise summary label for one completed assistant turn.";
+
+fn non_chat_tree_events(messages: &[EventMsg]) -> Vec<EventMsg> {
+    messages
+        .iter()
+        .filter(|event| {
+            !matches!(
+                event,
+                EventMsg::ChatTreeNodeStarted(_)
+                    | EventMsg::ChatTreeNodeFinalized(_)
+                    | EventMsg::ChatTreeNodeSummaryUpdated(_)
+                    | EventMsg::ChatTreeCurrentNodeChanged(_)
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 async fn resume_until_initial_messages(
     builder: &mut TestCodexBuilder,
     server: &MockServer,
@@ -44,10 +63,11 @@ async fn resume_until_initial_messages(
             .resume(server, Arc::clone(&home), rollout_path.clone())
             .await?;
         if let Some(initial_messages) = resumed.session_configured.initial_messages.as_ref() {
-            if predicate(initial_messages) {
+            let filtered_messages = non_chat_tree_events(initial_messages);
+            if predicate(&filtered_messages) {
                 return Ok(resumed);
             }
-            last_initial_messages = format!("{initial_messages:#?}");
+            last_initial_messages = format!("{filtered_messages:#?}");
         }
 
         if tokio::time::Instant::now() >= deadline {
@@ -90,13 +110,13 @@ async fn submit_turn_and_capture_chat_tree_node(
     .await;
     test.codex
         .submit(Op::UserInput {
-            environments: None,
             items: vec![UserInput::Text {
                 text: prompt.into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -158,13 +178,13 @@ async fn completed_chat_tree_turn_generates_llm_summary() -> Result<()> {
 
     test.codex
         .submit(Op::UserInput {
-            environments: None,
             items: vec![UserInput::Text {
                 text: "Build the frobnicator".into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -260,13 +280,13 @@ async fn cancelling_summary_before_completion_does_not_persist_update() -> Resul
 
     test.codex
         .submit(Op::UserInput {
-            environments: None,
             items: vec![UserInput::Text {
                 text: "Start a cancellable summary".into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -355,6 +375,7 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
         .session_configured
         .initial_messages
         .expect("expected initial messages to be present for resumed session");
+    let initial_messages = non_chat_tree_events(&initial_messages);
     match initial_messages.as_slice() {
         [
             EventMsg::TurnStarted(started),
@@ -456,13 +477,13 @@ async fn resume_chat_tree_branch_uses_current_node_history_for_next_request() ->
     resumed
         .codex
         .submit(Op::UserInput {
-            environments: None,
             items: vec![UserInput::Text {
                 text: "chat tree prompt after resume".into(),
                 text_elements: Vec::new(),
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            additional_context: Default::default(),
             thread_settings: Default::default(),
         })
         .await?;
@@ -550,6 +571,7 @@ async fn resume_includes_initial_messages_from_reasoning_events() -> Result<()> 
         .session_configured
         .initial_messages
         .expect("expected initial messages to be present for resumed session");
+    let initial_messages = non_chat_tree_events(&initial_messages);
     match initial_messages.as_slice() {
         [
             EventMsg::TurnStarted(started),
@@ -593,12 +615,22 @@ async fn resume_switches_models_preserves_base_instructions() -> Result<()> {
         .clone()
         .expect("rollout path");
 
-    let initial_sse = sse(vec![
-        ev_response_created("resp-initial"),
-        ev_assistant_message("msg-1", "Completed first turn"),
-        ev_completed("resp-initial"),
-    ]);
-    let initial_mock = mount_sse_once(&server, initial_sse).await;
+    let initial_mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-initial"),
+                ev_assistant_message("msg-1", "Completed first turn"),
+                ev_completed("resp-initial"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-initial-summary"),
+                ev_assistant_message("msg-initial-summary", "Initial summary"),
+                ev_completed("resp-initial-summary"),
+            ]),
+        ],
+    )
+    .await;
 
     codex
         .submit(Op::UserInput {
@@ -613,8 +645,17 @@ async fn resume_switches_models_preserves_base_instructions() -> Result<()> {
         })
         .await?;
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    wait_for_event(&codex, |event| {
+        matches!(event, EventMsg::ChatTreeNodeSummaryUpdated(_))
+    })
+    .await;
 
-    let initial_body = initial_mock.single_request().body_json();
+    let initial_requests = initial_mock.requests();
+    let initial_main_request = initial_requests
+        .iter()
+        .find(|request| request.instructions_text() != CHAT_TREE_SUMMARY_INSTRUCTIONS)
+        .expect("initial main request");
+    let initial_body = initial_main_request.body_json();
     let initial_instructions = initial_body
         .get("instructions")
         .and_then(|v| v.as_str())
@@ -630,9 +671,19 @@ async fn resume_switches_models_preserves_base_instructions() -> Result<()> {
                 ev_completed("resp-resume-1"),
             ]),
             sse(vec![
+                ev_response_created("resp-resume-1-summary"),
+                ev_assistant_message("msg-2-summary", "First resumed summary"),
+                ev_completed("resp-resume-1-summary"),
+            ]),
+            sse(vec![
                 ev_response_created("resp-resume-2"),
                 ev_assistant_message("msg-3", "Second resumed turn"),
                 ev_completed("resp-resume-2"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-resume-2-summary"),
+                ev_assistant_message("msg-3-summary", "Second resumed summary"),
+                ev_completed("resp-resume-2-summary"),
             ]),
         ],
     )
@@ -678,10 +729,23 @@ async fn resume_switches_models_preserves_base_instructions() -> Result<()> {
     })
     .await;
 
-    let requests = resumed_mock.requests();
-    assert_eq!(requests.len(), 2, "expected two resumed requests");
+    wait_for_event(&resumed.codex, |event| {
+        matches!(event, EventMsg::ChatTreeNodeSummaryUpdated(_))
+    })
+    .await;
 
-    let first_resumed = &requests[0];
+    let requests = resumed_mock.requests();
+    let resumed_main_requests = requests
+        .iter()
+        .filter(|request| request.instructions_text() != CHAT_TREE_SUMMARY_INSTRUCTIONS)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resumed_main_requests.len(),
+        2,
+        "expected two resumed main requests"
+    );
+
+    let first_resumed = resumed_main_requests[0];
     assert_eq!(first_resumed.instructions_text(), initial_instructions);
     let first_developer_texts = first_resumed.message_input_texts("developer");
     let first_model_switch_count = first_developer_texts
@@ -693,7 +757,7 @@ async fn resume_switches_models_preserves_base_instructions() -> Result<()> {
         "expected model switch message on first post-resume turn"
     );
 
-    let second_resumed = &requests[1];
+    let second_resumed = resumed_main_requests[1];
     assert_eq!(second_resumed.instructions_text(), initial_instructions);
     let second_developer_texts = second_resumed.message_input_texts("developer");
     let second_model_switch_count = second_developer_texts

@@ -340,7 +340,16 @@ impl Session {
             .turn_metadata_state
             .set_turn_started_at_unix_ms(turn_started_at_unix_ms);
         let token_usage_at_turn_start = self.total_token_usage().await.unwrap_or_default();
-        self.start_chat_tree_node_for_turn(turn_context.as_ref(), &input)
+        let user_input = input
+            .iter()
+            .filter_map(|input| match input {
+                TurnInput::UserInput { content, .. } => Some(content.as_slice()),
+                TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => None,
+            })
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.start_chat_tree_node_for_turn(turn_context.as_ref(), &user_input)
             .await;
 
         let cancellation_token = CancellationToken::new();
@@ -753,7 +762,8 @@ impl Session {
                 profile: turn_context.turn_timing_state.complete_profile(),
             });
         let summary_job = if let Some(reason) = abort_reason.as_ref() {
-            self.abort_chat_tree_node(turn_context.as_ref(), reason).await;
+            self.abort_chat_tree_node(turn_context.as_ref(), reason)
+                .await;
             None
         } else {
             Some(

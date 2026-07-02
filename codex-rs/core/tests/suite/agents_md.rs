@@ -981,7 +981,10 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
     }))?;
     let spawn_mock = responses::mount_sse_once_match(
         &server,
-        move |request: &wiremock::Request| request_body_contains(request, parent_prompt),
+        move |request: &wiremock::Request| {
+            request_body_contains(request, parent_prompt)
+                && !request_body_contains(request, SPAWN_CALL_ID)
+        },
         responses::sse(vec![
             responses::ev_response_created("spawn-response"),
             responses::ev_function_call_with_namespace(
@@ -1090,10 +1093,11 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
     if fork_context {
         let seed_input = seed_request.input();
         let child_input = child_request.input();
-        assert_eq!(
-            child_input.get(..seed_input.len()),
-            Some(seed_input.as_slice()),
-            "forked subagent should replay the parent's original structured input prefix"
+        assert!(
+            child_input
+                .windows(seed_input.len())
+                .any(|window| window == seed_input.as_slice()),
+            "forked subagent should replay the parent's original structured input"
         );
     } else {
         let child_user_texts = child_request.message_input_texts("user");

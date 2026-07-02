@@ -484,28 +484,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
     }
 }
 
-fn command_with_optional_shell_snapshot(
-    base_command: &[String],
-    shell_type: Option<&ShellType>,
-    environment_is_remote: bool,
-    session_shell: &crate::shell::Shell,
-    cwd: &AbsolutePathBuf,
-    explicit_env_overrides: &HashMap<String, String>,
-    env: &HashMap<String, String>,
-) -> Vec<String> {
-    if environment_is_remote || shell_type.is_none() {
-        base_command.to_vec()
-    } else {
-        maybe_wrap_shell_lc_with_snapshot(
-            base_command,
-            session_shell,
-            cwd,
-            explicit_env_overrides,
-            env,
-        )
-    }
-}
-
+#[cfg(test)]
 fn maybe_prefix_powershell_script_with_utf8_for_shell_type(
     command: Vec<String>,
     shell_type: Option<ShellType>,
@@ -522,8 +501,6 @@ mod tests {
     use super::*;
     use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
     use crate::session::tests::make_session_and_context;
-    use crate::shell::Shell;
-    use crate::shell_snapshot::ShellSnapshot;
     use crate::tools::hook_names::HookToolName;
     use crate::tools::sandboxing::ToolRuntime;
     use codex_exec_server::Environment;
@@ -537,26 +514,25 @@ mod tests {
     use codex_tools::ZshForkConfig;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use codex_utils_path_uri::PathUri;
-    use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::tempdir;
-    use tokio::sync::watch;
 
     struct StaticReloader;
 
-    #[async_trait::async_trait]
     impl ConfigReloader for StaticReloader {
         fn source_label(&self) -> String {
             "test config state".to_string()
         }
 
-        async fn maybe_reload(&self) -> anyhow::Result<Option<ConfigState>> {
-            Ok(None)
+        fn maybe_reload(
+            &self,
+        ) -> codex_network_proxy::ConfigReloaderFuture<'_, Option<ConfigState>> {
+            Box::pin(async { Ok(None) })
         }
 
-        async fn reload_now(&self) -> anyhow::Result<ConfigState> {
-            Err(anyhow::anyhow!("force reload is not supported in tests"))
+        fn reload_now(&self) -> codex_network_proxy::ConfigReloaderFuture<'_, ConfigState> {
+            Box::pin(async { Err(anyhow::anyhow!("force reload is not supported in tests")) })
         }
     }
 
@@ -625,45 +601,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shell_type_none_skips_shell_snapshot_wrapping() {
-        let cwd_dir = tempdir().expect("create cwd temp dir");
-        let snapshot_dir = tempdir().expect("create snapshot temp dir");
-        let snapshot_path = snapshot_dir.path().join("snapshot.sh");
-        std::fs::write(&snapshot_path, "# Snapshot file\n").expect("write snapshot");
-        let cwd =
-            AbsolutePathBuf::try_from(cwd_dir.path().to_path_buf()).expect("absolute temp dir");
-        let snapshot_path =
-            AbsolutePathBuf::try_from(snapshot_path).expect("absolute snapshot path");
-        let (_tx, shell_snapshot) = watch::channel(Some(Arc::new(ShellSnapshot {
-            path: snapshot_path,
-            cwd: cwd.clone(),
-        })));
-        let session_shell = Shell {
-            shell_type: ShellType::Zsh,
-            shell_path: PathBuf::from("/bin/zsh"),
-            shell_snapshot,
-        };
-        let command = vec![
-            "printf".to_string(),
-            "%s".to_string(),
-            "$HOME | cat".to_string(),
-        ];
-
-        assert_eq!(
-            command_with_optional_shell_snapshot(
-                &command,
-                None,
-                /*environment_is_remote*/ false,
-                &session_shell,
-                &cwd,
-                &HashMap::new(),
-                &HashMap::new(),
-            ),
-            command
-        );
-    }
-
     #[tokio::test]
     async fn exec_argv_permission_request_uses_exec_argv_hook_identity_and_input() {
         let cwd_dir = tempdir().expect("create cwd temp dir");
@@ -688,9 +625,9 @@ mod tests {
             shell_type: None,
             hook_metadata,
             process_id: 1002,
-            cwd: cwd.clone(),
-            sandbox_cwd: cwd,
-            environment: Arc::new(Environment::default_for_tests()),
+            cwd: cwd.clone().into(),
+            sandbox_cwd: cwd.clone().into(),
+            turn_environment: test_turn_environment(cwd.into()),
             env: HashMap::new(),
             exec_server_env_config: None,
             explicit_env_overrides: HashMap::new(),
@@ -749,9 +686,9 @@ mod tests {
             shell_type: None,
             hook_metadata,
             process_id: 1003,
-            cwd: cwd.clone(),
-            sandbox_cwd: cwd,
-            environment: Arc::new(Environment::default_for_tests()),
+            cwd: cwd.clone().into(),
+            sandbox_cwd: cwd.clone().into(),
+            turn_environment: test_turn_environment(cwd.into()),
             env: HashMap::new(),
             exec_server_env_config: None,
             explicit_env_overrides: HashMap::new(),
@@ -935,8 +872,8 @@ mod tests {
             .expect("current dir is absolute");
         UnifiedExecRequest {
             command: vec!["zsh".to_string(), "-c".to_string(), "echo hi".to_string()],
-            shell_type: ShellType::Zsh,
-            hook_command: "echo hi".to_string(),
+            shell_type: Some(ShellType::Zsh),
+            hook_metadata: UnifiedExecHookMetadata::bash("echo hi".to_string()),
             process_id: 1000,
             cwd: cwd.clone().into(),
             sandbox_cwd: cwd.clone().into(),

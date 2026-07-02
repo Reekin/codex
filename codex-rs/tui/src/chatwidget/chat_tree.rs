@@ -295,3 +295,62 @@ impl Renderable for ChatTreeView {
         rows_height.saturating_add(5)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_app_server_protocol::ChatTreeNode;
+    use codex_app_server_protocol::ChatTreeNodeStatus;
+    use tokio::sync::mpsc::unbounded_channel;
+
+    fn projection() -> ChatTreeProjection {
+        ChatTreeProjection {
+            version: 1,
+            revision: 7,
+            current_node_id: Some("node-a".to_string()),
+            visible_node_ids: vec!["node-a".to_string(), "node-b".to_string()],
+            visible_turn_ids: vec!["turn-a".to_string()],
+            nodes: vec![
+                ChatTreeNode {
+                    node_id: "node-a".to_string(),
+                    parent_node_id: None,
+                    turn_id: Some("turn-a".to_string()),
+                    order: 0,
+                    status: ChatTreeNodeStatus::Completed,
+                    summary: Some("Build the root implementation".to_string()),
+                },
+                ChatTreeNode {
+                    node_id: "node-b".to_string(),
+                    parent_node_id: Some("node-a".to_string()),
+                    turn_id: Some("turn-b".to_string()),
+                    order: 1,
+                    status: ChatTreeNodeStatus::Completed,
+                    summary: Some("Try the alternate branch".to_string()),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn accepting_selected_row_sends_set_current_chat_tree_node() {
+        let (tx, mut rx) = unbounded_channel();
+        let mut state = ChatTreeUiState::default();
+        state.set_projection(projection());
+
+        let mut view = state.view(AppEventSender::new(tx)).expect("chat tree view");
+        view.handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match rx.try_recv().expect("set current event") {
+            AppEvent::CodexOp(AppCommand::SetCurrentChatTreeNode {
+                node_id,
+                expected_revision,
+            }) => {
+                assert_eq!(node_id, "node-b");
+                assert_eq!(expected_revision, Some(7));
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
+        assert_eq!(view.completion(), Some(ViewCompletion::Accepted));
+    }
+}

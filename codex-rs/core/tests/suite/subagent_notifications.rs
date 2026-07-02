@@ -124,6 +124,7 @@ fn write_subagent_lifecycle_hooks(
     stop_prompts: &[&str],
     subagent_stop_matcher: &str,
 ) -> Result<()> {
+    let python = if cfg!(windows) { "python" } else { "python3" };
     let session_start_script_path = home.join("session_start_hook.py");
     let session_start_log_path = home.join("session_start_hook_log.jsonl");
     let session_start_script = format!(
@@ -218,36 +219,36 @@ print(json.dumps({{"systemMessage": "root stop complete"}}))
     let hooks = serde_json::json!({
         "hooks": {
             "SessionStart": [{
-                "matcher": "startup",
-                "hooks": [{
-                    "type": "command",
-                    "command": format!("python3 {}", session_start_script_path.display()),
+                    "matcher": "startup",
+                    "hooks": [{
+                        "type": "command",
+                    "command": format!("{python} {}", session_start_script_path.display()),
                 }]
             }],
             "SubagentStart": [{
                 "matcher": "worker",
                 "hooks": [{
                     "type": "command",
-                    "command": format!("python3 {}", start_script_path.display()),
+                    "command": format!("{python} {}", start_script_path.display()),
                 }]
             }],
             "UserPromptSubmit": [{
                 "hooks": [{
                     "type": "command",
-                    "command": format!("python3 {}", user_prompt_submit_script_path.display()),
+                    "command": format!("{python} {}", user_prompt_submit_script_path.display()),
                 }]
             }],
             "SubagentStop": [{
                 "matcher": subagent_stop_matcher,
                 "hooks": [{
                     "type": "command",
-                    "command": format!("python3 {}", subagent_stop_script_path.display()),
+                    "command": format!("{python} {}", subagent_stop_script_path.display()),
                 }]
             }],
             "Stop": [{
                 "hooks": [{
                     "type": "command",
-                    "command": format!("python3 {}", stop_script_path.display()),
+                    "command": format!("{python} {}", stop_script_path.display()),
                 }]
             }]
         }

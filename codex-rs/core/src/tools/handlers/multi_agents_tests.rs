@@ -2998,7 +2998,7 @@ async fn wait_agent_rejects_empty_targets() {
 #[tokio::test]
 async fn wait_agent_rejects_current_agent_target() {
     let (session, turn) = make_session_and_context().await;
-    let current_thread_id = session.conversation_id;
+    let current_thread_id = session.thread_id();
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),

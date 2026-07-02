@@ -339,7 +339,8 @@ async fn steer_interrupts_wait_agent_and_is_sent_in_follow_up_request() {
     assert_eq!(
         serde_json::from_str::<Value>(wait_output).expect("parse wait_agent output"),
         json!({
-            "message": "Wait interrupted by new input.",
+            "current_agent_name": "/root",
+            "message": "Wait interrupted by new input for your mailbox as `/root`.",
             "timed_out": false,
         })
     );

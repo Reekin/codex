@@ -279,6 +279,7 @@ pub(crate) struct ReplayedChatTree {
     pub(crate) history_snapshots: HashMap<String, ContextManager>,
     pub(crate) current_history: Option<ContextManager>,
     pub(crate) current_reference_context_item: Option<TurnContextItem>,
+    pub(crate) current_node_was_explicitly_selected: bool,
 }
 
 #[cfg(test)]

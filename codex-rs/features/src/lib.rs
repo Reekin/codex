@@ -237,6 +237,8 @@ pub enum Feature {
     PreventIdleSleep,
     /// Enable automatic context compaction before or during a turn.
     AutoCompaction,
+    /// Generate chat tree node summaries with a background model request.
+    ChatTreeSummary,
     /// Enable remote compaction v2 over the normal Responses API.
     RemoteCompactionV2,
     /// Use Agent Identity for ChatGPT-authenticated sessions.
@@ -1350,6 +1352,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::AutoCompaction,
         key: "auto_compaction",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::ChatTreeSummary,
+        key: "chat_tree_summary",
         stage: Stage::Stable,
         default_enabled: true,
     },

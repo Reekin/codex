@@ -1,6 +1,7 @@
 use super::*;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::tests::make_session_and_context;
+use crate::session::turn_context::TurnEnvironment;
 use crate::tools::runtimes::unified_exec::UnifiedExecRequest;
 use crate::tools::runtimes::unified_exec::UnifiedExecRuntime;
 use crate::tools::sandboxing::ExecApprovalRequirement;
@@ -8,14 +9,17 @@ use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::unified_exec::UnifiedExecHookMetadata;
+use crate::unified_exec::clamp_yield_time;
 use codex_exec_server::Environment;
+use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::PermissionProfile;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxType;
 use codex_tools::ToolName;
 use codex_tools::UnifiedExecShellMode;
-use crate::unified_exec::clamp_yield_time;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -212,6 +216,7 @@ async fn shell_type_none_runtime_executes_literal_argv() -> anyhow::Result<()> {
     let turn = Arc::new(turn);
     let cwd_dir = tempfile::tempdir().expect("create cwd temp dir");
     let cwd = AbsolutePathBuf::try_from(cwd_dir.path().to_path_buf()).expect("absolute temp dir");
+    let cwd_uri: PathUri = cwd.clone().into();
     let literal = "$HOME | cat";
     let command = if cfg!(windows) {
         vec![
@@ -233,9 +238,14 @@ async fn shell_type_none_runtime_executes_literal_argv() -> anyhow::Result<()> {
             vec!["printf".to_string(), "%s".to_string(), literal.to_string()],
         ),
         process_id: 1001,
-        cwd: cwd.clone(),
-        sandbox_cwd: cwd.clone(),
-        environment: Arc::new(Environment::default_for_tests()),
+        cwd: cwd_uri.clone(),
+        sandbox_cwd: cwd_uri.clone(),
+        turn_environment: TurnEnvironment::new(
+            LOCAL_ENVIRONMENT_ID.to_string(),
+            Arc::new(Environment::default_for_tests()),
+            cwd_uri.clone(),
+            /*shell*/ None,
+        ),
         env: std::env::vars().collect(),
         exec_server_env_config: None,
         explicit_env_overrides: HashMap::new(),
@@ -253,12 +263,16 @@ async fn shell_type_none_runtime_executes_literal_argv() -> anyhow::Result<()> {
     };
     let permissions = PermissionProfile::Disabled;
     let sandbox_manager = SandboxManager::new();
+    let workspace_roots = Vec::new();
     let attempt = SandboxAttempt {
         sandbox: SandboxType::None,
+        sandbox_requested: false,
         permissions: &permissions,
+        exec_server_permissions: &permissions,
         enforce_managed_network: false,
         manager: &sandbox_manager,
-        sandbox_cwd: &cwd,
+        sandbox_cwd: &cwd_uri,
+        workspace_roots: &workspace_roots,
         codex_linux_sandbox_exe: None,
         use_legacy_landlock: false,
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
@@ -287,6 +301,14 @@ async fn shell_type_none_runtime_executes_literal_argv() -> anyhow::Result<()> {
         Instant::now() + Duration::from_millis(1_000),
     )
     .await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while process.exit_code().is_none() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("process should exit before the assertion");
 
     assert_eq!(process.exit_code(), Some(0));
     assert_eq!(String::from_utf8_lossy(&output), literal);

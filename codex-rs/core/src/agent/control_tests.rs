@@ -947,10 +947,15 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .await
         .expect("child thread should be registered");
     assert_ne!(child_thread_id, parent_thread_id);
-    assert_eq!(
-        child_thread.config_snapshot().await.session_source,
-        child_session_source
-    );
+    let actual_child_session_source = child_thread.config_snapshot().await.session_source;
+    assert!(matches!(
+        actual_child_session_source,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: actual_parent_thread_id,
+            depth: 1,
+            ..
+        }) if actual_parent_thread_id == parent_thread_id
+    ));
     let history = child_thread.codex.session.clone_history().await;
     let mut expected_final_answer =
         assistant_message("parent final answer", Some(MessagePhase::FinalAnswer));
@@ -970,7 +975,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
                 text: crate::session::multi_agents::forked_history_start_hint_text(
-                    &child_session_source,
+                    &actual_child_session_source,
                 )
                 .expect("thread-spawn child should have a fork start identity hint"),
             }],
@@ -984,7 +989,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
                 text: crate::session::multi_agents::forked_history_boundary_hint_text(
-                    &child_session_source,
+                    &actual_child_session_source,
                 )
                 .expect("thread-spawn child should have a fork boundary identity hint"),
             }],

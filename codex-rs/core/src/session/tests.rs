@@ -9041,13 +9041,6 @@ async fn abort_regular_task_emits_marker_before_turn_aborted() {
 
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 
-    // Interrupts surface the model-visible `<turn_aborted>` marker before the abort event.
-    let marker_evt = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .expect("timeout waiting for marker event")
-        .expect("event");
-    assert!(matches!(marker_evt.msg, EventMsg::RawResponseItem(_)));
-
     let started = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
         .expect("timeout waiting for chat tree node started event")
@@ -9057,6 +9050,13 @@ async fn abort_regular_task_emits_marker_before_turn_aborted() {
         EventMsg::ChatTreeNodeStarted(event)
             if event.turn_id.as_deref() == Some(tc.sub_id.as_str())
     ));
+
+    // Interrupts surface the model-visible `<turn_aborted>` marker before the abort event.
+    let marker_evt = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout waiting for marker event")
+        .expect("event");
+    assert!(matches!(marker_evt.msg, EventMsg::RawResponseItem(_)));
 
     let finalized = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
@@ -9101,9 +9101,12 @@ async fn internal_session_task_does_not_enter_chat_tree_lifecycle() {
         codex_protocol::protocol::InternalSessionSource::MemoryConsolidation,
     );
     let projection_before = sess.chat_tree_projection().await;
-    let input = vec![UserInput::Text {
-        text: "memory consolidation work".to_string(),
-        text_elements: Vec::new(),
+    let input = vec![TurnInput::UserInput {
+        content: vec![UserInput::Text {
+            text: "memory consolidation work".to_string(),
+            text_elements: Vec::new(),
+        }],
+        client_id: None,
     }];
     sess.spawn_task(
         Arc::clone(&tc),
@@ -9167,13 +9170,6 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
 
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 
-    // Gracefully cancelled tasks surface the model-visible marker before the abort event too.
-    let marker_evt = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
-        .await
-        .expect("timeout waiting for marker event")
-        .expect("event");
-    assert!(matches!(marker_evt.msg, EventMsg::RawResponseItem(_)));
-
     let started = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
         .expect("timeout waiting for chat tree node started event")
@@ -9183,6 +9179,13 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
         EventMsg::ChatTreeNodeStarted(event)
             if event.turn_id.as_deref() == Some(tc.sub_id.as_str())
     ));
+
+    // Gracefully cancelled tasks surface the model-visible marker before the abort event too.
+    let marker_evt = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout waiting for marker event")
+        .expect("event");
+    assert!(matches!(marker_evt.msg, EventMsg::RawResponseItem(_)));
 
     let finalized = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
