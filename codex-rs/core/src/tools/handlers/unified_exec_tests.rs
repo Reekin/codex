@@ -285,6 +285,42 @@ async fn exec_argv_pre_tool_use_payload_uses_argv_and_display_command() {
     );
 }
 
+#[test]
+fn windows_pathext_candidates_find_cmd_shim() -> anyhow::Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let shim = temp_dir.path().join("npx.CMD");
+    std::fs::write(&shim, "")?;
+
+    assert_eq!(
+        exec_argv::windows_pathext_candidates(
+            "npx",
+            temp_dir.path(),
+            vec![temp_dir.path().to_path_buf()],
+            ".COM;.EXE;.BAT;.CMD",
+        ),
+        vec![shim]
+    );
+    Ok(())
+}
+
+#[test]
+fn windows_pathext_candidates_skip_program_with_extension() -> anyhow::Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let shim = temp_dir.path().join("npx.CMD");
+    std::fs::write(&shim, "")?;
+
+    assert_eq!(
+        exec_argv::windows_pathext_candidates(
+            "npx.cmd",
+            temp_dir.path(),
+            vec![temp_dir.path().to_path_buf()],
+            ".COM;.EXE;.BAT;.CMD",
+        ),
+        Vec::<std::path::PathBuf>::new()
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn exec_argv_hook_rewrite_requires_argv_array() {
     let payload = ToolPayload::Function {

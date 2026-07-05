@@ -1,3 +1,6 @@
+use std::path::Path;
+#[cfg(any(windows, test))]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::function_tool::FunctionCallError;
@@ -261,6 +264,7 @@ impl ExecArgvHandler {
         }
 
         emit_unified_exec_tty_metric(&turn.session_telemetry, tty);
+        let argv0 = command[0].clone();
         match manager
             .exec_command(
                 ExecCommandRequest {
@@ -308,8 +312,11 @@ impl ExecArgvHandler {
                     hook_input: Some(hook_metadata.tool_input),
                 }))
             }
-            Err(err) => Err(FunctionCallError::RespondToModel(format!(
-                "exec_argv failed for `{hook_command}`: {err:?}"
+            Err(err) => Err(FunctionCallError::RespondToModel(format_exec_argv_error(
+                &hook_command,
+                &argv0,
+                &native_cwd,
+                &err,
             ))),
         }
     }
@@ -365,6 +372,125 @@ impl CoreToolRuntime for ExecArgvHandler {
 
 fn exec_argv_hook_name() -> HookToolName {
     HookToolName::new("exec_argv")
+}
+
+fn format_exec_argv_error(
+    hook_command: &str,
+    argv0: &str,
+    cwd: &Path,
+    err: &UnifiedExecError,
+) -> String {
+    let mut message = format!("exec_argv failed for `{hook_command}`: {err:?}");
+    if let UnifiedExecError::CreateProcess {
+        message: create_process_message,
+    } = err
+        && create_process_error_may_be_program_lookup(create_process_message)
+        && let Some(hint) = windows_pathext_resolution_hint(argv0, cwd)
+    {
+        message.push_str("\n\n");
+        message.push_str(&hint);
+    }
+    message
+}
+
+fn create_process_error_may_be_program_lookup(message: &str) -> bool {
+    let lowercase = message.to_ascii_lowercase();
+    lowercase.contains("program not found")
+        || lowercase.contains("not found")
+        || lowercase.contains("os error 2")
+        || message.contains("找不到指定的文件")
+}
+
+#[cfg(windows)]
+fn windows_pathext_resolution_hint(program: &str, cwd: &Path) -> Option<String> {
+    let path_entries = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let candidates = windows_pathext_candidates(program, cwd, path_entries, &pathext);
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let formatted_candidates = candidates
+        .iter()
+        .take(5)
+        .map(|path| format!("`{}`", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let first = candidates[0].display();
+    Some(format!(
+        "Windows note: `exec_argv` does not ask a shell to resolve PATHEXT entries for argv[0]. Found candidate command shim(s): {formatted_candidates}. Try using the full path with its extension, for example `{first}` as argv[0]."
+    ))
+}
+
+#[cfg(not(windows))]
+fn windows_pathext_resolution_hint(_program: &str, _cwd: &Path) -> Option<String> {
+    None
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn windows_pathext_candidates(
+    program: &str,
+    cwd: &Path,
+    path_entries: impl IntoIterator<Item = PathBuf>,
+    pathext: &str,
+) -> Vec<PathBuf> {
+    let program = program.trim();
+    if program.is_empty() {
+        return Vec::new();
+    }
+
+    let program_path = Path::new(program);
+    if program_path.extension().is_some() {
+        return Vec::new();
+    }
+
+    let extensions = pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| extension.starts_with('.') && extension.len() > 1)
+        .collect::<Vec<_>>();
+    if extensions.is_empty() {
+        return Vec::new();
+    }
+
+    let has_path_separator = program.contains('\\') || program.contains('/');
+    let bases = if has_path_separator {
+        let base = if program_path.is_absolute() {
+            program_path.to_path_buf()
+        } else {
+            cwd.join(program_path)
+        };
+        vec![base]
+    } else {
+        path_entries
+            .into_iter()
+            .map(|path_entry| path_entry.join(program))
+            .collect::<Vec<_>>()
+    };
+
+    let mut candidates = Vec::new();
+    for base in bases {
+        for extension in &extensions {
+            let Some(candidate) = append_extension_to_file_name(&base, extension) else {
+                continue;
+            };
+            if candidate.is_file() && !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    candidates
+}
+
+#[cfg(any(windows, test))]
+fn append_extension_to_file_name(path: &Path, extension: &str) -> Option<PathBuf> {
+    let mut file_name = path.file_name()?.to_os_string();
+    file_name.push(extension);
+    let mut candidate = path.to_path_buf();
+    candidate.set_file_name(file_name);
+    Some(candidate)
 }
 
 fn validate_argv(argv: Vec<String>) -> Result<Vec<String>, FunctionCallError> {

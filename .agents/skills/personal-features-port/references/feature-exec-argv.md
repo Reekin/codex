@@ -23,12 +23,14 @@ The stable contract is:
 - Hook rewrites may update execution only through `updatedInput.argv`.
 - Hook rewrites that only provide `updatedInput.command` fail instead of being parsed back into argv.
 - `exec_command` remains available for shell syntax and keeps the historical `Bash` hook identity.
+- On Windows, failed direct process creation for a bare `argv[0]` should diagnose likely `PATHEXT` shim candidates such as `.CMD`, `.BAT`, or `.EXE` without changing the executed argv.
 
 Non-goals:
 
 - Do not replace `exec_command`.
 - Do not emulate shell pipelines, redirects, globbing, variable expansion, shell builtins, or shell control flow.
 - Do not auto-wrap `.cmd` or `.bat` files with `cmd /c`.
+- Do not silently resolve bare Windows command names to `PATHEXT` matches as execution behavior; diagnostics may suggest exact executable paths, but argv remains authoritative.
 - Do not add per-call environment overrides as part of this feature.
 - Do not change app-server `command/exec` or exec-server protocols unless upstream has already moved the execution contract there.
 
@@ -46,6 +48,7 @@ This is a small tool/runtime feature. It does not need a separate stable-core cr
 | Managed network | Deferred network approvals preserve the original PermissionRequest payload and only append `network-access ...` as `description`. | `NetworkApprovalSpec`, active network approval registration, blocked-request approval handling. |
 | Session continuation | Sessions started by `exec_argv` keep original call id, hook identity, and argv through `write_stdin` completion. | Process/session state and completion output construction. |
 | Exposure | `exec_argv` appears with unified exec and disappears when no environment-backed tools are available. | Tool family/spec-plan/prompt caching expectations. |
+| Windows command discovery diagnostics | Process creation failures for bare `argv[0]` report `PATHEXT` candidates when present, while preserving argv-native execution semantics. | Handler error formatting and Windows path/PATHEXT lookup helper. |
 
 The preferred stable metadata shape is a single value equivalent to:
 
@@ -98,8 +101,9 @@ Reference source priority:
 12. Ensure managed-network deferred PermissionRequest preserves the originating payload and only appends the network-access description.
 13. Ensure one-shot PostToolUse sees `tool_name: "exec_argv"` and `{ command, argv }`.
 14. Ensure `write_stdin` completion for `exec_argv` sessions uses the original `exec_argv` identity and argv metadata.
-15. Update prompt caching, tool exposure, and spec-plan expectations.
-16. Keep downstream packaging and release automation out of the feature branch; carry it on the integration branch.
+15. Ensure Windows `program not found` errors for bare `argv[0]` suggest exact `PATHEXT` candidates when candidates exist.
+16. Update prompt caching, tool exposure, and spec-plan expectations.
+17. Keep downstream packaging and release automation out of the feature branch; carry it on the integration branch.
 
 ## 5. Lessons And Pitfalls
 
@@ -109,6 +113,7 @@ Reference source priority:
 - Managed-network approval is deferred. Metadata must be registered before the blocked request happens.
 - `write_stdin` completion is a separate output path. Session state must carry original hook metadata.
 - PowerShell UTF-8 script prefixing is shell-derived behavior. It must not mutate argv-native requests.
+- Windows `.cmd` / `.bat` / `.ps1` shims are a common source of false "not installed" diagnoses. Keep execution exact, but make errors point to discovered `PATHEXT` candidates so the model can retry with an explicit path.
 - On Windows, several hook/tool suite tests may be cfg-gated. Use focused lower-level tests locally and run non-Windows E2E tests on an appropriate runner when available.
 
 ## 6. Acceptance Standard
@@ -127,12 +132,14 @@ P0 gates:
 | Managed-network PermissionRequest preserves argv | Test | `cargo test -p codex-core exec_argv_network_approval_spec_uses_exec_argv_permission_payload`; non-Windows hooks suite | Payload only gains network-access description. |
 | PostToolUse preserves `exec_argv` metadata | Test | `cargo test -p codex-core exec_argv_`; non-Windows hooks suite | Includes one-shot output. |
 | `write_stdin` completion preserves `exec_argv` metadata | Test | `cargo test -p codex-core exec_argv_`; non-Windows hooks suite | Covers long-running sessions. |
+| Windows `PATHEXT` diagnostics suggest explicit shim paths | Test | `cargo test -p codex-core windows_pathext_candidates`; Windows smoke if available | Does not auto-resolve or execute the candidate. |
 | Prompt caching and tool exposure expectations are current | Test | `cargo test -p codex-core --test all prompt_tools_are_consistent_across_requests` | Update expected tools. |
 
 Focused validation commands:
 
 ```bash
 cargo test -p codex-core exec_argv_
+cargo test -p codex-core windows_pathext_candidates
 cargo test -p codex-core shell_type_none_
 cargo test -p codex-core exec_argv_network_approval_spec_uses_exec_argv_permission_payload
 cargo test -p codex-core tools::network_approval::tests
