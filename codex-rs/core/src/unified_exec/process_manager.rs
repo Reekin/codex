@@ -59,7 +59,6 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::SandboxErr;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_sandboxing::SandboxCommand;
-use codex_tools::ToolName;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_path_uri::PathUri;
 
@@ -1140,8 +1139,7 @@ impl UnifiedExecProcessManager {
             .await;
         let req = UnifiedExecToolRequest {
             command: request.command.clone(),
-            shell_type: request.shell_type.clone(),
-            hook_command: request.hook_command.clone(),
+            shell_type: request.shell_type,
             hook_metadata: request.hook_metadata.clone(),
             process_id: request.process_id,
             cwd,

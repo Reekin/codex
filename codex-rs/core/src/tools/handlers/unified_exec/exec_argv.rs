@@ -1,3 +1,6 @@
+use std::path::Path;
+#[cfg(any(windows, test))]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::function_tool::FunctionCallError;
@@ -28,6 +31,7 @@ use codex_features::Feature;
 use codex_tools::ToolName;
 use codex_tools::ToolSpec;
 use codex_utils_output_truncation::approx_token_count;
+use codex_utils_path_uri::PathConvention;
 use serde_json::Value;
 
 use super::ExecArgvArgs;
@@ -64,27 +68,32 @@ impl ExecArgvHandler {
     }
 }
 
-#[async_trait::async_trait]
 impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
     fn tool_name(&self) -> ToolName {
         ToolName::plain("exec_argv")
     }
 
-    fn spec(&self) -> Option<ToolSpec> {
-        Some(create_exec_argv_tool_with_environment_id(
+    fn spec(&self) -> ToolSpec {
+        create_exec_argv_tool_with_environment_id(
             CommandToolOptions {
                 allow_login_shell: false,
                 exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
             },
             self.options.include_environment_id,
-        ))
+        )
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {
         true
     }
 
-    async fn handle(
+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+        Box::pin(self.handle_call(invocation))
+    }
+}
+
+impl ExecArgvHandler {
+    async fn handle_call(
         &self,
         invocation: ToolInvocation,
     ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
@@ -118,17 +127,31 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                 "unified exec is unavailable in this session".to_string(),
             ));
         };
+        let native_environment_cwd = turn_environment.cwd().clone();
         let cwd = environment_args
             .workdir
             .as_deref()
             .filter(|workdir| !workdir.is_empty())
             .map_or_else(
-                || turn_environment.cwd.clone(),
-                |workdir| turn_environment.cwd.join(workdir),
-            );
+                || Ok(native_environment_cwd.clone()),
+                |workdir| native_environment_cwd.join(workdir),
+            )
+            .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
         let environment = Arc::clone(&turn_environment.environment);
         let fs = environment.get_filesystem();
-        let args: ExecArgvArgs = parse_arguments_with_base_path(&arguments, &cwd)?;
+        let cwd_uses_native_convention =
+            cwd.infer_path_convention() == Some(PathConvention::native());
+        let native_cwd = match cwd.to_abs_path() {
+            Ok(cwd) if cwd_uses_native_convention => cwd,
+            Err(err) => return Err(FunctionCallError::RespondToModel(err.to_string())),
+            Ok(_) => {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "path URI `{cwd}` does not use the host's native {} path convention",
+                    PathConvention::native()
+                )));
+            }
+        };
+        let args: ExecArgvArgs = parse_arguments_with_base_path(&arguments, &native_cwd)?;
         let command = validate_argv(args.argv)?;
         let hook_command = codex_shell_command::parse_command::shlex_join(&command);
         let hook_metadata =
@@ -137,7 +160,7 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
             session.as_ref(),
             context.turn.as_ref(),
             &hook_command,
-            &cwd,
+            &native_cwd,
         )
         .await;
         let process_id = manager.allocate_process_id().await;
@@ -156,9 +179,11 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
         let exec_permission_approvals_enabled =
             session.features().enabled(Feature::ExecPermissionApprovals);
         let requested_additional_permissions = additional_permissions.clone();
+        let permission_cwd = &native_cwd;
         let effective_additional_permissions = apply_granted_turn_permissions(
             context.session.as_ref(),
-            cwd.as_path(),
+            &turn_environment.environment_id,
+            permission_cwd.as_path(),
             sandbox_permissions,
             additional_permissions,
         )
@@ -196,7 +221,7 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                     effective_additional_permissions.sandbox_permissions,
                     effective_additional_permissions.additional_permissions,
                     effective_additional_permissions.permissions_preapproved,
-                    &cwd,
+                    permission_cwd,
                 )
             },
             |permissions| Ok(Some(permissions)),
@@ -227,7 +252,7 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                 chunk_id: String::new(),
                 wall_time: std::time::Duration::ZERO,
                 raw_output: output.into_text().into_bytes(),
-                truncation_policy: turn.truncation_policy,
+                truncation_policy: turn.model_info.truncation_policy.into(),
                 max_output_tokens,
                 process_id: None,
                 exit_code: None,
@@ -239,6 +264,7 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
         }
 
         emit_unified_exec_tty_metric(&turn.session_telemetry, tty);
+        let argv0 = command[0].clone();
         match manager
             .exec_command(
                 ExecCommandRequest {
@@ -251,8 +277,9 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                     yield_time_ms,
                     max_output_tokens,
                     cwd,
-                    sandbox_cwd: turn_environment.cwd.clone(),
-                    environment,
+                    sandbox_cwd: native_environment_cwd,
+                    turn_environment: turn_environment.clone(),
+                    shell_mode: turn.unified_exec_shell_mode.clone(),
                     network: context.turn.network.clone(),
                     tty,
                     sandbox_permissions: effective_additional_permissions.sandbox_permissions,
@@ -275,7 +302,7 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                     chunk_id: generate_chunk_id(),
                     wall_time: output.duration,
                     raw_output: output_text.into_bytes(),
-                    truncation_policy: turn.truncation_policy,
+                    truncation_policy: turn.model_info.truncation_policy.into(),
                     max_output_tokens,
                     process_id: None,
                     exit_code: Some(output.exit_code),
@@ -285,8 +312,11 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
                     hook_input: Some(hook_metadata.tool_input),
                 }))
             }
-            Err(err) => Err(FunctionCallError::RespondToModel(format!(
-                "exec_argv failed for `{hook_command}`: {err:?}"
+            Err(err) => Err(FunctionCallError::RespondToModel(format_exec_argv_error(
+                &hook_command,
+                &argv0,
+                &native_cwd,
+                &err,
             ))),
         }
     }
@@ -342,6 +372,125 @@ impl CoreToolRuntime for ExecArgvHandler {
 
 fn exec_argv_hook_name() -> HookToolName {
     HookToolName::new("exec_argv")
+}
+
+fn format_exec_argv_error(
+    hook_command: &str,
+    argv0: &str,
+    cwd: &Path,
+    err: &UnifiedExecError,
+) -> String {
+    let mut message = format!("exec_argv failed for `{hook_command}`: {err:?}");
+    if let UnifiedExecError::CreateProcess {
+        message: create_process_message,
+    } = err
+        && create_process_error_may_be_program_lookup(create_process_message)
+        && let Some(hint) = windows_pathext_resolution_hint(argv0, cwd)
+    {
+        message.push_str("\n\n");
+        message.push_str(&hint);
+    }
+    message
+}
+
+fn create_process_error_may_be_program_lookup(message: &str) -> bool {
+    let lowercase = message.to_ascii_lowercase();
+    lowercase.contains("program not found")
+        || lowercase.contains("not found")
+        || lowercase.contains("os error 2")
+        || message.contains("找不到指定的文件")
+}
+
+#[cfg(windows)]
+fn windows_pathext_resolution_hint(program: &str, cwd: &Path) -> Option<String> {
+    let path_entries = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let candidates = windows_pathext_candidates(program, cwd, path_entries, &pathext);
+    if candidates.is_empty() {
+        return None;
+    }
+
+    let formatted_candidates = candidates
+        .iter()
+        .take(5)
+        .map(|path| format!("`{}`", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let first = candidates[0].display();
+    Some(format!(
+        "Windows note: `exec_argv` does not ask a shell to resolve PATHEXT entries for argv[0]. Found candidate command shim(s): {formatted_candidates}. Try using the full path with its extension, for example `{first}` as argv[0]."
+    ))
+}
+
+#[cfg(not(windows))]
+fn windows_pathext_resolution_hint(_program: &str, _cwd: &Path) -> Option<String> {
+    None
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn windows_pathext_candidates(
+    program: &str,
+    cwd: &Path,
+    path_entries: impl IntoIterator<Item = PathBuf>,
+    pathext: &str,
+) -> Vec<PathBuf> {
+    let program = program.trim();
+    if program.is_empty() {
+        return Vec::new();
+    }
+
+    let program_path = Path::new(program);
+    if program_path.extension().is_some() {
+        return Vec::new();
+    }
+
+    let extensions = pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| extension.starts_with('.') && extension.len() > 1)
+        .collect::<Vec<_>>();
+    if extensions.is_empty() {
+        return Vec::new();
+    }
+
+    let has_path_separator = program.contains('\\') || program.contains('/');
+    let bases = if has_path_separator {
+        let base = if program_path.is_absolute() {
+            program_path.to_path_buf()
+        } else {
+            cwd.join(program_path)
+        };
+        vec![base]
+    } else {
+        path_entries
+            .into_iter()
+            .map(|path_entry| path_entry.join(program))
+            .collect::<Vec<_>>()
+    };
+
+    let mut candidates = Vec::new();
+    for base in bases {
+        for extension in &extensions {
+            let Some(candidate) = append_extension_to_file_name(&base, extension) else {
+                continue;
+            };
+            if candidate.is_file() && !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    candidates
+}
+
+#[cfg(any(windows, test))]
+fn append_extension_to_file_name(path: &Path, extension: &str) -> Option<PathBuf> {
+    let mut file_name = path.file_name()?.to_os_string();
+    file_name.push(extension);
+    let mut candidate = path.to_path_buf();
+    candidate.set_file_name(file_name);
+    Some(candidate)
 }
 
 fn validate_argv(argv: Vec<String>) -> Result<Vec<String>, FunctionCallError> {
