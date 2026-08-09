@@ -265,6 +265,20 @@ fn history_contains_text(history_items: &[ResponseItem], needle: &str) -> bool {
     })
 }
 
+fn history_text_index(history_items: &[ResponseItem], needle: &str) -> Option<usize> {
+    history_items.iter().position(|item| {
+        let ResponseItem::Message { content, .. } = item else {
+            return false;
+        };
+        content.iter().any(|content_item| match content_item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                text.contains(needle)
+            }
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+        })
+    })
+}
+
 fn history_contains_assistant_inter_agent_communication(
     history_items: &[ResponseItem],
     expected: &InterAgentCommunication,
@@ -1060,13 +1074,24 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
         .get_thread(child_thread_id)
         .await
         .expect("child thread should be registered");
+    let child_history = child_thread.session.clone_history().await;
     assert!(
-        history_contains_text(
-            child_thread.session.clone_history().await.raw_items(),
-            "paginated parent context",
-        ),
+        history_contains_text(child_history.raw_items(), "paginated parent context"),
         "bounded parent context should remain model-visible to the child"
     );
+    let start_index = history_text_index(
+        child_history.raw_items(),
+        "forked parent conversation history begins",
+    )
+    .expect("paginated full fork should include a start boundary");
+    let inherited_index = history_text_index(child_history.raw_items(), "paginated parent context")
+        .expect("paginated inherited history should be visible");
+    let end_index = history_text_index(
+        child_history.raw_items(),
+        "forked parent conversation history ends",
+    )
+    .expect("paginated full fork should include an end boundary");
+    assert!(start_index < inherited_index && inherited_index < end_index);
     child_thread.ensure_rollout_materialized().await;
     child_thread
         .flush_rollout()
@@ -1386,18 +1411,19 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .flush_rollout()
         .await
         .expect("parent rollout should flush");
+    let child_session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
     let child_thread_id = harness
         .control
         .spawn_agent_with_metadata(
             child_config,
             text_input("child task"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: None,
-            })),
+            Some(child_session_source.clone()),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
@@ -1414,10 +1440,9 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .await
         .expect("child thread should be registered");
     assert_ne!(child_thread_id, parent_thread_id);
-    assert_eq!(
-        child_thread.config_snapshot().await.history_mode,
-        ThreadHistoryMode::Legacy
-    );
+    let child_snapshot = child_thread.config_snapshot().await;
+    assert_eq!(child_snapshot.history_mode, ThreadHistoryMode::Legacy);
+    let actual_child_session_source = child_snapshot.session_source;
     let history = child_thread.session.clone_history().await;
     let mut expected_final_answer =
         assistant_message("parent final answer", Some(MessagePhase::FinalAnswer));
@@ -1439,9 +1464,33 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     };
     expected_developer_message.set_turn_id_if_missing(&turn_context.sub_id);
     let expected_history = [
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: crate::session::multi_agents::forked_history_start_hint_text(
+                    &actual_child_session_source,
+                )
+                .expect("thread-spawn child should have a fork start hint"),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
         expected_parent_seed,
         expected_developer_message,
         expected_final_answer,
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: crate::session::multi_agents::forked_history_boundary_hint_text(
+                    &actual_child_session_source,
+                )
+                .expect("thread-spawn child should have a fork boundary hint"),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
         ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
@@ -1716,6 +1765,19 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
         history_contains_text(history.raw_items(), "Child subagent guidance."),
         "full-history forked child should add the child subagent hint after compacted-history sanitization"
     );
+    let start_index = history_text_index(
+        history.raw_items(),
+        "forked parent conversation history begins",
+    )
+    .expect("compacted full fork should include a start boundary");
+    let inherited_index = history_text_index(history.raw_items(), "compacted parent summary")
+        .expect("compacted inherited history should be visible");
+    let end_index = history_text_index(
+        history.raw_items(),
+        "forked parent conversation history ends",
+    )
+    .expect("compacted full fork should include an end boundary");
+    assert!(start_index < inherited_index && inherited_index < end_index);
 
     let _ = harness
         .control

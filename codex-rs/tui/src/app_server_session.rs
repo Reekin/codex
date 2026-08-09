@@ -28,6 +28,10 @@ use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::Account;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::AuthMode;
+use codex_app_server_protocol::ChatTreeReadParams;
+use codex_app_server_protocol::ChatTreeReadResponse;
+use codex_app_server_protocol::ChatTreeSetCurrentParams;
+use codex_app_server_protocol::ChatTreeSetCurrentResponse;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigRequirementsReadResponse;
@@ -998,6 +1002,42 @@ impl AppServerSession {
             .await
             .wrap_err("failed to unarchive session")?;
         Ok(response.thread)
+    }
+
+    pub(crate) async fn chat_tree_read(
+        &mut self,
+        thread_id: ThreadId,
+    ) -> Result<ChatTreeReadResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ChatTreeRead {
+                request_id,
+                params: ChatTreeReadParams {
+                    thread_id: thread_id.to_string(),
+                },
+            })
+            .await
+            .wrap_err("chatTree/read failed in TUI")
+    }
+
+    pub(crate) async fn chat_tree_set_current(
+        &mut self,
+        thread_id: ThreadId,
+        node_id: String,
+        expected_revision: Option<u64>,
+    ) -> Result<ChatTreeSetCurrentResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ChatTreeSetCurrent {
+                request_id,
+                params: ChatTreeSetCurrentParams {
+                    thread_id: thread_id.to_string(),
+                    node_id,
+                    expected_revision,
+                },
+            })
+            .await
+            .wrap_err("chatTree/setCurrent failed in TUI")
     }
 
     pub(crate) async fn thread_metadata_update_branch(

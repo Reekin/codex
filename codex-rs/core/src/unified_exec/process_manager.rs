@@ -43,6 +43,7 @@ use crate::unified_exec::ProcessEntry;
 use crate::unified_exec::ProcessStore;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
+use crate::unified_exec::UnifiedExecHookMetadata;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::WriteStdinInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
@@ -67,7 +68,6 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::TerminalInteractionEvent;
 use codex_sandboxing::SandboxCommand;
-use codex_tools::ToolName;
 use codex_utils_output_truncation::approx_tokens_from_byte_count;
 use codex_utils_path_uri::PathUri;
 
@@ -215,6 +215,7 @@ struct PreparedProcessHandles {
     network_approval: Option<DeferredNetworkApproval>,
     call_id: String,
     hook_command: String,
+    hook_metadata: UnifiedExecHookMetadata,
     process_id: i32,
     tty: bool,
 }
@@ -474,6 +475,7 @@ impl UnifiedExecProcessManager {
                 context,
                 &request.command,
                 request.hook_command.clone(),
+                request.hook_metadata.clone(),
                 cwd.clone(),
                 plugin_attribution.clone(),
                 start,
@@ -657,6 +659,8 @@ impl UnifiedExecProcessManager {
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
             hook_command: Some(request.hook_command.clone()),
+            hook_tool_name: Some(request.hook_metadata.tool_name.name().to_string()),
+            hook_input: Some(request.hook_metadata.tool_input.clone()),
         };
 
         Ok(response)
@@ -689,6 +693,7 @@ impl UnifiedExecProcessManager {
             network_approval,
             call_id,
             hook_command,
+            hook_metadata,
             process_id,
             tty,
             ..
@@ -820,6 +825,8 @@ impl UnifiedExecProcessManager {
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
             hook_command: Some(hook_command),
+            hook_tool_name: Some(hook_metadata.tool_name.name().to_string()),
+            hook_input: Some(hook_metadata.tool_input),
         };
 
         let should_emit_interaction = !request.input.is_empty() || response.process_id.is_some();
@@ -897,6 +904,7 @@ impl UnifiedExecProcessManager {
             network_approval: entry.network_approval.clone(),
             call_id: entry.call_id.clone(),
             hook_command: entry.hook_command.clone(),
+            hook_metadata: entry.hook_metadata.clone(),
             process_id: entry.process_id,
             tty: entry.tty,
         })
@@ -909,6 +917,7 @@ impl UnifiedExecProcessManager {
         context: &UnifiedExecContext,
         command: &[String],
         hook_command: String,
+        hook_metadata: UnifiedExecHookMetadata,
         cwd: PathUri,
         plugin_attribution: Option<PluginCommandAttribution>,
         started_at: Instant,
@@ -926,6 +935,7 @@ impl UnifiedExecProcessManager {
             cwd: cwd.clone(),
             initial_exec_command_active,
             hook_command,
+            hook_metadata,
             tty,
             network_approval,
             session: Arc::downgrade(&context.session),
@@ -1167,7 +1177,7 @@ impl UnifiedExecProcessManager {
         let req = UnifiedExecToolRequest {
             command: request.command.clone(),
             shell_type: request.shell_type,
-            hook_command: request.hook_command.clone(),
+            hook_metadata: request.hook_metadata.clone(),
             process_id: request.process_id,
             cwd,
             sandbox_cwd: request.sandbox_cwd.clone(),
@@ -1194,7 +1204,7 @@ impl UnifiedExecProcessManager {
             session: context.session.clone(),
             turn: context.turn.clone(),
             call_id: context.call_id.clone(),
-            tool_name: ToolName::plain("exec_command"),
+            tool_name: request.tool_name.clone(),
         };
         orchestrator
             .run(

@@ -18,6 +18,7 @@ use crate::context::world_state::PermissionsState;
 use crate::context::world_state::PersonalityState;
 use crate::context::world_state::PluginsInstructionsState;
 use crate::context::world_state::RealtimeState;
+use crate::context::world_state::SubagentIdentityState;
 use crate::context::world_state::ToolsState;
 use crate::context::world_state::WorldState;
 use codex_connectors::AppToolPolicyEvaluator;
@@ -262,6 +263,11 @@ impl Session {
             let usage_hint = MultiAgentUsageHintState::new(usage_hint_text);
             multi_agent_mode = multi_agent_mode.with_usage_hint(&usage_hint);
             world_state.add_section(usage_hint);
+        }
+        if let Some(identity_hint_text) =
+            super::multi_agents::identity_hint_text(&turn_context.session_source)
+        {
+            world_state.add_section(SubagentIdentityState::new(identity_hint_text));
         }
         world_state.add_section(multi_agent_mode);
         Ok(world_state)

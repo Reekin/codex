@@ -68,6 +68,19 @@ fn tool_names(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn shell_tool_names(tools: &[String]) -> Vec<String> {
+    tools
+        .iter()
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "shell_command" | "exec_argv" | "exec_command" | "write_stdin"
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 #[test_case(false, false; "normal sampling")]
 #[test_case(true, false; "pre sampling compaction")]
 #[test_case(false, true; "namespace collision")]
@@ -259,7 +272,14 @@ async fn empty_turn_environments_omits_environment_backed_tools() -> Result<()> 
         tools.contains(&"update_plan".to_string()),
         "non-environment tool should remain available; got {tools:?}"
     );
-    for environment_tool in ["exec_command", "write_stdin", "apply_patch", "view_image"] {
+    assert_eq!(shell_tool_names(&tools), Vec::<String>::new());
+    for environment_tool in [
+        "exec_argv",
+        "exec_command",
+        "write_stdin",
+        "apply_patch",
+        "view_image",
+    ] {
         assert!(
             !tools.contains(&environment_tool.to_string()),
             "{environment_tool} should be omitted for explicit empty turn environments; got {tools:?}"
@@ -299,9 +319,10 @@ async fn turn_environment_selection_keeps_environment_backed_tools() -> Result<(
     .await?;
 
     let tools = tool_names(&response_mock.single_request().body_json());
-    assert!(
-        tools.contains(&"exec_command".to_string()),
-        "environment tool should remain available with selected local environment; got {tools:?}"
+    assert_eq!(
+        shell_tool_names(&tools),
+        vec!["exec_argv", "exec_command", "write_stdin"],
+        "unified exec tools should be visible and legacy shell hidden with a selected local environment; got {tools:?}"
     );
 
     Ok(())
@@ -893,23 +914,17 @@ async fn unified_exec_spec_toggle_end_to_end() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let tools_disabled = collect_tools(/*use_unified_exec*/ false).await?;
-    assert!(
-        !tools_disabled.iter().any(|name| name == "exec_command"),
-        "tools list should not include exec_command when disabled: {tools_disabled:?}"
-    );
-    assert!(
-        !tools_disabled.iter().any(|name| name == "write_stdin"),
-        "tools list should not include write_stdin when disabled: {tools_disabled:?}"
+    assert_eq!(
+        shell_tool_names(&tools_disabled),
+        vec!["shell_command"],
+        "disabling unified exec should expose only the legacy shell tool: {tools_disabled:?}"
     );
 
     let tools_enabled = collect_tools(/*use_unified_exec*/ true).await?;
-    assert!(
-        tools_enabled.iter().any(|name| name == "exec_command"),
-        "tools list should include exec_command when enabled: {tools_enabled:?}"
-    );
-    assert!(
-        tools_enabled.iter().any(|name| name == "write_stdin"),
-        "tools list should include write_stdin when enabled: {tools_enabled:?}"
+    assert_eq!(
+        shell_tool_names(&tools_enabled),
+        vec!["exec_argv", "exec_command", "write_stdin"],
+        "enabling unified exec should expose the argv and command tools while hiding the legacy shell tool: {tools_enabled:?}"
     );
 
     Ok(())

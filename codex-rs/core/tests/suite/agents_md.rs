@@ -1119,10 +1119,29 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
     if fork_context {
         let seed_input = seed_request.input();
         let child_input = child_request.input();
+        let inherited_history_start = child_input
+            .iter()
+            .position(|item| {
+                item["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("forked parent conversation history begins"))
+            })
+            .expect("forked child input should include the opening history boundary");
         assert_eq!(
-            child_input.get(..seed_input.len()),
+            child_input
+                .get(inherited_history_start + 1..inherited_history_start + 1 + seed_input.len()),
             Some(seed_input.as_slice()),
             "forked subagent should replay the parent's original structured input prefix"
+        );
+        assert!(
+            child_input
+                .iter()
+                .skip(inherited_history_start + 1 + seed_input.len())
+                .any(|item| {
+                    item["content"][0]["text"].as_str().is_some_and(|text| {
+                        text.contains("forked parent conversation history ends")
+                    })
+                })
         );
     } else {
         let child_user_texts = child_request.message_input_texts("user");

@@ -101,6 +101,10 @@ pub fn should_persist_event_msg(ev: &EventMsg, history_mode: ThreadHistoryMode) 
         | EventMsg::TurnAborted(_)
         | EventMsg::TurnStarted(_)
         | EventMsg::TurnComplete(_)
+        | EventMsg::ChatTreeNodeStarted(_)
+        | EventMsg::ChatTreeNodeFinalized(_)
+        | EventMsg::ChatTreeNodeSummaryUpdated(_)
+        | EventMsg::ChatTreeCurrentNodeChanged(_)
         | EventMsg::ThreadSettingsApplied(_) => true,
 
         // Only persist these legacy events when the thread's history mode is Legacy.

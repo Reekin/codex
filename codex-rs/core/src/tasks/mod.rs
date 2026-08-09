@@ -304,7 +304,6 @@ impl Session {
             .turn_metadata_state
             .set_turn_started_at_unix_ms(turn_started_at_unix_ms);
         let token_usage_at_turn_start = self.total_token_usage().await.unwrap_or_default();
-
         let cancellation_token = CancellationToken::new();
         let done = Arc::new(Notify::new());
 
@@ -321,6 +320,8 @@ impl Session {
         {
             turn_context.turn_metadata_state.set_parent_turn_id(id);
         }
+        self.start_chat_tree_node_for_turn(turn_context.as_ref(), &input)
+            .await;
         let turn_state = {
             let mut active = self.active_turn.lock().await;
             let turn = active.get_or_insert_with(ActiveTurn::default);
@@ -764,6 +765,20 @@ impl Session {
                 turn_id: turn_context.sub_id.clone(),
                 profile,
             });
+        let summary_job = if let Some(reason) = abort_reason.as_ref() {
+            self.abort_chat_tree_node(turn_context.as_ref(), reason)
+                .await;
+            None
+        } else {
+            Some(
+                self.complete_chat_tree_node_before_turn_complete(
+                    turn_context.as_ref(),
+                    last_agent_message.clone(),
+                )
+                .await,
+            )
+            .flatten()
+        };
         let event = if let Some(reason) = abort_reason {
             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
                 .await;
@@ -793,6 +808,8 @@ impl Session {
             })
         };
         self.send_event(turn_context.as_ref(), event).await;
+        self.spawn_chat_tree_summary_after_turn_complete(Arc::clone(&turn_context), summary_job)
+            .await;
         self.services
             .guardian_rejection_circuit_breaker
             .lock()
@@ -910,6 +927,8 @@ impl Session {
                 turn_id: task.turn_context.sub_id.clone(),
                 profile,
             });
+        self.abort_chat_tree_node(task.turn_context.as_ref(), &reason)
+            .await;
         let event = EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some(task.turn_context.sub_id.clone()),
             reason,

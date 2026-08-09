@@ -57,6 +57,26 @@ impl ChatWidget {
             ServerNotification::ThreadSettingsUpdated(notification) => {
                 self.on_thread_settings_updated(notification);
             }
+            ServerNotification::ChatTreeUpdated(notification) => {
+                if notification.chat_tree.revision <= self.chat_tree.revision() {
+                    return;
+                }
+                let should_refresh_transcript = !from_replay
+                    && matches!(
+                        notification.change.r#type,
+                        ChatTreeChangeKind::CurrentNodeChanged | ChatTreeChangeKind::TreeRebuilt
+                    );
+                let chat_tree = *notification.chat_tree;
+                self.set_chat_tree_projection(chat_tree.clone());
+                if should_refresh_transcript
+                    && let Ok(thread_id) = ThreadId::from_string(&notification.thread_id)
+                {
+                    self.app_event_tx.send(AppEvent::RefreshChatTreeTranscript {
+                        thread_id,
+                        chat_tree,
+                    });
+                }
+            }
             ServerNotification::TurnStarted(notification) => {
                 self.turn_lifecycle.last_turn_id = Some(notification.turn.id);
                 self.last_non_retry_error = None;

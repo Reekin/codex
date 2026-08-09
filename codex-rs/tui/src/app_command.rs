@@ -90,6 +90,10 @@ pub(crate) enum AppCommand {
     SetThreadName {
         name: String,
     },
+    SetCurrentChatTreeNode {
+        node_id: String,
+        expected_revision: Option<u64>,
+    },
     Review {
         target: ReviewTarget,
     },
@@ -229,6 +233,16 @@ impl AppCommand {
 
     pub(crate) fn set_thread_name(name: String) -> Self {
         Self::SetThreadName { name }
+    }
+
+    pub(crate) fn set_current_chat_tree_node(
+        node_id: String,
+        expected_revision: Option<u64>,
+    ) -> Self {
+        Self::SetCurrentChatTreeNode {
+            node_id,
+            expected_revision,
+        }
     }
 
     pub(crate) fn review(target: ReviewTarget) -> Self {

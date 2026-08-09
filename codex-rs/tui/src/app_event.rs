@@ -15,6 +15,7 @@ use std::sync::atomic::AtomicBool;
 use crate::inline_visualization::InlineVisualizationContext;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
+use codex_app_server_protocol::ChatTreeProjection;
 use codex_app_server_protocol::ConsumeAccountRateLimitResetCreditResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::GetAccountTokenUsageResponse;
@@ -197,6 +198,15 @@ pub(crate) enum AppEvent {
     },
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
+
+    OpenChatTree {
+        thread_id: ThreadId,
+    },
+
+    RefreshChatTreeTranscript {
+        thread_id: ThreadId,
+        chat_tree: ChatTreeProjection,
+    },
 
     /// Fork the current thread into a transient side conversation.
     StartSide {

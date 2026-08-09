@@ -553,6 +553,9 @@ pub(super) async fn handle_pending_thread_resume_request(
             || active_turn
                 .as_ref()
                 .is_some_and(|turn| matches!(turn.status, TurnStatus::InProgress));
+    let chat_tree_projection = crate::chat_tree_projection::chat_tree_projection_from_core(
+        conversation.chat_tree_projection().await,
+    );
 
     let request_id = pending.request_id;
     let connection_id = request_id.connection_id;
@@ -570,6 +573,10 @@ pub(super) async fn handle_pending_thread_resume_request(
         if let Some(active_turn) = active_turn.as_ref() {
             merge_turn_history_with_active_turn(&mut thread.turns, active_turn.clone());
         }
+        super::thread_processor::filter_turns_for_chat_tree(
+            &mut thread.turns,
+            &chat_tree_projection,
+        );
     }
 
     let thread_status = thread_watch_manager
@@ -597,6 +604,7 @@ pub(super) async fn handle_pending_thread_resume_request(
             }
             merge_active_turn_into_page(&mut page, active_turn, params);
         }
+        super::thread_processor::filter_turns_for_chat_tree(&mut page.data, &chat_tree_projection);
         super::thread_processor::normalize_thread_turns_status(
             &mut page.data,
             thread_status,
@@ -610,6 +618,7 @@ pub(super) async fn handle_pending_thread_resume_request(
             has_live_in_progress_turn,
             active_turn,
             params,
+            &chat_tree_projection,
         ) {
             Ok(page) => Some(page),
             Err(error) => {

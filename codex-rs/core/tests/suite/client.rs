@@ -154,6 +154,32 @@ fn response_message_item_id(request: &ResponsesRequest, role: &str, text: &str) 
         .unwrap_or_else(|| panic!("missing item ID for {role} message {text:?}"))
 }
 
+fn ev_empty_assistant_message(id: &str, phase: &str) -> serde_json::Value {
+    json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "message",
+            "role": "assistant",
+            "phase": phase,
+            "id": id,
+            "content": [{"type": "output_text", "text": ""}]
+        }
+    })
+}
+
+fn ev_final_assistant_message(id: &str, text: &str) -> serde_json::Value {
+    json!({
+        "type": "response.output_item.done",
+        "item": {
+            "type": "message",
+            "role": "assistant",
+            "phase": "final_answer",
+            "id": id,
+            "content": [{"type": "output_text", "text": text}]
+        }
+    })
+}
+
 fn assert_codex_client_metadata(
     request_body: &serde_json::Value,
     installation_id: &str,
@@ -3961,4 +3987,244 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
         r3_tail_expected,
         "request 3 tail mismatch",
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_final_answer_retries_once_before_turn_complete() {
+    let server = MockServer::start().await;
+    let response_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-empty"),
+                ev_empty_assistant_message("msg-empty", "final_answer"),
+                ev_completed("resp-empty"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-retry"),
+                ev_assistant_message("msg-retry", "Recovered final answer."),
+                ev_completed("resp-retry"),
+            ]),
+        ],
+    )
+    .await;
+    let test = test_codex().build(&server).await.unwrap();
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "please answer".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .unwrap();
+
+    let turn_complete = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let EventMsg::TurnComplete(turn_complete) = turn_complete else {
+        unreachable!("wait_for_event returned a non-matching event");
+    };
+    assert_eq!(
+        turn_complete.last_agent_message.as_deref(),
+        Some("Recovered final answer.")
+    );
+
+    let requests = response_log.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(message_input_text_contains(
+        &requests[1],
+        "user",
+        "previous assistant final answer was empty"
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_final_answer_retry_budget_is_bounded() {
+    let server = MockServer::start().await;
+    let response_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-empty-1"),
+                ev_empty_assistant_message("msg-empty-1", "final_answer"),
+                ev_completed("resp-empty-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-empty-2"),
+                ev_empty_assistant_message("msg-empty-2", "final_answer"),
+                ev_completed("resp-empty-2"),
+            ]),
+        ],
+    )
+    .await;
+    let test = test_codex().build(&server).await.unwrap();
+
+    test.submit_turn("please answer").await.unwrap();
+
+    assert_eq!(response_log.requests().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_final_answer_retries_after_non_empty_commentary() {
+    let server = MockServer::start().await;
+    let response_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-empty"),
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "commentary",
+                        "id": "msg-commentary",
+                        "content": [{"type": "output_text", "text": "Working on it."}]
+                    }
+                }),
+                ev_empty_assistant_message("msg-empty", "final_answer"),
+                ev_completed("resp-empty"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-retry"),
+                ev_assistant_message("msg-retry", "Recovered final answer."),
+                ev_completed("resp-retry"),
+            ]),
+        ],
+    )
+    .await;
+    let test = test_codex().build(&server).await.unwrap();
+
+    test.submit_turn("please answer").await.unwrap();
+
+    assert_eq!(response_log.requests().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_then_non_empty_final_answer_does_not_retry() {
+    let server = MockServer::start().await;
+    let response_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-mixed"),
+            ev_empty_assistant_message("msg-empty", "final_answer"),
+            ev_final_assistant_message("msg-answer", "Complete answer."),
+            ev_completed("resp-mixed"),
+        ]),
+    )
+    .await;
+    let test = test_codex().build(&server).await.unwrap();
+
+    test.submit_turn("please answer").await.unwrap();
+
+    assert_eq!(response_log.requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_empty_then_empty_final_answer_does_not_retry() {
+    let server = MockServer::start().await;
+    let response_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-mixed"),
+            ev_final_assistant_message("msg-answer", "Complete answer."),
+            ev_empty_assistant_message("msg-empty", "final_answer"),
+            ev_completed("resp-mixed"),
+        ]),
+    )
+    .await;
+    let test = test_codex().build(&server).await.unwrap();
+
+    test.submit_turn("please answer").await.unwrap();
+
+    assert_eq!(response_log.requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_commentary_does_not_trigger_final_answer_retry() {
+    let server = MockServer::start().await;
+    let response_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-commentary"),
+            ev_empty_assistant_message("msg-commentary", "commentary"),
+            ev_completed("resp-commentary"),
+        ]),
+    )
+    .await;
+    let test = test_codex().build(&server).await.unwrap();
+
+    test.submit_turn("please answer").await.unwrap();
+
+    assert_eq!(response_log.requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_without_assistant_message_does_not_trigger_retry() {
+    let server = MockServer::start().await;
+    let response_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-no-message"),
+            ev_completed("resp-no-message"),
+        ]),
+    )
+    .await;
+    let test = test_codex().build(&server).await.unwrap();
+
+    test.submit_turn("please answer").await.unwrap();
+
+    assert_eq!(response_log.requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_final_answer_in_plan_mode_does_not_trigger_retry() {
+    let server = MockServer::start().await;
+    let response_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-plan"),
+            ev_empty_assistant_message("msg-plan", "final_answer"),
+            ev_completed("resp-plan"),
+        ]),
+    )
+    .await;
+    let test = test_codex().build(&server).await.unwrap();
+
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "make a plan".into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                collaboration_mode: Some(CollaborationMode {
+                    mode: ModeKind::Plan,
+                    settings: Settings {
+                        model: test.session_configured.model.clone(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                }),
+                ..Default::default()
+            },
+        })
+        .await
+        .unwrap();
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    assert_eq!(response_log.requests().len(), 1);
 }

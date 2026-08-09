@@ -664,9 +664,9 @@ async fn shell_family_registers_visible_unified_exec_and_hidden_legacy_shell() {
     })
     .await;
 
-    plan.assert_visible_contains(&["exec_command", "write_stdin"]);
+    plan.assert_visible_contains(&["exec_argv", "exec_command", "write_stdin"]);
     plan.assert_visible_lacks(&["shell_command"]);
-    plan.assert_registered_contains(&["exec_command", "write_stdin", "shell_command"]);
+    plan.assert_registered_contains(&["exec_argv", "exec_command", "write_stdin", "shell_command"]);
     assert_eq!(plan.exposure("shell_command"), ToolExposure::Hidden);
     assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
 }
@@ -759,8 +759,18 @@ async fn shell_command_is_not_registered_without_a_single_local_environment() {
         );
     })
     .await;
-    remote_environment.assert_visible_lacks(&["shell_command", "exec_command", "write_stdin"]);
-    remote_environment.assert_registered_lacks(&["shell_command", "exec_command", "write_stdin"]);
+    remote_environment.assert_visible_lacks(&[
+        "shell_command",
+        "exec_argv",
+        "exec_command",
+        "write_stdin",
+    ]);
+    remote_environment.assert_registered_lacks(&[
+        "shell_command",
+        "exec_argv",
+        "exec_command",
+        "write_stdin",
+    ]);
 
     let multiple_local_environments = probe(|turn| {
         set_feature(turn, Feature::ShellTool, /*enabled*/ true);
@@ -818,9 +828,9 @@ async fn shell_zsh_fork_stays_standalone_until_unified_exec_composition_is_enabl
     .await;
 
     standalone.assert_visible_contains(&["shell_command"]);
-    standalone.assert_visible_lacks(&["exec_command", "write_stdin"]);
+    standalone.assert_visible_lacks(&["exec_argv", "exec_command", "write_stdin"]);
     standalone.assert_registered_contains(&["shell_command"]);
-    standalone.assert_registered_lacks(&["exec_command", "write_stdin"]);
+    standalone.assert_registered_lacks(&["exec_argv", "exec_command", "write_stdin"]);
 
     let composed = probe(|turn| {
         set_features(
@@ -837,13 +847,18 @@ async fn shell_zsh_fork_stays_standalone_until_unified_exec_composition_is_enabl
     .await;
 
     if codex_utils_pty::conpty_supported() {
-        composed.assert_visible_contains(&["exec_command", "write_stdin"]);
+        composed.assert_visible_contains(&["exec_argv", "exec_command", "write_stdin"]);
         composed.assert_visible_lacks(&["shell_command"]);
-        composed.assert_registered_contains(&["exec_command", "write_stdin", "shell_command"]);
+        composed.assert_registered_contains(&[
+            "exec_argv",
+            "exec_command",
+            "write_stdin",
+            "shell_command",
+        ]);
         assert_eq!(composed.exposure("shell_command"), ToolExposure::Hidden);
     } else {
         composed.assert_visible_contains(&["shell_command"]);
-        composed.assert_visible_lacks(&["exec_command", "write_stdin"]);
+        composed.assert_visible_lacks(&["exec_argv", "exec_command", "write_stdin"]);
     }
 }
 
@@ -868,7 +883,7 @@ async fn zsh_fork_unified_exec_hides_shell_parameter() {
     })
     .await;
 
-    plan.assert_visible_contains(&["exec_command", "write_stdin"]);
+    plan.assert_visible_contains(&["exec_argv", "exec_command", "write_stdin"]);
     assert!(!has_parameter(plan.visible_spec("exec_command"), "shell"));
 }
 
@@ -923,7 +938,7 @@ async fn zsh_fork_unified_exec_keeps_shell_parameter_when_remote_environment_ava
     })
     .await;
 
-    plan.assert_visible_contains(&["exec_command", "write_stdin"]);
+    plan.assert_visible_contains(&["exec_argv", "exec_command", "write_stdin"]);
     plan.assert_visible_lacks(&["shell_command"]);
     plan.assert_registered_lacks(&["shell_command"]);
     assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
@@ -944,6 +959,7 @@ async fn environment_count_controls_environment_backed_tools() {
     .await;
     no_environment.assert_visible_lacks(&[
         "shell_command",
+        "exec_argv",
         "exec_command",
         "apply_patch",
         "view_image",
@@ -951,6 +967,7 @@ async fn environment_count_controls_environment_backed_tools() {
     ]);
     no_environment.assert_registered_lacks(&[
         "shell_command",
+        "exec_argv",
         "exec_command",
         "apply_patch",
         "view_image",
@@ -966,6 +983,7 @@ async fn environment_count_controls_environment_backed_tools() {
     })
     .await;
     multiple_environments.assert_visible_contains(&[
+        "exec_argv",
         "exec_command",
         "apply_patch",
         "view_image",
@@ -973,6 +991,10 @@ async fn environment_count_controls_environment_backed_tools() {
     ]);
     multiple_environments.assert_visible_lacks(&["shell_command"]);
     multiple_environments.assert_registered_lacks(&["shell_command"]);
+    assert!(has_parameter(
+        multiple_environments.visible_spec("exec_argv"),
+        "environment_id"
+    ));
     assert!(has_parameter(
         multiple_environments.visible_spec("exec_command"),
         "environment_id"

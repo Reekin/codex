@@ -12,6 +12,7 @@ mod permissions;
 mod personality;
 mod plugins_instructions;
 mod realtime;
+mod subagent_identity;
 #[cfg(test)]
 mod test_support;
 mod tools;
@@ -46,6 +47,7 @@ pub(crate) use permissions::PermissionsState;
 pub(crate) use personality::PersonalityState;
 pub(crate) use plugins_instructions::PluginsInstructionsState;
 pub(crate) use realtime::RealtimeState;
+pub(crate) use subagent_identity::SubagentIdentityState;
 pub(crate) use tools::ToolsState;
 
 trait ErasedWorldStateSection: Send + Sync {

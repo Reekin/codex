@@ -143,6 +143,13 @@ impl PermissionRequestPayload {
             tool_input: serde_json::Value::Object(tool_input),
         }
     }
+
+    pub(crate) fn with_description(mut self, description: String) -> Self {
+        if let Some(tool_input) = self.tool_input.as_object_mut() {
+            tool_input.insert("description".to_string(), description.into());
+        }
+        self
+    }
 }
 
 // Specifies what tool orchestrator should do with a given tool call.

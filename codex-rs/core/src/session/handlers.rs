@@ -590,6 +590,7 @@ async fn shutdown_session_runtime(sess: &Arc<Session>) {
     }
     let _ = sess.conversation.shutdown().await;
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    sess.cancel_all_chat_tree_summary_jobs().await;
     sess.services
         .unified_exec_manager
         .terminate_all_processes()

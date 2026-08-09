@@ -440,6 +440,8 @@ fn exec_command_tool_output_formats_truncated_response() {
         original_token_count: Some(10),
         output_omitted_bytes: None,
         hook_command: None,
+        hook_tool_name: None,
+        hook_input: None,
     }
     .to_response_item("call-42", &payload);
 
@@ -491,6 +493,8 @@ fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
         original_token_count: Some(42_000),
         output_omitted_bytes: NonZeroUsize::new(/*n*/ 123_456),
         hook_command: None,
+        hook_tool_name: None,
+        hook_input: None,
     }
     .to_response_item("call-omitted", &payload);
 

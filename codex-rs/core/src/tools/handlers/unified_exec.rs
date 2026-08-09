@@ -17,9 +17,12 @@ use std::sync::Arc;
 #[cfg(test)]
 use crate::tools::handlers::parse_arguments;
 
+mod exec_argv;
 mod exec_command;
 mod write_stdin;
 
+pub use exec_argv::ExecArgvHandler;
+pub(crate) use exec_argv::ExecArgvHandlerOptions;
 pub use exec_command::ExecCommandHandler;
 pub(crate) use exec_command::ExecCommandHandlerOptions;
 pub use write_stdin::WriteStdinHandler;
@@ -32,6 +35,25 @@ pub(crate) struct ExecCommandArgs {
     #[serde(default)]
     login: Option<bool>,
     #[serde(default = "default_tty")]
+    tty: bool,
+    #[serde(default = "default_exec_yield_time_ms")]
+    yield_time_ms: u64,
+    #[serde(default)]
+    max_output_tokens: Option<usize>,
+    #[serde(default)]
+    sandbox_permissions: Option<SandboxPermissions>,
+    #[serde(default)]
+    additional_permissions: Option<AdditionalPermissionProfile>,
+    #[serde(default)]
+    justification: Option<String>,
+    #[serde(default)]
+    prefix_rule: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct ExecArgvArgs {
+    pub(crate) argv: Vec<String>,
+    #[serde(default)]
     tty: bool,
     #[serde(default = "default_exec_yield_time_ms")]
     yield_time_ms: u64,
@@ -87,7 +109,10 @@ fn post_unified_exec_tool_use_payload(
     let tool_use_id = result.post_tool_use_id(&invocation.call_id);
     let tool_response = result.post_tool_use_response(&tool_use_id, &invocation.payload)?;
     Some(PostToolUsePayload {
-        tool_name: HookToolName::bash(),
+        tool_name: result
+            .post_tool_use_tool_name()
+            .map(HookToolName::new)
+            .unwrap_or_else(HookToolName::bash),
         tool_use_id,
         tool_input,
         tool_response,

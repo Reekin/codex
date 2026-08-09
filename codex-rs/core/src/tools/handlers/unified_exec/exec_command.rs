@@ -25,6 +25,7 @@ use crate::tools::registry::ToolExecutor;
 use crate::unified_exec::ExecCommandRequest;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
+use crate::unified_exec::UnifiedExecHookMetadata;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::generate_chunk_id;
 use codex_features::Feature;
@@ -339,6 +340,8 @@ impl ExecCommandHandler {
                 original_token_count: None,
                 output_omitted_bytes: None,
                 hook_command: None,
+                hook_tool_name: None,
+                hook_input: None,
             }));
         }
 
@@ -347,8 +350,10 @@ impl ExecCommandHandler {
             .exec_command(
                 ExecCommandRequest {
                     command,
-                    shell_type,
+                    shell_type: Some(shell_type),
+                    tool_name: ToolName::plain("exec_command"),
                     hook_command: hook_command.clone(),
+                    hook_metadata: UnifiedExecHookMetadata::bash(hook_command.clone()),
                     process_id,
                     yield_time_ms,
                     max_output_tokens,
@@ -392,7 +397,9 @@ impl ExecCommandHandler {
                     exit_code: Some(output.exit_code),
                     original_token_count: Some(original_token_count),
                     output_omitted_bytes,
-                    hook_command: Some(hook_command),
+                    hook_command: Some(hook_command.clone()),
+                    hook_tool_name: Some("Bash".to_string()),
+                    hook_input: Some(serde_json::json!({ "command": hook_command })),
                 }))
             }
             Err(err) => Err(FunctionCallError::RespondToModel(format!(
@@ -450,7 +457,7 @@ impl CoreToolRuntime for ExecCommandHandler {
     }
 }
 
-fn emit_unified_exec_tty_metric(session_telemetry: &SessionTelemetry, tty: bool) {
+pub(super) fn emit_unified_exec_tty_metric(session_telemetry: &SessionTelemetry, tty: bool) {
     session_telemetry.counter(
         TOOL_CALL_UNIFIED_EXEC_METRIC,
         /*inc*/ 1,

@@ -596,6 +596,147 @@
       ],
       "type": "object"
     },
+    "ChatTreeChange": {
+      "properties": {
+        "nodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "$ref": "#/definitions/ChatTreeChangeKind"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "ChatTreeChangeKind": {
+      "enum": [
+        "nodeStarted",
+        "nodeFinalized",
+        "nodeSummaryUpdated",
+        "currentNodeChanged",
+        "treeRebuilt"
+      ],
+      "type": "string"
+    },
+    "ChatTreeNode": {
+      "properties": {
+        "nodeId": {
+          "type": "string"
+        },
+        "order": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "parentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/ChatTreeNodeStatus"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "order",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ChatTreeNodeStatus": {
+      "enum": [
+        "pending",
+        "completed",
+        "interrupted",
+        "replaced",
+        "reviewEnded"
+      ],
+      "type": "string"
+    },
+    "ChatTreeProjection": {
+      "properties": {
+        "currentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/definitions/ChatTreeNode"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "visibleNodeIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "visibleTurnIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "nodes",
+        "revision",
+        "version",
+        "visibleNodeIds",
+        "visibleTurnIds"
+      ],
+      "type": "object"
+    },
+    "ChatTreeUpdatedNotification": {
+      "properties": {
+        "change": {
+          "$ref": "#/definitions/ChatTreeChange"
+        },
+        "chatTree": {
+          "$ref": "#/definitions/ChatTreeProjection"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "change",
+        "chatTree",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "CodexErrorInfo": {
       "description": "This translation layer make sure that we expose codex error code in camel case.\n\nWhen an upstream HTTP status is available (for example, from the Responses API or a provider), it is forwarded in `httpStatusCode` on the relevant `codexErrorInfo` variant.",
       "oneOf": [
@@ -6155,6 +6296,26 @@
         "params"
       ],
       "title": "Thread/goal/clearedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "chatTree/updated"
+          ],
+          "title": "ChatTree/updatedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ChatTreeUpdatedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "ChatTree/updatedNotification",
       "type": "object"
     },
     {

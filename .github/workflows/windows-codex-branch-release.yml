@@ -1,0 +1,135 @@
+name: windows-codex-branch-release
+
+on:
+  push:
+    branches:
+      - integration-0.147.0
+  workflow_dispatch:
+
+concurrency:
+  group: windows-codex-branch-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    if: github.repository == 'Reekin/codex' && github.ref_name == 'integration-0.147.0'
+    name: Build Windows codex.exe and publish latest release
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_PROFILE_RELEASE_LTO: thin
+      TARGET: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ env.TARGET }}
+
+      - name: Configure LLVM linker
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ env.TARGET }}
+
+      - name: Define release metadata
+        id: meta
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          branch="${GITHUB_REF_NAME}"
+          short_sha="${GITHUB_SHA::12}"
+          release_tag="codex-${short_sha}"
+
+          {
+            echo "branch=${branch}"
+            echo "short_sha=${short_sha}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Cargo build codex.exe
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CARGO_PROFILE_RELEASE_LTO=${CARGO_PROFILE_RELEASE_LTO}"
+          export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          cargo build --target "${TARGET}" --release --bin codex --timings
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace="${GITHUB_WORKSPACE}"
+          if command -v cygpath >/dev/null 2>&1; then
+            workspace="$(cygpath -u "$workspace")"
+          fi
+          dist="${workspace}/dist"
+          mkdir -p "$dist"
+
+          cp "target/${TARGET}/release/codex.exe" "$dist/codex-portable.exe"
+
+          dist_windows="$dist"
+          if command -v cygpath >/dev/null 2>&1; then
+            dist_windows="$(cygpath -w "$dist")"
+          fi
+          powershell -NoProfile -Command \
+            "Compress-Archive -LiteralPath '${dist_windows}\\codex-portable.exe' -DestinationPath '${dist_windows}\\codex-portable.zip' -Force"
+
+          (cd "$dist" && sha256sum codex-portable.exe codex-portable.zip > SHA256SUMS.txt)
+          ls -lh "$dist"
+
+      - name: Publish GitHub latest release
+        shell: bash
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_tag="${{ steps.meta.outputs.release_tag }}"
+          release_name="Codex Windows ${{ steps.meta.outputs.short_sha }}"
+          notes_path="${RUNNER_TEMP}/codex-dev-release-notes.md"
+
+          cat > "$notes_path" <<EOF
+          Automated Windows dev build for branch \`${{ steps.meta.outputs.branch }}\`.
+
+          - Commit: \`${GITHUB_SHA}\`
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Target: \`${TARGET}\`
+          - Binary: unsigned portable branch build
+          - LTO: \`${CARGO_PROFILE_RELEASE_LTO}\`
+
+          This release is generated automatically from the downstream branch push and is marked as the repository latest release. Download \`codex-portable.exe\` for the standalone executable, or \`codex-portable.zip\` for the compressed portable package.
+          EOF
+
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release edit "$release_tag" \
+              --title "$release_name" \
+              --notes-file "$notes_path" \
+              --latest
+          else
+            gh release create "$release_tag" \
+              --target "$GITHUB_SHA" \
+              --title "$release_name" \
+              --notes-file "$notes_path" \
+              --latest
+          fi
+
+          gh release upload "$release_tag" dist/* --clobber

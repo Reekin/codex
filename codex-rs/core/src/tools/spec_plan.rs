@@ -13,6 +13,8 @@ use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::CurrentTimeHandler;
 use crate::tools::handlers::DynamicToolHandler;
+use crate::tools::handlers::ExecArgvHandler;
+use crate::tools::handlers::ExecArgvHandlerOptions;
 use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ExecCommandHandlerOptions;
 use crate::tools::handlers::GetContextRemainingHandler;
@@ -823,6 +825,10 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
         let environment_mode = tool_environment_mode(context.environments);
         if environment_mode.has_environment() {
             let include_environment_id = matches!(environment_mode, ToolEnvironmentMode::Multiple);
+            registry.add(ExecArgvHandler::new(ExecArgvHandlerOptions {
+                exec_permission_approvals_enabled: false,
+                include_environment_id,
+            }));
             registry.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
                 allow_login_shell: any_environment_allows_login_shell(context.environments),
                 exec_permission_approvals_enabled: false,
@@ -893,6 +899,10 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
 
     match shell_type_for_model_and_features(&turn_context.model_info, features) {
         ConfigShellToolType::UnifiedExec => {
+            registry.add(ExecArgvHandler::new(ExecArgvHandlerOptions {
+                exec_permission_approvals_enabled,
+                include_environment_id,
+            }));
             registry.add(ExecCommandHandler::new(ExecCommandHandlerOptions {
                 allow_login_shell,
                 exec_permission_approvals_enabled,
