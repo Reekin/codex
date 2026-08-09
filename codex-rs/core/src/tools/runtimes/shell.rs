@@ -181,7 +181,10 @@ impl ToolRuntime<ShellRequest, ExecToolCallOutput> for ShellRuntime {
                 justification: req.justification.clone(),
                 tty: None,
             },
-            command: req.hook_command.clone(),
+            permission_request_payload: crate::tools::sandboxing::PermissionRequestPayload::bash(
+                req.hook_command.clone(),
+                None,
+            ),
             environment_id: req.turn_environment.environment_id.clone(),
             permission_profile: req.turn_environment.permission_profile().clone(),
         })

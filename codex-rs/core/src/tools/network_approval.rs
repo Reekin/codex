@@ -59,7 +59,7 @@ pub(crate) struct NetworkApprovalSpec {
     pub network: Option<NetworkProxy>,
     pub mode: NetworkApprovalMode,
     pub trigger: GuardianNetworkAccessTrigger,
-    pub command: String,
+    pub permission_request_payload: PermissionRequestPayload,
     pub environment_id: String,
     pub permission_profile: PermissionProfile,
 }
@@ -265,7 +265,7 @@ struct ActiveNetworkApprovalCall {
     registration_id: String,
     turn_id: String,
     trigger: GuardianNetworkAccessTrigger,
-    command: String,
+    permission_request_payload: PermissionRequestPayload,
     environment_id: String,
     permission_profile: PermissionProfile,
     cancellation_token: CancellationToken,
@@ -740,14 +740,15 @@ impl NetworkApprovalService {
             |call| format!("{guardian_approval_id}#{}", call.registration_id),
         );
         let prompt_command = vec!["network-access".to_string(), target.clone()];
-        let command = owner_call
-            .as_ref()
-            .map_or_else(|| prompt_command.join(" "), |call| call.command.clone());
+        let permission_request_payload = owner_call.as_ref().map_or_else(
+            || PermissionRequestPayload::bash(prompt_command.join(" "), None),
+            |call| call.permission_request_payload.clone(),
+        );
         let hook_approval_decision = match run_permission_request_hooks(
             &session,
             &turn_context,
             &hook_run_id_suffix,
-            PermissionRequestPayload::bash(command, Some(format!("network-access {target}"))),
+            permission_request_payload.with_description(format!("network-access {target}")),
         )
         .await
         {
@@ -1078,7 +1079,7 @@ pub(crate) async fn begin_network_approval(
         network,
         mode,
         trigger,
-        command,
+        permission_request_payload,
         environment_id,
         permission_profile,
     } = match spec {
@@ -1109,7 +1110,7 @@ pub(crate) async fn begin_network_approval(
             registration_id: registration_id.clone(),
             turn_id: turn_id.to_string(),
             trigger,
-            command,
+            permission_request_payload,
             environment_id,
             permission_profile,
             cancellation_token: cancellation_token.clone(),

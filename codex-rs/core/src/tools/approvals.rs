@@ -62,6 +62,7 @@ pub(crate) enum ApprovalAction {
         environment_id: String,
         command: Vec<String>,
         hook_command: String,
+        permission_request_payload: PermissionRequestPayload,
         cwd: PathUri,
         sandbox_permissions: SandboxPermissions,
         additional_permissions: Option<AdditionalPermissionProfile>,
@@ -95,12 +96,19 @@ impl ApprovalAction {
                 hook_command,
                 justification,
                 ..
-            }
-            | Self::ExecCommand {
-                hook_command,
+            } => PermissionRequestPayload::bash(hook_command.clone(), justification.clone()),
+            Self::ExecCommand {
+                permission_request_payload,
                 justification,
                 ..
-            } => PermissionRequestPayload::bash(hook_command.clone(), justification.clone()),
+            } => justification.clone().map_or_else(
+                || permission_request_payload.clone(),
+                |description| {
+                    permission_request_payload
+                        .clone()
+                        .with_description(description)
+                },
+            ),
             Self::ApplyPatch { patch, .. } => PermissionRequestPayload {
                 tool_name: HookToolName::apply_patch(),
                 tool_input: serde_json::json!({ "command": patch }),

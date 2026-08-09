@@ -27,6 +27,7 @@ use crate::tools::runtimes::shell::zsh_fork_backend;
 use crate::tools::sandboxing::Approvable;
 use crate::tools::sandboxing::ApprovalAction;
 use crate::tools::sandboxing::ExecApprovalRequirement;
+use crate::tools::sandboxing::PermissionRequestPayload;
 use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::Sandboxable;
 use crate::tools::sandboxing::ToolCtx;
@@ -36,6 +37,7 @@ use crate::tools::sandboxing::managed_network_for_sandbox_permissions;
 use crate::tools::sandboxing::sandbox_permissions_preserving_denied_reads;
 use crate::unified_exec::NoopSpawnLifecycle;
 use crate::unified_exec::UnifiedExecError;
+use crate::unified_exec::UnifiedExecHookMetadata;
 use crate::unified_exec::UnifiedExecProcess;
 use crate::unified_exec::UnifiedExecProcessManager;
 use codex_network_proxy::ManagedNetworkSandboxContext;
@@ -61,8 +63,8 @@ const REMOTE_NETWORK_POLICY_DECISION_MARGIN: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug)]
 pub struct UnifiedExecRequest {
     pub command: Vec<String>,
-    pub shell_type: ShellType,
-    pub hook_command: String,
+    pub shell_type: Option<ShellType>,
+    pub hook_metadata: UnifiedExecHookMetadata,
     pub process_id: i32,
     pub cwd: PathUri,
     pub sandbox_cwd: PathUri,
@@ -132,6 +134,13 @@ fn build_unified_exec_sandbox_command(
     })
 }
 
+fn should_apply_shell_transforms(
+    shell_type: Option<ShellType>,
+    environment_is_remote: bool,
+) -> bool {
+    shell_type.is_some() && !environment_is_remote
+}
+
 impl<'a> UnifiedExecRuntime<'a> {
     /// Creates a runtime bound to the shared unified-exec process manager.
     pub fn new(manager: &'a UnifiedExecProcessManager, shell_mode: UnifiedExecShellMode) -> Self {
@@ -162,7 +171,17 @@ impl Approvable<UnifiedExecRequest> for UnifiedExecRuntime<'_> {
             id: call_id.to_string(),
             environment_id: req.turn_environment.environment_id.clone(),
             command: req.command.clone(),
-            hook_command: req.hook_command.clone(),
+            hook_command: req
+                .hook_metadata
+                .tool_input
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            permission_request_payload: PermissionRequestPayload {
+                tool_name: req.hook_metadata.tool_name.clone(),
+                tool_input: req.hook_metadata.tool_input.clone(),
+            },
             cwd: req.cwd.clone(),
             sandbox_permissions: req.sandbox_permissions,
             additional_permissions: req.additional_permissions.clone(),
@@ -224,7 +243,10 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                 justification: req.justification.clone(),
                 tty: Some(req.tty),
             },
-            command: req.hook_command.clone(),
+            permission_request_payload: PermissionRequestPayload {
+                tool_name: req.hook_metadata.tool_name.clone(),
+                tool_input: req.hook_metadata.tool_input.clone(),
+            },
             environment_id: req.turn_environment.environment_id.clone(),
             permission_profile: req.turn_environment.permission_profile().clone(),
         })
@@ -348,9 +370,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
         };
         #[cfg(not(unix))]
         let runtime_path_prepends = RuntimePathPrepends::default();
-        let command = if environment_is_remote {
-            base_command.to_vec()
-        } else {
+        let command = if should_apply_shell_transforms(req.shell_type, environment_is_remote) {
             maybe_wrap_shell_lc_with_snapshot(
                 base_command,
                 shell,
@@ -359,20 +379,24 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
                 &env,
                 &runtime_path_prepends,
             )
+        } else {
+            base_command.to_vec()
         };
         let command = disable_powershell_profile_for_elevated_windows_sandbox(
             &command,
-            Some(&req.shell_type),
+            req.shell_type.as_ref(),
             attempt.sandbox,
             attempt.windows_sandbox_level,
         );
-        let command = if matches!(req.shell_type, ShellType::PowerShell) {
+        let command = if matches!(req.shell_type, Some(ShellType::PowerShell)) {
             prefix_powershell_script_with_utf8(&command)
         } else {
             command
         };
 
-        if let UnifiedExecShellMode::ZshFork(zsh_fork_config) = &self.shell_mode {
+        if req.shell_type.is_some()
+            && let UnifiedExecShellMode::ZshFork(zsh_fork_config) = &self.shell_mode
+        {
             let command = build_unified_exec_sandbox_command(
                 &command,
                 &req.cwd,
@@ -479,10 +503,17 @@ mod tests {
     use super::*;
     use crate::config::PermissionProfileSnapshot;
     use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
+    use crate::session::tests::make_session_and_context;
     use crate::session::turn_context::EnvironmentConfig;
+    use crate::tools::sandboxing::PermissionRequestPayload;
     use crate::tools::sandboxing::ToolRuntime;
     use codex_exec_server::Environment;
     use codex_exec_server::LOCAL_ENVIRONMENT_ID;
+    use codex_network_proxy::ConfigReloader;
+    use codex_network_proxy::ConfigState;
+    use codex_network_proxy::NetworkProxyConfig;
+    use codex_network_proxy::NetworkProxyConstraints;
+    use codex_network_proxy::NetworkProxyState;
     use codex_protocol::models::PermissionProfile;
     use codex_tools::ZshForkConfig;
     use codex_utils_absolute_path::AbsolutePathBuf;
@@ -490,6 +521,43 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tempfile::tempdir;
+
+    struct StaticReloader;
+
+    impl ConfigReloader for StaticReloader {
+        fn source_label(&self) -> String {
+            "test config state".to_string()
+        }
+
+        fn maybe_reload(
+            &self,
+        ) -> codex_network_proxy::ConfigReloaderFuture<'_, Option<ConfigState>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn reload_now(&self) -> codex_network_proxy::ConfigReloaderFuture<'_, ConfigState> {
+            Box::pin(async { Err(anyhow::anyhow!("reload unsupported in test")) })
+        }
+    }
+
+    async fn test_network_proxy() -> NetworkProxy {
+        let state = codex_network_proxy::build_config_state(
+            NetworkProxyConfig::default(),
+            NetworkProxyConstraints::default(),
+        )
+        .expect("build proxy state");
+        NetworkProxy::builder()
+            .state(Arc::new(NetworkProxyState::with_reloader(
+                state,
+                Arc::new(StaticReloader),
+            )))
+            .managed_by_codex(false)
+            .http_addr("127.0.0.1:43128".parse().expect("http addr"))
+            .socks_addr("127.0.0.1:48081".parse().expect("socks addr"))
+            .build()
+            .await
+            .expect("build test proxy")
+    }
 
     fn test_turn_environment(cwd: PathUri) -> TurnEnvironment {
         TurnEnvironment::new(
@@ -529,6 +597,97 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shell_type_none_skips_shell_transforms() {
+        assert!(!should_apply_shell_transforms(None, false));
+        assert!(!should_apply_shell_transforms(Some(ShellType::Sh), true));
+        assert!(should_apply_shell_transforms(Some(ShellType::Sh), false));
+    }
+
+    #[tokio::test]
+    async fn exec_argv_permission_request_uses_exec_argv_metadata() {
+        let manager = UnifiedExecProcessManager::default();
+        let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
+        let mut request = test_request(
+            SandboxPermissions::RequireEscalated,
+            ExecApprovalRequirement::NeedsApproval {
+                reason: None,
+                proposed_execpolicy_amendment: None,
+            },
+        );
+        request.shell_type = None;
+        request.hook_metadata = UnifiedExecHookMetadata::exec_argv(
+            "printf '%s' '$HOME | *'".to_string(),
+            vec![
+                "printf".to_string(),
+                "%s".to_string(),
+                "$HOME | *".to_string(),
+            ],
+        );
+        let payload = runtime
+            .approval_action(&request, "call-argv")
+            .expect("approval action")
+            .permission_request_payload();
+        assert_eq!(
+            payload,
+            PermissionRequestPayload {
+                tool_name: crate::tools::hook_names::HookToolName::new("exec_argv"),
+                tool_input: serde_json::json!({
+                    "command": "printf '%s' '$HOME | *'",
+                    "argv": ["printf", "%s", "$HOME | *"],
+                }),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_argv_network_approval_spec_uses_exec_argv_permission_payload() {
+        let (session, turn) = make_session_and_context().await;
+        let cwd = AbsolutePathBuf::try_from(std::env::current_dir().expect("current dir"))
+            .expect("absolute cwd");
+        let manager = UnifiedExecProcessManager::default();
+        let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
+        let mut request = test_request(
+            SandboxPermissions::UseDefault,
+            ExecApprovalRequirement::Skip {
+                bypass_sandbox: false,
+                proposed_execpolicy_amendment: None,
+            },
+        );
+        request.command = vec![
+            "python3".to_string(),
+            "-c".to_string(),
+            "print(1)".to_string(),
+        ];
+        request.shell_type = None;
+        request.hook_metadata = UnifiedExecHookMetadata::exec_argv(
+            "python3 -c 'print(1)'".to_string(),
+            request.command.clone(),
+        );
+        request.network = Some(test_network_proxy().await);
+        request.cwd = cwd.clone().into();
+        request.sandbox_cwd = cwd.into();
+        let ctx = ToolCtx {
+            session: Arc::new(session),
+            turn: Arc::new(turn),
+            call_id: "call-argv-network".to_string(),
+            tool_name: codex_tools::ToolName::plain("exec_argv"),
+        };
+        let spec = runtime
+            .network_approval_spec(&request, &ctx)
+            .expect("network approval spec");
+        assert_eq!(
+            spec.permission_request_payload,
+            PermissionRequestPayload {
+                tool_name: crate::tools::hook_names::HookToolName::new("exec_argv"),
+                tool_input: serde_json::json!({
+                    "command": "python3 -c 'print(1)'",
+                    "argv": ["python3", "-c", "print(1)"],
+                }),
+            }
+        );
+    }
+
     #[tokio::test]
     async fn approval_key_includes_environment_id() {
         let manager = UnifiedExecProcessManager::default();
@@ -566,8 +725,8 @@ mod tests {
         let runtime = UnifiedExecRuntime::new(&manager, UnifiedExecShellMode::Direct);
         let request = UnifiedExecRequest {
             command: vec!["pwd".to_string()],
-            shell_type: ShellType::Sh,
-            hook_command: "pwd".to_string(),
+            shell_type: Some(ShellType::Sh),
+            hook_metadata: UnifiedExecHookMetadata::bash("pwd".to_string()),
             process_id: 1000,
             cwd: cwd.into(),
             sandbox_cwd: sandbox_cwd.clone().into(),
@@ -668,8 +827,8 @@ mod tests {
             .expect("current dir is absolute");
         UnifiedExecRequest {
             command: vec!["zsh".to_string(), "-c".to_string(), "echo hi".to_string()],
-            shell_type: ShellType::Zsh,
-            hook_command: "echo hi".to_string(),
+            shell_type: Some(ShellType::Zsh),
+            hook_metadata: UnifiedExecHookMetadata::bash("echo hi".to_string()),
             process_id: 1000,
             cwd: cwd.clone().into(),
             sandbox_cwd: cwd.clone().into(),

@@ -197,7 +197,7 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
     let mut expected_tools_names = if cfg!(windows) {
         vec!["shell_command"]
     } else {
-        vec!["exec_command", "write_stdin"]
+        vec!["exec_argv", "exec_command", "write_stdin"]
     };
     expected_tools_names.extend([
         "update_plan",

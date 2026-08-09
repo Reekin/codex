@@ -36,6 +36,11 @@ pub trait ToolOutput: Send {
         None
     }
 
+    /// Returns the tool name exposed to `PostToolUse` hooks for this output.
+    fn post_tool_use_tool_name(&self) -> Option<String> {
+        None
+    }
+
     /// Returns the stable value exposed to `PostToolUse` hooks for this tool output.
     ///
     /// Tool handlers decide whether a tool participates in `PostToolUse`, but
@@ -78,6 +83,10 @@ where
 
     fn post_tool_use_input(&self, payload: &ToolPayload) -> Option<JsonValue> {
         (**self).post_tool_use_input(payload)
+    }
+
+    fn post_tool_use_tool_name(&self) -> Option<String> {
+        (**self).post_tool_use_tool_name()
     }
 
     fn post_tool_use_response(&self, call_id: &str, payload: &ToolPayload) -> Option<JsonValue> {

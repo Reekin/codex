@@ -72,6 +72,15 @@ const BLOCKED_PROMPT_CONTEXT: &str = "Remember the blocked lighthouse note.";
 const PERMISSION_REQUEST_HOOK_MATCHER: &str = "^Bash$";
 const PERMISSION_REQUEST_ALLOW_REASON: &str = "should not be used for allow";
 
+fn enable_unified_exec_hooks(config: &mut Config) {
+    config.use_experimental_unified_exec_tool = true;
+    trust_discovered_hooks(config);
+    config
+        .features
+        .enable(Feature::UnifiedExec)
+        .expect("test config should allow feature update");
+}
+
 fn restrictive_workspace_write_profile() -> PermissionProfile {
     PermissionProfile::workspace_write_with(
         &[],
@@ -4923,5 +4932,187 @@ async fn post_tool_use_records_apply_patch_context_with_edit_alias() -> Result<(
     assert_eq!(hook_inputs[0]["tool_use_id"], call_id);
     assert_eq!(hook_inputs[0]["tool_input"]["command"], patch);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn permission_request_hook_sees_exec_argv_identity_and_argv() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_host_windows!(Ok(()));
+    let server = start_mock_server().await;
+    let call_id = "permissionrequest-exec-argv";
+    let marker = std::env::temp_dir().join("permissionrequest-exec-argv-marker");
+    let argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "from pathlib import Path; import sys; Path(sys.argv[1]).write_text('approved')"
+            .to_string(),
+        marker.display().to_string(),
+    ];
+    let justification = "create the temporary argv marker";
+    let args = serde_json::json!({
+        "argv": argv.clone(),
+        "sandbox_permissions": "require_escalated",
+        "justification": justification,
+    });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "exec_argv", &serde_json::to_string(&args)?),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "permission hook allowed exec_argv"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_permission_request_hook(
+                home,
+                Some("^exec_argv$"),
+                "allow",
+                PERMISSION_REQUEST_ALLOW_REASON,
+            )
+            .expect("write permission hook");
+        })
+        .with_config(enable_unified_exec_hooks);
+    let test = builder.build(&server).await?;
+    let _ = fs::remove_file(&marker);
+    test.submit_turn_with_approval_and_permission_profile(
+        "run exec_argv after hook approval",
+        AskForApproval::OnRequest,
+        PermissionProfile::read_only(),
+    )
+    .await?;
+    assert_eq!(responses.requests().len(), 2);
+    assert_eq!(fs::read_to_string(&marker)?, "approved");
+    let inputs = read_permission_request_hook_inputs(test.codex_home_path())?;
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0]["tool_name"], "exec_argv");
+    assert_eq!(inputs[0]["tool_input"]["argv"], serde_json::json!(argv));
+    assert_eq!(inputs[0]["tool_input"]["description"], justification);
+    Ok(())
+}
+
+#[tokio::test]
+async fn pre_tool_use_rewrites_exec_argv_before_execution() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_host_windows!(Ok(()));
+    let server = start_mock_server().await;
+    let call_id = "pretooluse-exec-argv-rewrite";
+    let original = std::env::temp_dir().join("pretooluse-exec-argv-original");
+    let rewritten = std::env::temp_dir().join("pretooluse-exec-argv-rewritten");
+    let writer = "from pathlib import Path; import sys; Path(sys.argv[1]).write_text(sys.argv[2])";
+    let original_argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        writer.to_string(),
+        original.display().to_string(),
+        "original".to_string(),
+    ];
+    let rewritten_argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        writer.to_string(),
+        rewritten.display().to_string(),
+        "rewritten".to_string(),
+    ];
+    let args = serde_json::json!({ "argv": original_argv.clone() });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "exec_argv", &serde_json::to_string(&args)?),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "argv rewrite completed"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let updated_input = serde_json::json!({ "argv": rewritten_argv });
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |home| {
+            write_updating_pre_tool_use_hook(home, "^exec_argv$", &updated_input)
+                .expect("write rewrite hook");
+        })
+        .with_config(enable_unified_exec_hooks);
+    let test = builder.build(&server).await?;
+    let _ = fs::remove_file(&original);
+    let _ = fs::remove_file(&rewritten);
+    test.submit_turn_with_permission_profile(
+        "run rewritten exec_argv",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    assert_eq!(responses.requests().len(), 2);
+    assert!(!original.exists());
+    assert_eq!(fs::read_to_string(&rewritten)?, "rewritten");
+    let inputs = read_pre_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(inputs[0]["tool_name"], "exec_argv");
+    assert_eq!(
+        inputs[0]["tool_input"]["argv"],
+        serde_json::json!(original_argv)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn post_tool_use_records_exec_argv_identity_and_argv() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_host_windows!(Ok(()));
+    let server = start_mock_server().await;
+    let call_id = "posttooluse-exec-argv";
+    let argv = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import sys; print(sys.argv[1])".to_string(),
+        "post-argv-output".to_string(),
+    ];
+    let args = serde_json::json!({ "argv": argv.clone() });
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(call_id, "exec_argv", &serde_json::to_string(&args)?),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_assistant_message("msg-1", "post hook observed"),
+                ev_completed("resp-2"),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            write_post_tool_use_hook(home, Some("^exec_argv$"), "context", "argv post context")
+                .expect("write post hook");
+        })
+        .with_config(enable_unified_exec_hooks);
+    let test = builder.build(&server).await?;
+    test.submit_turn("run exec_argv with post hook").await?;
+    assert_eq!(responses.requests().len(), 2);
+    let inputs = read_post_tool_use_hook_inputs(test.codex_home_path())?;
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0]["tool_name"], "exec_argv");
+    assert_eq!(inputs[0]["tool_input"]["argv"], serde_json::json!(argv));
+    assert!(
+        inputs[0]["tool_response"]
+            .as_str()
+            .is_some_and(|output| output.contains("post-argv-output"))
+    );
     Ok(())
 }
