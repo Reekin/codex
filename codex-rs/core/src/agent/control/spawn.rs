@@ -625,7 +625,9 @@ impl AgentControl {
                 .subagent_developer_instructions
                 .as_ref(),
         ) {
-            (MultiAgentVersion::V2, Some(_)) => {
+            (MultiAgentVersion::V2, override_instructions)
+                if override_instructions.is_some() || session_source.get_agent_role().is_some() =>
+            {
                 let parent_developer_instructions = match parent_thread
                     .session
                     .new_default_turn()
@@ -642,7 +644,7 @@ impl AgentControl {
                 )
             }
             (MultiAgentVersion::Disabled | MultiAgentVersion::V1, _)
-            | (MultiAgentVersion::V2, None) => (None, None),
+            | (MultiAgentVersion::V2, _) => (None, None),
         };
         let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
         // `record_conversation_items` only queues persistence writes asynchronously.
@@ -793,6 +795,45 @@ impl AgentControl {
                 | RolloutItem::WorldState(_) => true,
             }
         });
+        if preserve_reference_context_item
+            && let Some(start_hint_text) =
+                crate::session::multi_agents::forked_history_start_hint_text(&session_source)
+            && let Some(start_hint_message) =
+                crate::context_manager::updates::build_developer_update_item(vec![start_hint_text])
+        {
+            let mut start_hint_message = Some(start_hint_message);
+            for item in forked_rollout_items.iter_mut().rev() {
+                let RolloutItem::Compacted(compacted) = item else {
+                    continue;
+                };
+                if let Some(replacement_history) = compacted.replacement_history.as_mut() {
+                    if let Some(start_hint_message) = start_hint_message.take() {
+                        replacement_history.insert(0, start_hint_message);
+                    }
+                    break;
+                }
+            }
+            if let Some(start_hint_message) = start_hint_message {
+                let insertion_index = forked_rollout_items
+                    .iter()
+                    .position(|item| matches!(item, RolloutItem::ResponseItem(_)))
+                    .unwrap_or(forked_rollout_items.len());
+                forked_rollout_items.insert(
+                    insertion_index,
+                    RolloutItem::ResponseItem(start_hint_message),
+                );
+            }
+        }
+        if preserve_reference_context_item
+            && let Some(boundary_hint_text) =
+                crate::session::multi_agents::forked_history_boundary_hint_text(&session_source)
+            && let Some(boundary_hint_message) =
+                crate::context_manager::updates::build_developer_update_item(vec![
+                    boundary_hint_text,
+                ])
+        {
+            forked_rollout_items.push(RolloutItem::ResponseItem(boundary_hint_message));
+        }
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
         // context omitted the parent's developer fragment, append the child's override so its
         // instructions still reach the model exactly once.

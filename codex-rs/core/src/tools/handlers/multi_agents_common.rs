@@ -1,5 +1,6 @@
 use crate::agent::role::apply_role_to_config;
 use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
+use crate::agent::role::apply_role_to_config_preserving_developer_instructions;
 use crate::config::Config;
 use crate::config::DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS;
 use crate::config::HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS;
@@ -223,17 +224,6 @@ fn build_agent_shared_config(
     Ok(config)
 }
 
-pub(crate) fn reject_full_fork_agent_type_override(
-    agent_type: Option<&str>,
-) -> Result<(), FunctionCallError> {
-    if agent_type.is_some() {
-        return Err(FunctionCallError::RespondToModel(
-            "Full-history forked agents inherit the parent agent type; omit agent_type, or spawn without a full-history fork.".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 /// Copies runtime-only turn state onto a child config before it is handed to `AgentControl`.
 ///
 /// These values are chosen by the live turn and selected environment rather than persisted config,
@@ -380,21 +370,36 @@ pub(crate) async fn apply_spawn_agent_service_tier(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum SpawnAgentRoleInstructions {
+    Default,
+    PreserveCurrent,
+}
+
 pub(crate) async fn apply_spawn_agent_role(
     session: &Session,
     config: &mut Config,
     role_name: Option<&str>,
+    instructions: SpawnAgentRoleInstructions,
 ) -> Result<(), FunctionCallError> {
     let previous_model = config.model.clone();
     let previous_reasoning_effort = config.model_reasoning_effort.clone();
-    if session.multi_agent_version() == Some(MultiAgentVersion::V2) {
-        apply_role_to_config_for_multi_agent_v2(config, role_name)
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
-    } else {
-        apply_role_to_config(config, role_name)
-            .await
-            .map_err(FunctionCallError::RespondToModel)?;
+    match (instructions, session.multi_agent_version()) {
+        (SpawnAgentRoleInstructions::PreserveCurrent, _) => {
+            apply_role_to_config_preserving_developer_instructions(config, role_name)
+                .await
+                .map_err(FunctionCallError::RespondToModel)?;
+        }
+        (SpawnAgentRoleInstructions::Default, Some(MultiAgentVersion::V2)) => {
+            apply_role_to_config_for_multi_agent_v2(config, role_name)
+                .await
+                .map_err(FunctionCallError::RespondToModel)?;
+        }
+        (SpawnAgentRoleInstructions::Default, _) => {
+            apply_role_to_config(config, role_name)
+                .await
+                .map_err(FunctionCallError::RespondToModel)?;
+        }
     }
     if config.model == previous_model && config.model_reasoning_effort == previous_reasoning_effort
     {

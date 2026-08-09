@@ -63,6 +63,15 @@ impl Handler {
         let arguments = function_arguments(payload)?;
         let args: WaitArgs = parse_arguments(&arguments)?;
         let receiver_thread_ids = parse_agent_id_targets(args.targets)?;
+        if receiver_thread_ids.contains(&session.thread_id) {
+            let current_agent_name = crate::session::multi_agents::current_agent_name(
+                &turn.session_source,
+                session.thread_id,
+            );
+            return Err(FunctionCallError::RespondToModel(format!(
+                "wait_agent cannot wait for the current agent `{current_agent_name}`. Return your result if your task is complete, or wait only for another agent id."
+            )));
+        }
         let mut receiver_agents = Vec::with_capacity(receiver_thread_ids.len());
         let mut target_by_thread_id = HashMap::with_capacity(receiver_thread_ids.len());
         for receiver_thread_id in &receiver_thread_ids {

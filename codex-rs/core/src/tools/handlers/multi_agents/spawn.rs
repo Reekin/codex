@@ -94,9 +94,6 @@ async fn handle_spawn_agent(
     if let Some(service_tier) = args.service_tier.as_ref() {
         config.service_tier = Some(service_tier.clone());
     }
-    if args.fork_context {
-        reject_full_fork_agent_type_override(role_name)?;
-    }
     apply_requested_spawn_agent_model_overrides(
         &session,
         turn.as_ref(),
@@ -105,9 +102,12 @@ async fn handle_spawn_agent(
         args.reasoning_effort.clone(),
     )
     .await?;
-    if !args.fork_context {
-        apply_spawn_agent_role(&session, &mut config, role_name).await?;
-    }
+    let role_instructions = if args.fork_context && role_name.is_some() {
+        SpawnAgentRoleInstructions::PreserveCurrent
+    } else {
+        SpawnAgentRoleInstructions::Default
+    };
+    apply_spawn_agent_role(&session, &mut config, role_name, role_instructions).await?;
     apply_spawn_agent_service_tier(
         &session,
         &mut config,

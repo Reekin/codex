@@ -57,6 +57,20 @@ pub(crate) async fn apply_role_to_config_for_multi_agent_v2(
     apply_role_to_config_with_developer_instructions(
         config,
         role_name,
+        RoleDeveloperInstructions::PreserveCallerInstructionsForMultiAgentV2,
+    )
+    .await
+}
+
+/// Applies a role while preserving the caller's developer instructions unless the role defines
+/// its own instructions explicitly.
+pub(crate) async fn apply_role_to_config_preserving_developer_instructions(
+    config: &mut Config,
+    role_name: Option<&str>,
+) -> Result<(), String> {
+    apply_role_to_config_with_developer_instructions(
+        config,
+        role_name,
         RoleDeveloperInstructions::PreserveCallerInstructions,
     )
     .await
@@ -65,6 +79,7 @@ pub(crate) async fn apply_role_to_config_for_multi_agent_v2(
 #[derive(Clone, Copy)]
 enum RoleDeveloperInstructions {
     UseConfigLayers,
+    PreserveCallerInstructionsForMultiAgentV2,
     PreserveCallerInstructions,
 }
 
@@ -181,11 +196,17 @@ mod reload {
             preserve_current_provider,
             preserve_current_service_tier,
         );
-        if let (RoleDeveloperInstructions::PreserveCallerInstructions, Some(_), None) = (
-            developer_instructions,
-            &config.multi_agent_v2.subagent_developer_instructions,
-            role_layer_toml.get("developer_instructions"),
-        ) {
+        let role_defines_developer_instructions =
+            role_layer_toml.get("developer_instructions").is_some();
+        let preserve_caller_developer_instructions = match developer_instructions {
+            RoleDeveloperInstructions::UseConfigLayers => false,
+            RoleDeveloperInstructions::PreserveCallerInstructionsForMultiAgentV2 => config
+                .multi_agent_v2
+                .subagent_developer_instructions
+                .is_some(),
+            RoleDeveloperInstructions::PreserveCallerInstructions => true,
+        };
+        if preserve_caller_developer_instructions && !role_defines_developer_instructions {
             overrides
                 .developer_instructions
                 .clone_from(&config.developer_instructions);

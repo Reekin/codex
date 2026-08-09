@@ -15,7 +15,7 @@ pub const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
 const MULTI_AGENT_V1_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
 
 const SPAWN_AGENT_INHERITED_MODEL_GUIDANCE: &str = "Spawned agents inherit your current model by default. Omit `model` to use that preferred default; set `model` only when an explicit override is needed.";
-const SPAWN_AGENT_TYPE_OVERRIDE_DESCRIPTION_V1: &str = "Agent type override for the new agent. Omit to inherit the parent agent type with a full-history fork; otherwise, `default` is used.";
+const SPAWN_AGENT_TYPE_OVERRIDE_DESCRIPTION_V1: &str = "Agent type override for the new agent. Omit to use the default agent type. The selected role applies regardless of whether parent history is inherited.";
 const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
 const SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION: &str =
@@ -272,7 +272,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
             name: "wait_agent".to_string(),
-            description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+            description: "Wait for other agents to reach a final status. The current agent cannot wait on itself. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
                 .to_string(),
             strict: false,
             defer_loading: None,
@@ -285,7 +285,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
 pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "wait_agent".to_string(),
-        description: "Wait for a mailbox update from any live agent, including queued messages and final-status notifications. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns either a summary of which agents have updates (if any), an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline."
+        description: "Wait for a mailbox update delivered to the current agent, including queued messages and final-status notifications. This observes only the caller's own mailbox, not another agent's children or mailbox. The wait also ends early when new user input is steered into the active turn. Does not return the content; returns a summary naming the current agent mailbox, an interruption summary for steered input, or a timeout summary if no activity arrives before the deadline."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -456,6 +456,10 @@ fn list_agents_output_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "current_agent_name": {
+                "type": "string",
+                "description": "Canonical task path for the current agent, otherwise its thread id when no canonical path exists."
+            },
             "agents": {
                 "type": "array",
                 "items": {
@@ -465,18 +469,22 @@ fn list_agents_output_schema() -> Value {
                             "type": "string",
                             "description": "Canonical task name for the agent when available, otherwise the agent id."
                         },
+                        "is_current_agent": {
+                            "type": "boolean",
+                            "description": "Whether this entry is the agent that called list_agents."
+                        },
                         "agent_status": {
                             "description": "Last known status of the agent.",
                             "allOf": [agent_status_output_schema()]
                         }
                     },
-                    "required": ["agent_name", "agent_status"],
+                    "required": ["agent_name", "is_current_agent", "agent_status"],
                     "additionalProperties": false
                 },
                 "description": "Live agents visible in the current root thread tree."
             }
         },
-        "required": ["agents"],
+        "required": ["current_agent_name", "agents"],
         "additionalProperties": false
     })
 }
@@ -515,6 +523,10 @@ fn wait_output_schema_v2() -> Value {
     json!({
         "type": "object",
         "properties": {
+            "current_agent_name": {
+                "type": "string",
+                "description": "Canonical task path for the agent whose mailbox was observed by this wait call, otherwise its thread id when no canonical path exists."
+            },
             "message": {
                 "type": "string",
                 "description": "Brief wait summary without the agent's final content."
@@ -524,7 +536,7 @@ fn wait_output_schema_v2() -> Value {
                 "description": "Whether the wait call returned because no mailbox update arrived before the timeout."
             }
         },
-        "required": ["message", "timed_out"],
+        "required": ["current_agent_name", "message", "timed_out"],
         "additionalProperties": false
     })
 }
@@ -640,7 +652,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         (
             "agent_type".to_string(),
             JsonSchema::string(Some(format!(
-                "Agent type override for the new agent. Omit unless explicitly asked. Set `fork_turns` to `none` or a positive integer when an explicit override is needed.\n{agent_type_description}"
+                "Agent type override for the new agent. Omit unless explicitly asked. The selected role applies regardless of how much parent history is inherited.\n{agent_type_description}"
             ))),
         ),
         (
