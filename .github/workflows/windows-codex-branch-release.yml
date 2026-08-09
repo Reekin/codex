@@ -83,7 +83,7 @@ jobs:
           dist="${workspace}/dist"
           mkdir -p "$dist"
 
-          cp "target/${TARGET}/release/codex.exe" "$dist/codex-portable.exe"
+          cp "${CARGO_TARGET_DIR}/${TARGET}/release/codex.exe" "$dist/codex-portable.exe"
 
           dist_windows="$dist"
           if command -v cygpath >/dev/null 2>&1; then
