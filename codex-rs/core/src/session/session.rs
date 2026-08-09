@@ -25,8 +25,11 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
+use std::collections::HashMap;
 use std::sync::OnceLock;
+use tokio::sync::Notify;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 
 /// Context for an initialized model agent
 ///
@@ -59,6 +62,8 @@ pub(crate) struct Session {
         crate::user_message_admission::PendingUserMessageAdmissions,
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+    pub(crate) chat_tree_summary_jobs: Mutex<HashMap<String, CancellationToken>>,
+    pub(crate) chat_tree_summary_jobs_changed: Notify,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) fork_persistence: ForkPersistence,
@@ -1211,6 +1216,8 @@ impl Session {
                 pending_user_message_admissions: Default::default(),
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
+                chat_tree_summary_jobs: Mutex::new(HashMap::new()),
+                chat_tree_summary_jobs_changed: Notify::new(),
                 services,
                 git_enrichment_policy,
                 fork_persistence,

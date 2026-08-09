@@ -23,6 +23,25 @@ impl App {
         event: AppEvent,
     ) -> Result<AppRunControl> {
         match event {
+            AppEvent::OpenChatTree { thread_id } => {
+                match app_server.chat_tree_read(thread_id).await {
+                    Ok(response) => {
+                        self.chat_widget
+                            .set_chat_tree_projection(*response.chat_tree);
+                        self.chat_widget.open_chat_tree_popup();
+                    }
+                    Err(err) => self
+                        .chat_widget
+                        .add_error_message(format!("Failed to read chat tree: {err}")),
+                }
+            }
+            AppEvent::RefreshChatTreeTranscript {
+                thread_id,
+                chat_tree,
+            } => {
+                self.refresh_chat_tree_transcript(tui, app_server, thread_id, chat_tree)
+                    .await?;
+            }
             AppEvent::NewSession { name } => {
                 self.start_fresh_session_with_summary_hint(
                     tui, app_server, /*session_start_source*/ None,

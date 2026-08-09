@@ -1,0 +1,114 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ChatTreeNode": {
+      "properties": {
+        "nodeId": {
+          "type": "string"
+        },
+        "order": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "parentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/ChatTreeNodeStatus"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "order",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ChatTreeNodeStatus": {
+      "enum": [
+        "pending",
+        "completed",
+        "interrupted",
+        "replaced",
+        "reviewEnded"
+      ],
+      "type": "string"
+    },
+    "ChatTreeProjection": {
+      "properties": {
+        "currentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/definitions/ChatTreeNode"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "visibleNodeIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "visibleTurnIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "nodes",
+        "revision",
+        "version",
+        "visibleNodeIds",
+        "visibleTurnIds"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "chatTree": {
+      "$ref": "#/definitions/ChatTreeProjection"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "chatTree",
+    "threadId"
+  ],
+  "title": "ChatTreeSetCurrentResponse",
+  "type": "object"
+}

@@ -5,6 +5,10 @@ use crate::protocol::item_builders::build_file_change_begin_item;
 use crate::protocol::item_builders::build_file_change_end_item;
 use crate::protocol::item_builders::build_item_from_guardian_event;
 use crate::protocol::item_builders::review_output_text;
+use crate::protocol::v2::ChatTreeChange;
+use crate::protocol::v2::ChatTreeChangeKind;
+use crate::protocol::v2::ChatTreeNode;
+use crate::protocol::v2::ChatTreeProjection;
 use crate::protocol::v2::CollabAgentState;
 use crate::protocol::v2::CollabAgentTool;
 use crate::protocol::v2::CollabAgentToolCallStatus;
@@ -27,6 +31,10 @@ use crate::protocol::v2::WebSearchAction;
 use crate::protocol::v2::WebSearchItem;
 use crate::protocol::v2::web_search_action_from_core;
 use codex_extension_items::image_generation::ImageGenerationItem;
+use codex_protocol::chat_tree::ChatTreeProjection as DomainChatTreeProjection;
+use codex_protocol::chat_tree::ChatTreeState as DomainChatTreeState;
+use codex_protocol::chat_tree::overlay_entries_from_projection;
+use codex_protocol::chat_tree_protocol::chat_tree_event_from_protocol_event;
 use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::protocol::AgentReasoningEvent;
@@ -64,6 +72,103 @@ use codex_protocol::review_format::REVIEW_FALLBACK_MESSAGE;
 use std::collections::HashMap;
 use tracing::warn;
 use uuid::Uuid;
+
+pub fn build_chat_tree_projection_from_rollout_items(items: &[RolloutItem]) -> ChatTreeProjection {
+    let mut state = DomainChatTreeState::default();
+    for item in items {
+        if let RolloutItem::EventMsg(event_msg) = item
+            && let Some(event) = chat_tree_event_from_protocol_event(event_msg)
+            && let Err(err) = state.apply_event(&event)
+        {
+            warn!(
+                ?err,
+                "invalid durable chat tree event ignored while building projection"
+            );
+        }
+    }
+    chat_tree_projection_from_domain(state.projection())
+}
+
+pub fn chat_tree_projection_from_domain(
+    projection: DomainChatTreeProjection,
+) -> ChatTreeProjection {
+    ChatTreeProjection {
+        version: projection.version,
+        revision: projection.revision,
+        current_node_id: projection.current_node_id,
+        visible_node_ids: projection.visible_node_ids,
+        visible_turn_ids: projection.visible_turn_ids,
+        nodes: projection
+            .nodes
+            .into_iter()
+            .map(|node| ChatTreeNode {
+                node_id: node.node_id,
+                parent_node_id: node.parent_node_id,
+                turn_id: node.turn_id,
+                order: node.order,
+                status: node.status.into(),
+                summary: node.summary,
+            })
+            .collect(),
+    }
+}
+
+pub fn chat_tree_change_from_event(event: &EventMsg) -> Option<ChatTreeChange> {
+    let (r#type, node_id) = match event {
+        EventMsg::ChatTreeNodeStarted(payload) => (
+            ChatTreeChangeKind::NodeStarted,
+            Some(payload.node_id.clone()),
+        ),
+        EventMsg::ChatTreeNodeFinalized(payload) => (
+            ChatTreeChangeKind::NodeFinalized,
+            Some(payload.node_id.clone()),
+        ),
+        EventMsg::ChatTreeNodeSummaryUpdated(payload) => (
+            ChatTreeChangeKind::NodeSummaryUpdated,
+            Some(payload.node_id.clone()),
+        ),
+        EventMsg::ChatTreeCurrentNodeChanged(payload) => (
+            ChatTreeChangeKind::CurrentNodeChanged,
+            Some(payload.node_id.clone()),
+        ),
+        EventMsg::ThreadRolledBack(_) => (ChatTreeChangeKind::TreeRebuilt, None),
+        _ => return None,
+    };
+    Some(ChatTreeChange { r#type, node_id })
+}
+
+pub fn chat_tree_overlay_entries(
+    projection: &ChatTreeProjection,
+) -> Vec<codex_protocol::chat_tree::ChatTreeOverlayEntry> {
+    overlay_entries_from_projection(&domain_chat_tree_projection(projection))
+}
+
+pub fn refresh_chat_tree_projection(projection: &mut ChatTreeProjection) {
+    let state = DomainChatTreeState::from_projection(domain_chat_tree_projection(projection));
+    *projection = chat_tree_projection_from_domain(state.projection());
+}
+
+fn domain_chat_tree_projection(projection: &ChatTreeProjection) -> DomainChatTreeProjection {
+    DomainChatTreeProjection {
+        version: projection.version,
+        revision: projection.revision,
+        current_node_id: projection.current_node_id.clone(),
+        visible_node_ids: projection.visible_node_ids.clone(),
+        visible_turn_ids: projection.visible_turn_ids.clone(),
+        nodes: projection
+            .nodes
+            .iter()
+            .map(|node| codex_protocol::chat_tree::ChatTreeNode {
+                node_id: node.node_id.clone(),
+                parent_node_id: node.parent_node_id.clone(),
+                turn_id: node.turn_id.clone(),
+                order: node.order,
+                status: node.status.to_core(),
+                summary: node.summary.clone(),
+            })
+            .collect(),
+    }
+}
 
 #[cfg(test)]
 use crate::protocol::v2::CommandAction;

@@ -674,6 +674,16 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadReadResponse,
     },
+    ChatTreeRead => "chatTree/read" {
+        params: v2::ChatTreeReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ChatTreeReadResponse,
+    },
+    ChatTreeSetCurrent => "chatTree/setCurrent" {
+        params: v2::ChatTreeSetCurrentParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ChatTreeSetCurrentResponse,
+    },
     #[experimental("thread/turns/list")]
     ThreadTurnsList => "thread/turns/list" {
         params: v2::ThreadTurnsListParams,
@@ -1694,6 +1704,7 @@ server_notification_definitions! {
     ThreadNameUpdated => "thread/name/updated" (v2::ThreadNameUpdatedNotification),
     ThreadGoalUpdated => "thread/goal/updated" (v2::ThreadGoalUpdatedNotification),
     ThreadGoalCleared => "thread/goal/cleared" (v2::ThreadGoalClearedNotification),
+    ChatTreeUpdated => "chatTree/updated" (v2::ChatTreeUpdatedNotification),
     #[experimental("thread/environment/connected")]
     EnvironmentConnected => "thread/environment/connected" (v2::EnvironmentConnectionNotification),
     #[experimental("thread/environment/disconnected")]
