@@ -1,150 +1,203 @@
 ---
 name: personal-features-port
-description: Use when porting, reviewing, integrating, or validating downstream personal Codex features that are not expected to be accepted upstream. Covers per-feature migration branches, integration branches such as integration-0.133, adapter-first architecture, feature-specific references such as chat tree, and downstream packaging/release automation that should live on integration branches.
+description: Port, reimplement, review, integrate, or validate downstream personal Codex features across upstream releases, and define new downstream features that must remain maintainable in future ports. Use for versioned feature branches, integration branches, migration planning, contract preservation, adapter remapping, acceptance, and downstream release handoff.
 ---
 
 # Personal Features Port
 
-Use this skill to keep multiple downstream personal features alive while tracking newer upstream Codex releases.
+Preserve downstream feature behavior while replacing only the wiring forced by upstream changes.
 
-The maintenance model is:
+## Source Of Truth
 
-1. Port each feature on its own feature branch.
-2. Keep each feature branch focused on that feature's stable behavior and tests.
-3. Merge or replay completed feature branches into one integration branch for the upstream version, for example `integration-0.133`.
-4. Keep cross-cutting downstream infrastructure, packaging, and release workflow changes on the integration branch and carry them forward from integration branch to integration branch.
+Use this priority when sources disagree:
 
-Do not treat the integration branch as the place to solve every feature's migration. A feature should first prove it can run against the new upstream base with a clear adapter boundary, then integration resolves feature-to-feature conflicts and downstream distribution.
+1. An explicit requirement change approved for the current task.
+2. The feature contract in this skill.
+3. The direct previous accepted feature branch or tag and its executable tests.
+4. Current upstream architecture for hook and adapter placement.
 
-## Start Here
+Treat old code as evidence, not as the contract. Do not weaken a contract to match an incomplete port.
 
-Read only the references needed for the current phase:
+The checked-out `integration-<upstream-version>` branch from which the user invokes this skill is
+the canonical launch ref. It must contain this complete skill, every feature contract, and
+integration-owned release knowledge. Do not switch to another integration branch or create extra
+refs unless the user explicitly asks.
 
-- For the standard feature guide structure, read `references/feature-guide-template.md`.
-- For any feature migration, read `references/common-migration-playbook.md`.
-- For chat tree work, read `references/feature-chat-tree-contract.md` first, then the other `feature-chat-tree-*` files needed by the touched surface.
-- For chat tree migration execution, fill `references/feature-chat-tree-migration-template.md` before implementation edits.
-- For subagent identity work, read `references/feature-subagent-identity.md`.
-- For empty final-answer retry work, read `references/feature-empty-final-answer-retry.md`.
-- For integration branch work, read `references/integration-release-automation.md`.
-- For final chat tree acceptance, read `references/feature-chat-tree-acceptance.md`.
+## Feature Registry
 
-## Branch Strategy
+Read only the target feature reference unless integration work needs more.
 
-- Treat OpenAI's repo as `upstream`.
-- Treat this repo/fork as the downstream personal-feature maintenance line.
-- Use upstream stable tags as the base for each release train.
-- For each feature, create a focused migration branch from the relevant upstream stable tag or from the previous release's feature branch, depending on which gives the cleanest isolated diff.
-- Include the target upstream version in every feature branch name, for example `ft/<feature>-0.133`.
-- After a feature branch passes its own acceptance checks, merge or replay it into the integration branch for that upstream version.
-- Name integration branches by upstream version, for example `integration-0.133`.
-- The integration branch carries:
-  - the selected set of personal features for that upstream version;
-  - cross-feature conflict resolution;
-  - downstream build/package/release automation;
-  - integration-only smoke tests and handoff notes.
+| Feature | Branch pattern | Portability profile | Reference |
+| --- | --- | --- | --- |
+| Chat tree | `ft/chat-tree-<upstream-version>` | stateful core | `references/feature-chat-tree.md` |
+| Argv-native exec | `ft/exec-argv-<upstream-version>` | cross-cutting contract | `references/feature-exec-argv.md` |
+| Empty final-answer retry | `ft/retry-empty-final-answer-<upstream-version>` | lifecycle policy | `references/feature-empty-final-answer-retry.md` |
+| Subagent identity | `ft/subagent-identity-labels-<upstream-version>` | typed projection | `references/feature-subagent-identity.md` |
 
-Avoid putting feature-specific runtime behavior directly into the integration branch without a corresponding feature branch. The integration branch should compose proven feature branches, not hide feature work in release plumbing.
+For integration packaging and release work, also read
+`references/integration-release-automation.md`.
 
-## Adapter-First Principle
+## Start A Migration
 
-Every personal feature should be organized around a stable feature core and a small upstream adapter.
+Before editing code:
 
-Common rule for every feature branch:
+1. Inspect the current branch and worktree. Confirm it is the intended `integration-*` launch branch
+   and contains the complete skill.
+2. Read the repository `AGENTS.md`, this file, and the target feature reference.
+3. Resolve the target upstream stable tag and the direct previous feature branch or tag using the
+   registry pattern and launch integration version. If the ref is missing or ambiguous, resolve
+   that before editing.
+4. Create or reuse `integration-<target-version>` from the target upstream tag.
+5. Before creating feature branches, carry this complete skill and integration-owned release
+   infrastructure from the launch integration into the target integration as a knowledge-baseline
+   commit.
+6. Create each `ft/<feature>-<target-version>` branch and worktree from that knowledge baseline.
 
-- Keep product behavior, domain invariants, durable events, projection rules, and feature-owned tests as stable as possible across upstream versions.
-- Put upstream-specific session, protocol, app-server, TUI, storage, or build-layout coupling behind adapter modules.
-- On each upstream port, first ask whether the stable core can remain unchanged.
-- If upstream changed underneath the feature, adjust the adapter-to-upstream implementation before redesigning the feature core.
-- Do not let feature cores import large upstream orchestration types when a small adapter-owned data shape would preserve the boundary.
-- Do not duplicate stable projection or reducer logic in UI/API/build glue.
+This ordering ensures every migration agent starts with all contracts even when only one feature
+branch is checked out.
 
-The desired outcome is that future ports mostly answer: "where did upstream move the hook?" rather than "what did this feature mean?"
+Record a port brief in the task plan, PR body, or other temporary handoff. Do not add it to the
+skill:
 
-## Per-Feature Migration Workflow
+- launch integration and target upstream tag;
+- previous and new feature refs;
+- target integration branch;
+- selected feature set and whether the target integration is a staging branch or complete release;
+- contract changes, normally none;
+- carry-forward inventory: stable, adapt, replace, omit, or integration-only;
+- integration-owned release file inventory from the previous integration;
+- current upstream hook map, including timing, source of truth, failure behavior, and evidence;
+- validation mapping for every P0 scenario;
+- residual risks.
 
-1. Identify the upstream stable tag and the direct previous feature branch.
-2. Inventory the feature's stable core, adapter surfaces, tests, and docs.
-3. Try a normal release-to-release rebase when conflicts are localized to adapters.
-4. If conflicts become architectural, start from the new upstream base and reinstall:
-   - stable feature core;
-   - feature contract/API/schema;
-   - durable persistence/replay facts;
-   - tests and fixtures;
-   - thin adapters for the new upstream hook points.
-5. Keep unrelated integration concerns out of the feature branch.
-6. Run focused feature validation before merging into integration.
-7. Update the feature-specific reference files with reusable lessons.
+Do not begin broad implementation edits until the previous implementation and new hook points are
+accounted for.
 
-## Integration Workflow
+## Choose The Port Shape
 
-Use an integration branch after the per-feature branches are individually coherent.
+Prefer a rebase or replay when conflicts are localized to adapter locations, imports, registration,
+or small API changes.
 
-1. Create or update the versioned integration branch, for example `integration-0.133`.
-2. Bring in each completed feature branch one at a time.
-3. Resolve cross-feature conflicts in integration commits.
-4. Carry forward downstream packaging and branch-release automation from the previous integration branch.
-5. Keep release workflow changes in integration unless a feature branch truly cannot build or test without a small local adapter.
-6. Run integration-level smoke tests that exercise the composed feature set.
-7. Push the integration branch only after it can build and produce the expected downstream artifacts.
+Start a clean port from the target knowledge baseline when upstream changed the lifecycle, storage,
+protocol, UI, or execution model enough that conflict resolution would preserve obsolete
+assumptions.
 
-Packaging and branch release work is not part of any one feature's product contract. It should flow from integration branch to integration branch.
+In either mode:
 
-## Final Migration Review
+- preserve the feature contract, stable data semantics, public wire behavior, and feature-owned
+  tests;
+- reuse stable implementation units when they still fit;
+- rewrite adapters against current upstream instead of recreating old upstream architecture;
+- do not use a port to perform speculative architecture cleanup; a `PREFERRED` shape never
+  justifies a clean port or refactor by itself;
+- keep packaging and cross-feature conflict fixes out of feature branches;
+- remove replaced approaches rather than retaining the old path as fallback.
 
-Before final delivery, spawn a fresh independent review subagent after implementation, focused validation, and real-path acceptance are complete. The reviewer must not have owned the migration implementation.
+## Apply The Portability Profile
 
-Keep this review strictly focused on the migration itself:
+Use the profile from the feature registry. Do not force every feature into the same architecture.
+Choose the profile for the feature's dominant migration risk. A small supporting durable field does
+not by itself make a lifecycle policy or typed projection into a stateful core.
 
-- Compare the migrated implementation with the direct previous feature branch, stable feature contract, and applicable references from this skill.
-- Verify that the implementation approach still follows the skill's adapter-first architecture and branch-boundary rules.
-- Verify that user-visible behavior, durable behavior, API/schema behavior, and feature-owned acceptance paths remain equivalent to the previous version unless an intentional change was explicitly declared.
-- Check for regressions or new bugs introduced by changed upstream hook points, conflict resolution, integration composition, or release plumbing.
-- Treat a finding as blocking only when it identifies a migration requirement violation, an unintended behavior difference, or a credible migration-introduced bug.
+### Stateful Core
 
-Give the reviewer the previous feature reference or branch, the target migration diff, the relevant feature references, and the acceptance evidence. Do not ask for a general code-quality audit, speculative hardening, unrelated refactors, new product behavior, or exhaustive edge-case hunting.
+Keep domain state, durable facts, invariants, and projections independent of upstream orchestration.
+Put lifecycle, persistence, API, and UI coupling behind adapters. Prefer no semantic diff in the
+stable core; explain any change as a contract change or deliberate core improvement.
 
-The main agent must evaluate findings against the migration contract instead of applying them mechanically. Fix in-scope blocking findings, rerun the affected acceptance path, and request a focused recheck when the fix materially changes reviewed behavior. Do not start an open-ended review loop.
+### Cross-Cutting Contract
 
-## Feature References
+Carry one typed source of truth through every subsystem that observes the feature. Avoid parallel
+string/boolean fields and implicit sentinels that can diverge across hooks, approvals, sessions, or
+outputs. Preserve a proven carrier when it remains coherent; introduce a replacement only when the
+current upstream cannot express the contract safely.
 
-Current feature-specific references:
+### Lifecycle Policy
 
-- `feature-guide-template.md`: common structure for every personal feature guide.
-- `feature-exec-argv.md`: argv-native unified exec tool contract, adapter map, porting checklist, and acceptance matrix.
-- `feature-empty-final-answer-retry.md`: single-turn recovery for upstream model responses that complete with an empty final answer.
-- `feature-subagent-identity.md`: compact guide for the subagent identity clarification feature.
-- `feature-chat-tree-contract.md`: stable chat tree product/API behavior.
-- `feature-chat-tree-architecture.md`: preferred stable core and adapter shape for chat tree.
-- `feature-chat-tree-implementation.md`: chat tree implementation path and pitfalls.
-- `feature-chat-tree-migration-template.md`: required work package template for non-trivial chat tree ports.
-- `feature-chat-tree-summary.md`: required completed-turn LLM summary behavior.
-- `feature-chat-tree-app-server.md`: app-server compatibility and schema guidance.
-- `feature-chat-tree-test-matrix.md`: detailed chat tree regression scenarios.
-- `feature-chat-tree-acceptance.md`: final chat tree acceptance and SmartTakeover handoff.
-- `feature-chat-tree-v116-lessons.md`: older chat tree implementation lessons and pitfalls.
+Keep the rule at the real upstream lifecycle seam and test ordering end to end. Do not create a
+fake domain layer when the stable behavior is a small, timing-sensitive policy.
 
-When adding another personal feature, add new `feature-<name>-*.md` references rather than expanding the skill body.
+### Typed Projection
 
-## Validation Commands
+Derive every model-visible, API-visible, and UI-visible representation from one small set of stable
+facts. Rendering and protocol adapters may change; identity or state facts must not be reconstructed
+independently by each surface.
 
-Adapt commands to the changed crates and current upstream layout.
+## Implement And Validate
 
-- Format Rust changes with `just fmt` in `codex-rs`.
-- Run crate-specific tests for changed crates, for example `cargo test -p codex-core`, `cargo test -p codex-app-server-protocol`, `cargo test -p codex-tui`, and app-server tests if touched.
-- Regenerate app-server schema after protocol changes with `just write-app-server-schema`.
-- If changing common/core/protocol behavior, ask before running the complete workspace test suite.
-- For UI-visible changes, update and review insta snapshots.
-- For app-server changes, validate wire-level fixtures and compatibility rules from the relevant feature reference.
-- Before pushing an integration branch, verify the downstream release workflow using `references/integration-release-automation.md`.
+Implement in dependency order:
 
-## Acceptance
+1. stable data or behavior;
+2. durable or model-visible contract;
+3. upstream runtime adapters;
+4. external API/tool/UI adapters;
+5. focused tests and fixtures;
+6. real supported user path.
 
-Feature branches are accepted by their feature-specific references. Integration branches are accepted when:
+For each feature, prove:
 
-- every included feature has passed its own P0 acceptance gates;
-- an independent final migration reviewer has confirmed that the migrated implementation follows this skill and preserves the previous feature's intended behavior without migration-introduced regressions;
-- cross-feature conflicts are resolved in integration commits;
-- integration-only release/build changes are present and current;
-- the branch has a command-line validation path and does not depend only on manual UI checks;
-- the downstream package/release workflow is ready to produce a fresh artifact after push.
+- contract delta is zero unless an intentional change was approved;
+- stable units stayed unchanged or have a documented reason to change;
+- central upstream modules contain only necessary hooks, not duplicated feature rules;
+- every P0 scenario has automated or captured evidence;
+- persistence, replay, model/tool requests, and public wire behavior are checked where applicable;
+- supported UI paths are exercised as users operate them;
+- a command-line, RPC, or test path exists for every critical behavior.
+
+A real path exercises the production binary, RPC, model/tool client, or UI route. A deterministic
+test server is acceptable when the production runtime reaches it end to end; direct calls to
+implementation helpers are not sufficient by themselves.
+
+Follow the current repository `AGENTS.md` for formatting, tests, schema generation, snapshots, and
+full-suite approval. Do not copy version-sensitive commands into this skill.
+
+After implementation and real-path acceptance, use a fresh independent reviewer. Give it the
+feature contract, direct previous ref, migration diff, port brief, and evidence. Ask only for
+requirement drift, adapter-boundary violations, and credible migration regressions. Do not start an
+open-ended general hardening loop.
+
+For a brand-new feature with no previous ref, use the feature branch base, current upstream behavior,
+and the new contract as the review baseline.
+
+## Integrate
+
+Build the target integration branch from the knowledge baseline, then:
+
+1. Merge each accepted feature branch separately and preserve its commit identity. Do not squash
+   all features into one integration commit.
+2. Resolve only cross-feature conflicts in integration commits.
+3. Carry forward integration-owned packaging and release automation.
+4. Run composed smoke paths for feature interactions.
+5. Update feature references only when stable behavior or portability constraints changed.
+6. If old branches will be cleaned up, create immutable feature and integration tags first. Tagging
+   is optional and is not a prerequisite for push.
+
+The target integration is complete only after every feature declared in the port brief is accepted
+and merged. That completed integration becomes the canonical launch branch for the next migration.
+
+## Add A New Personal Feature
+
+Read `references/feature-guide-template.md`, then:
+
+1. For a feature targeting the current accepted integration, create its feature branch from that
+   integration. During an active release migration, branch from the target knowledge baseline.
+2. Add the registry row and `references/feature-<name>.md` as the first feature-owned commit before
+   broad implementation.
+3. Choose the smallest correct portability profile.
+4. Define stable behavior, non-goals, portability constraints, and P0 scenarios.
+5. Create feature-owned tests and at least one real CLI, RPC, model/tool, or UI acceptance path.
+6. State cross-feature interactions and integration-only work.
+
+Default to one reference file per feature. Split out another file only for a large, independently
+stable public contract that agents can load conditionally, and link it directly from this file.
+
+## Maintain This Skill
+
+- Put common workflow changes on the current integration branch.
+- Put an intentional feature contract change on that feature branch so code and contract are
+  reviewed together; merging it updates the next integration's canonical knowledge.
+- Do not edit a feature contract for routine adapter movement.
+- Do not store current versions, concrete branch refs, source paths, test filters, command results,
+  `pending` tables, migration status, or historical changelogs in long-term references.
+- Keep per-port inventories, hook maps, evidence, and risks in temporary work records.
+- Replace obsolete guidance instead of adding another overlapping reference.
