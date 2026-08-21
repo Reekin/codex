@@ -18,10 +18,25 @@ Use this priority when sources disagree:
 
 Treat old code as evidence, not as the contract. Do not weaken a contract to match an incomplete port.
 
-The checked-out `integration-<upstream-version>` branch from which the user invokes this skill is
-the canonical launch ref. It must contain this complete skill, every feature contract, and
-integration-owned release knowledge. Do not switch to another integration branch or create extra
-refs unless the user explicitly asks.
+The latest immutable `personal/integration/<upstream-version>` acceptance tag is the canonical
+launch ref. It must point to an accepted `integration-<upstream-version>` commit containing this
+complete skill, every feature contract, and integration-owned release knowledge. For another
+accepted revision on the same upstream version, create
+`personal/integration/<upstream-version>-r<N>`; never move an existing acceptance tag.
+
+If no personal acceptance tags exist yet, bootstrap them before starting another migration:
+
+1. Verify the latest accepted integration commit.
+2. Resolve and verify the direct accepted tip for every feature in the registry.
+3. Tag every feature and the integration using the conventions below.
+
+Old squashed integration history does not prove feature ancestry. During bootstrap, compare each
+feature diff with the accepted integration behavior and evidence before tagging it. Prefer the
+highest accepted upstream version and then the highest revision, not the most recent commit
+timestamp.
+
+Bootstrap is migration preparation only. Do not run it merely because the user asks to commit,
+push, or trigger a release workflow.
 
 ## Feature Registry
 
@@ -41,12 +56,10 @@ For integration packaging and release work, also read
 
 Before editing code:
 
-1. Inspect the current branch and worktree. Confirm it is the intended `integration-*` launch branch
-   and contains the complete skill.
+1. Inspect worktrees, local branches, remote branches, and tags. Confirm `HEAD` matches the latest
+   accepted integration tag; do not trust the current directory name alone.
 2. Read the repository `AGENTS.md`, this file, and the target feature reference.
-3. Resolve the target upstream stable tag and the direct previous feature branch or tag using the
-   registry pattern and launch integration version. If the ref is missing or ambiguous, resolve
-   that before editing.
+3. Resolve the target upstream stable tag and the direct previous immutable feature acceptance tag.
 4. Create or reuse `integration-<target-version>` from the target upstream tag.
 5. Before creating feature branches, carry this complete skill and integration-owned release
    infrastructure from the launch integration into the target integration as a knowledge-baseline
@@ -60,6 +73,7 @@ Record a port brief in the task plan, PR body, or other temporary handoff. Do no
 skill:
 
 - launch integration and target upstream tag;
+- launch integration acceptance tag;
 - previous and new feature refs;
 - target integration branch;
 - selected feature set and whether the target integration is a staging branch or complete release;
@@ -169,8 +183,10 @@ Build the target integration branch from the knowledge baseline, then:
 3. Carry forward integration-owned packaging and release automation.
 4. Run composed smoke paths for feature interactions.
 5. Update feature references only when stable behavior or portability constraints changed.
-6. If old branches will be cleaned up, create immutable feature and integration tags first. Tagging
-   is optional and is not a prerequisite for push.
+6. Tag every accepted feature as `personal/<feature>/<upstream-version>`. Use `-r<N>` for another
+   accepted revision on the same upstream version and never move an existing tag.
+7. After every feature declared in the port brief is accepted and merged, create the immutable
+   `personal/integration/<upstream-version>` acceptance tag, or the next `-r<N>` revision.
 
 The target integration is complete only after every feature declared in the port brief is accepted
 and merged. That completed integration becomes the canonical launch branch for the next migration.
@@ -200,4 +216,6 @@ stable public contract that agents can load conditionally, and link it directly 
 - Do not store current versions, concrete branch refs, source paths, test filters, command results,
   `pending` tables, migration status, or historical changelogs in long-term references.
 - Keep per-port inventories, hook maps, evidence, and risks in temporary work records.
+- After accepting common knowledge or feature changes on an already released integration version,
+  create a new integration acceptance-tag revision.
 - Replace obsolete guidance instead of adding another overlapping reference.
