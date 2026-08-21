@@ -35,9 +35,6 @@ feature diff with the accepted integration behavior and evidence before tagging 
 highest accepted upstream version and then the highest revision, not the most recent commit
 timestamp.
 
-Bootstrap is migration preparation only. Do not run it merely because the user asks to commit,
-push, or trigger a release workflow.
-
 ## Feature Registry
 
 Read only the target feature reference unless integration work needs more.
