@@ -46,6 +46,7 @@ Read only the target feature reference unless integration work needs more.
 | Empty final-answer retry | `ft/retry-empty-final-answer-<upstream-version>` | lifecycle policy | `references/feature-empty-final-answer-retry.md` |
 | Subagent identity | `ft/subagent-identity-labels-<upstream-version>` | typed projection | `references/feature-subagent-identity.md` |
 | Model-aware compaction | `ft/model-aware-compaction-<upstream-version>` | typed projection | `references/feature-model-aware-compaction.md` |
+| Local compaction handoff | `ft/local-compaction-handoff-<upstream-version>` | lifecycle policy | `references/feature-local-compaction-handoff.md` |
 
 For integration packaging and release work, also read
 `references/integration-release-automation.md`.
