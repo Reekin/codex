@@ -3,6 +3,7 @@ use codex_protocol::ResponseItemId;
 use codex_protocol::models::DEFAULT_IMAGE_DETAIL;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use pretty_assertions::assert_eq;
+use std::path::Path;
 use std::sync::Arc;
 
 async fn process_compacted_history_with_test_session(
@@ -48,6 +49,31 @@ fn user_message(text: &str) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+#[test]
+fn local_compaction_summary_includes_rollout_recovery_path() {
+    let rollout_path = Path::new("session-rollout.jsonl");
+
+    let summary = build_local_compaction_summary("summary text", Some(rollout_path));
+
+    assert_eq!(
+        summary,
+        format!(
+            "{SUMMARY_PREFIX}\nsummary text\n\n{ROLLOUT_RECOVERY_INTRO}\n\
+             `session-rollout.jsonl`\n\
+             If exact code, tool output, errors, or decisions are needed, read that rollout instead \
+             of guessing."
+        )
+    );
+}
+
+#[test]
+fn local_compaction_summary_without_rollout_keeps_existing_shape() {
+    assert_eq!(
+        build_local_compaction_summary("summary text", None),
+        format!("{SUMMARY_PREFIX}\nsummary text")
+    );
 }
 
 fn compacted_user_message(text: &str) -> CompactedUserMessage {
