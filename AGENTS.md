@@ -268,6 +268,12 @@ These guidelines apply to app-server protocol work in `codex-rs`, especially:
 ### Core Rules
 
 - All active API development should happen in app-server v2. Do not add new API surface area to v1.
+
+## 经验积累
+
+- When locating repository-managed agents or skills, search hidden directories explicitly with
+  `rg --hidden --files` or inspect `.agents` directly. Default `rg --files` output is not evidence
+  that a hidden skill directory does not exist.
 - Follow payload naming consistently:
   `*Params` for request payloads, `*Response` for responses, and `*Notification` for notifications.
 - Expose RPC methods as `<resource>/<method>` and keep `<resource>` singular (for example, `thread/read`, `app/list`).

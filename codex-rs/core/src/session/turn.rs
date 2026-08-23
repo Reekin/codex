@@ -1183,7 +1183,7 @@ async fn run_auto_compact(
         return Ok(());
     }
 
-    match turn_context.provider.capabilities().remote_compaction {
+    match crate::compact::remote_compaction_support(turn_context) {
         RemoteCompactionSupport::V2
             if turn_context
                 .config

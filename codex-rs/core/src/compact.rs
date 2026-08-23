@@ -28,6 +28,7 @@ use codex_analytics::CompactionStatus;
 use codex_analytics::CompactionStrategy;
 use codex_analytics::CompactionTrigger;
 use codex_analytics::now_unix_seconds;
+use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
@@ -53,6 +54,14 @@ use tracing::error;
 pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+
+pub(crate) fn remote_compaction_support(turn_context: &TurnContext) -> RemoteCompactionSupport {
+    if turn_context.model_info.supports_remote_compaction {
+        turn_context.provider.capabilities().remote_compaction
+    } else {
+        RemoteCompactionSupport::Unsupported
+    }
+}
 
 /// Controls whether compaction replacement history must include initial context.
 ///
