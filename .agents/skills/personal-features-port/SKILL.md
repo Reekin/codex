@@ -45,6 +45,7 @@ Read only the target feature reference unless integration work needs more.
 | Argv-native exec | `ft/exec-argv-<upstream-version>` | cross-cutting contract | `references/feature-exec-argv.md` |
 | Empty final-answer retry | `ft/retry-empty-final-answer-<upstream-version>` | lifecycle policy | `references/feature-empty-final-answer-retry.md` |
 | Subagent identity | `ft/subagent-identity-labels-<upstream-version>` | typed projection | `references/feature-subagent-identity.md` |
+| Model-aware compaction | `ft/model-aware-compaction-<upstream-version>` | typed projection | `references/feature-model-aware-compaction.md` |
 
 For integration packaging and release work, also read
 `references/integration-release-automation.md`.
