@@ -932,6 +932,88 @@ async fn manual_compact_uses_custom_prompt() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manual_compact_uses_local_path_when_model_disables_remote_compaction() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+    let model = "gpt-5.4";
+    let mut model_info = model_info_with_context_window(model, /*context_window*/ 273_000);
+    model_info.supports_remote_compaction = false;
+    let models_mock = mount_models_once(
+        &server,
+        ModelsResponse {
+            models: vec![model_info],
+        },
+    )
+    .await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_assistant_message("m0", FIRST_REPLY),
+                ev_completed_with_tokens("r0", /*total_tokens*/ 80),
+            ]),
+            sse(vec![
+                ev_assistant_message("m1", SUMMARY_TEXT),
+                ev_completed_with_tokens("r1", /*total_tokens*/ 100),
+            ]),
+        ],
+    )
+    .await;
+
+    let model_provider = openai_model_provider(&server);
+    let mut builder = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_model(model)
+        .with_config(move |config| {
+            config.model_provider = model_provider;
+            let _ = config.features.enable(Feature::RemoteCompactionV2);
+        });
+    let codex = builder
+        .build(&server)
+        .await
+        .expect("create conversation")
+        .codex;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "USER_ONE".to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: Default::default(),
+        })
+        .await
+        .expect("submit first user turn");
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    codex.submit(Op::Compact).await.expect("trigger compact");
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    assert_eq!(models_mock.requests().len(), 1);
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 2);
+    let compact_request = &requests[1];
+    assert!(
+        body_contains_text(
+            &compact_request.body_json().to_string(),
+            SUMMARIZATION_PROMPT
+        ),
+        "model-disabled remote compaction should use the local summarization prompt"
+    );
+    assert!(
+        compact_request
+            .input()
+            .iter()
+            .all(|item| item["type"] != "compaction_trigger"),
+        "local compaction must not emit a compaction trigger"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manual_compact_emits_api_and_local_token_usage_events() {
     skip_if_no_network!();
 
