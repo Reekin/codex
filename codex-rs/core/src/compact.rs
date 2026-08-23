@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -54,6 +55,8 @@ use tracing::error;
 pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+const ROLLOUT_RECOVERY_INTRO: &str =
+    "The complete pre-compaction conversation remains available in the rollout at:";
 
 pub(crate) fn remote_compaction_support(turn_context: &TurnContext) -> RemoteCompactionSupport {
     if turn_context.model_info.supports_remote_compaction {
@@ -351,7 +354,8 @@ async fn run_compact_task_inner_impl(
     let history_snapshot = sess.clone_history().await;
     let history_items = history_snapshot.raw_items();
     let summary_suffix = get_last_assistant_message_from_turn(history_items).unwrap_or_default();
-    let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
+    let rollout_path = sess.hook_transcript_path().await;
+    let summary_text = build_local_compaction_summary(&summary_suffix, rollout_path.as_deref());
     let user_messages = collect_user_messages(history_items);
 
     let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
@@ -394,6 +398,19 @@ async fn run_compact_task_inner_impl(
     });
     sess.send_event(&turn_context, warning).await;
     Ok(summary_suffix)
+}
+
+fn build_local_compaction_summary(summary: &str, rollout_path: Option<&Path>) -> String {
+    let summary = format!("{SUMMARY_PREFIX}\n{summary}");
+    let Some(path) = rollout_path else {
+        return summary;
+    };
+    format!(
+        "{summary}\n\n{ROLLOUT_RECOVERY_INTRO}\n`{}`\n\
+         If exact code, tool output, errors, or decisions are needed, read that rollout instead of \
+         guessing.",
+        path.display()
+    )
 }
 
 pub(crate) struct CompactionAnalyticsAttempt {
