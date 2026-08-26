@@ -149,6 +149,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
             }),
             TransportError::Timeout => CodexErr::RequestTimeout,
             TransportError::Network(msg) | TransportError::Build(msg) => CodexErr::Stream(msg),
+            error @ TransportError::SlowUpload { .. } => CodexErr::Stream(error.to_string()),
         },
         ApiError::RateLimit(msg) => CodexErr::Stream(msg),
     }

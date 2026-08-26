@@ -4,6 +4,9 @@ use http::HeaderValue;
 use http::Method;
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// A JSON request body serialized once into reference-counted bytes.
@@ -81,6 +84,7 @@ pub struct Request {
     pub body: Option<RequestBody>,
     pub compression: RequestCompression,
     pub timeout: Option<Duration>,
+    pub(crate) slow_upload_retry_claimed: Arc<AtomicBool>,
 }
 
 impl Request {
@@ -92,6 +96,7 @@ impl Request {
             body: None,
             compression: RequestCompression::None,
             timeout: None,
+            slow_upload_retry_claimed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -108,6 +113,16 @@ impl Request {
     pub fn with_compression(mut self, compression: RequestCompression) -> Self {
         self.compression = compression;
         self
+    }
+
+    pub(crate) fn claim_slow_upload_retry(&self) -> bool {
+        self.slow_upload_retry_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(crate) fn slow_upload_retry_claimed(&self) -> bool {
+        self.slow_upload_retry_claimed.load(Ordering::Acquire)
     }
 
     /// Prepares the body once and stores the exact bytes that will be sent.

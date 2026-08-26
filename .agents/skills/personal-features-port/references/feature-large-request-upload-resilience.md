@@ -14,14 +14,14 @@ same destination is reachable at normal speed through a fresh connection.
 
 ## Stable Contract
 
-- **REQ-1**: Codex detects abnormally slow upload progress for large HTTP request bodies before the
-  body has been fully submitted.
+- **REQ-1**: Codex observes eligible HTTP request bodies and detects an abnormally long projected
+  remaining upload time before the body has been fully submitted.
 - **REQ-2**: A detected slow upload cancels the incomplete attempt so its HTTP/1.1 connection cannot
   return to the reusable pool, then retries the request at most once.
 - **REQ-3**: Codex never triggers the upload retry after the complete request body has been handed
   to the transport, even while it is still waiting for response headers.
-- **REQ-4**: Small requests and large requests that maintain acceptable upload progress retain the
-  existing request and retry behavior.
+- **REQ-4**: Requests expected to complete promptly and requests that maintain acceptable upload
+  progress retain the existing request and retry behavior.
 - **REQ-5**: Diagnostics identify the total body size, submitted bytes, elapsed upload time, observed
   rate, and whether the fresh-connection retry was used, without logging request contents.
 
@@ -31,7 +31,11 @@ same destination is reachable at normal speed through a fresh connection.
   response handling.
 - Retry ownership MUST remain request-scoped and shared by clones created for transport retries.
 - Detection MUST use monotonic time and transport backpressure; wall-clock jumps must not affect it.
+- Detection MUST combine observed throughput with projected remaining duration. A byte-size
+  threshold alone is insufficient.
 - The incomplete attempt MUST be dropped before the retry begins.
+- The fresh retry MUST be allowed to complete without another slow-upload cancellation so genuinely
+  slow user connections remain supported.
 - The implementation MUST remain portable across Linux, macOS, and Windows.
 
 ## Adapter Seams
