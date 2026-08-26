@@ -47,6 +47,7 @@ Read only the target feature reference unless integration work needs more.
 | Subagent identity | `ft/subagent-identity-labels-<upstream-version>` | typed projection | `references/feature-subagent-identity.md` |
 | Model-aware compaction | `ft/model-aware-compaction-<upstream-version>` | typed projection | `references/feature-model-aware-compaction.md` |
 | Local compaction handoff | `ft/local-compaction-handoff-<upstream-version>` | lifecycle policy | `references/feature-local-compaction-handoff.md` |
+| Large request upload resilience | `ft/large-request-upload-resilience-<upstream-version>` | lifecycle policy | `references/feature-large-request-upload-resilience.md` |
 
 For integration packaging and release work, also read
 `references/integration-release-automation.md`.
