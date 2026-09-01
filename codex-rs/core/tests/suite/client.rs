@@ -4176,6 +4176,24 @@ async fn commentary_only_response_retries_for_missing_final_answer() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_without_output_does_not_trigger_retry() {
+    let server = MockServer::start().await;
+    let response_log = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-no-output"),
+            ev_completed("resp-no-output"),
+        ]),
+    )
+    .await;
+    let test = test_codex().build(&server).await.unwrap();
+
+    test.submit_turn("please answer").await.unwrap();
+
+    assert_eq!(response_log.requests().len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reasoning_only_response_after_tool_follow_up_retries_once() {
     let server = MockServer::start().await;
     let call_id = "inspect-call";
