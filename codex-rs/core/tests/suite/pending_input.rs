@@ -253,6 +253,7 @@ fn gated_chunk(gate: oneshot::Receiver<()>, events: Vec<Value>) -> StreamingSseC
 fn response_completed_chunks(response_id: &str) -> Vec<StreamingSseChunk> {
     vec![
         chunk(ev_response_created(response_id)),
+        chunk(ev_message_item_done(&format!("msg-{response_id}"), "done")),
         chunk(ev_completed(response_id)),
     ]
 }
