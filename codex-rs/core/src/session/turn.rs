@@ -15,7 +15,7 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
-use crate::context::EmptyFinalAnswerRetry;
+use crate::context::FinalAnswerRetry;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::inspect_pending_input;
@@ -256,7 +256,7 @@ pub(crate) async fn run_turn(
     track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
 
     let mut last_agent_message: Option<String> = None;
-    let mut empty_final_answer_retries = 0_u8;
+    let mut final_answer_retries = 0_u8;
     let mut stop_hook_active = false;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
@@ -466,12 +466,16 @@ pub(crate) async fn run_turn(
                 }
 
                 if !needs_follow_up {
-                    if matches!(final_answer_state, FinalAnswerState::EmptyOnly)
-                        && empty_final_answer_retries == 0
+                    if turn_context.mode == ModeKind::Default
+                        && matches!(
+                            final_answer_state,
+                            FinalAnswerState::NotSeen | FinalAnswerState::EmptyOnly
+                        )
+                        && final_answer_retries == 0
                     {
-                        empty_final_answer_retries += 1;
+                        final_answer_retries += 1;
                         let retry_prompt: ResponseItem =
-                            ContextualUserFragment::into(EmptyFinalAnswerRetry);
+                            ContextualUserFragment::into(FinalAnswerRetry);
                         sess.record_conversation_items(
                             &turn_context,
                             std::slice::from_ref(&retry_prompt),

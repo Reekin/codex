@@ -63,7 +63,9 @@ use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_message_item_added;
 use core_test_support::responses::ev_output_text_delta;
+use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::ev_shell_command_call;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
@@ -4041,7 +4043,7 @@ async fn empty_final_answer_retries_once_before_turn_complete() {
     assert!(message_input_text_contains(
         &requests[1],
         "user",
-        "previous assistant final answer was empty"
+        "previous response did not provide a visible final answer"
     ));
 }
 
@@ -4058,7 +4060,7 @@ async fn empty_final_answer_retry_budget_is_bounded() {
             ]),
             sse(vec![
                 ev_response_created("resp-empty-2"),
-                ev_empty_assistant_message("msg-empty-2", "final_answer"),
+                ev_reasoning_item("reasoning-only", &["Still thinking."], &[]),
                 ev_completed("resp-empty-2"),
             ]),
         ],
@@ -4148,40 +4150,68 @@ async fn non_empty_then_empty_final_answer_does_not_retry() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn empty_commentary_does_not_trigger_final_answer_retry() {
+async fn commentary_only_response_retries_for_missing_final_answer() {
     let server = MockServer::start().await;
-    let response_log = mount_sse_once(
+    let response_log = mount_sse_sequence(
         &server,
-        sse(vec![
-            ev_response_created("resp-commentary"),
-            ev_empty_assistant_message("msg-commentary", "commentary"),
-            ev_completed("resp-commentary"),
-        ]),
+        vec![
+            sse(vec![
+                ev_response_created("resp-commentary"),
+                ev_empty_assistant_message("msg-commentary", "commentary"),
+                ev_completed("resp-commentary"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-retry"),
+                ev_assistant_message("msg-retry", "Recovered final answer."),
+                ev_completed("resp-retry"),
+            ]),
+        ],
     )
     .await;
     let test = test_codex().build(&server).await.unwrap();
 
     test.submit_turn("please answer").await.unwrap();
 
-    assert_eq!(response_log.requests().len(), 1);
+    assert_eq!(response_log.requests().len(), 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn response_without_assistant_message_does_not_trigger_retry() {
+async fn reasoning_only_response_after_tool_follow_up_retries_once() {
     let server = MockServer::start().await;
-    let response_log = mount_sse_once(
+    let call_id = "inspect-call";
+    let response_log = mount_sse_sequence(
         &server,
-        sse(vec![
-            ev_response_created("resp-no-message"),
-            ev_completed("resp-no-message"),
-        ]),
+        vec![
+            sse(vec![
+                ev_response_created("resp-tool"),
+                ev_shell_command_call(call_id, "echo inspected"),
+                ev_completed("resp-tool"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-reasoning-only"),
+                ev_reasoning_item("reasoning-only", &["Preparing the answer."], &[]),
+                ev_completed("resp-reasoning-only"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-retry"),
+                ev_assistant_message("msg-retry", "Recovered after tool use."),
+                ev_completed("resp-retry"),
+            ]),
+        ],
     )
     .await;
     let test = test_codex().build(&server).await.unwrap();
 
-    test.submit_turn("please answer").await.unwrap();
+    test.submit_turn("inspect and answer").await.unwrap();
 
-    assert_eq!(response_log.requests().len(), 1);
+    let requests = response_log.requests();
+    assert_eq!(requests.len(), 3);
+    requests[1].function_call_output(call_id);
+    assert!(message_input_text_contains(
+        &requests[2],
+        "user",
+        "previous response did not provide a visible final answer"
+    ));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

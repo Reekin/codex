@@ -1,9 +1,9 @@
 use super::ContextualUserFragment;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EmptyFinalAnswerRetry;
+pub(crate) struct FinalAnswerRetry;
 
-impl ContextualUserFragment for EmptyFinalAnswerRetry {
+impl ContextualUserFragment for FinalAnswerRetry {
     fn role(&self) -> &'static str {
         "user"
     }
@@ -18,7 +18,7 @@ impl ContextualUserFragment for EmptyFinalAnswerRetry {
 
     fn body(&self) -> String {
         concat!(
-            "The previous assistant final answer was empty. ",
+            "The previous response did not provide a visible final answer. ",
             "Continue the same turn and provide a non-empty final answer to the user's request. ",
             "Do not call tools unless necessary."
         )
