@@ -1,32 +1,35 @@
-# Empty Final-Answer Retry
+# Missing or Empty Final-Answer Retry
 
 ## Goal
 
-Prevent a regular turn from completing silently when the model emits a final-answer assistant
-message whose visible text is empty or whitespace.
+Prevent a regular turn from completing silently when the model provides no visible final answer,
+either because no final-answer assistant message was emitted or because its visible text is empty
+or whitespace.
 
 ## Non-Goals
 
 - Do not retry transport or stream failures.
-- Do not retry commentary messages.
-- Do not treat the complete absence of an assistant message as an empty final answer.
+- Do not classify commentary messages as final answers.
+- Do not change plan-mode completion semantics.
 - Do not retry indefinitely.
 - Do not add a public configuration surface unless product requirements change.
 
 ## Stable Contract
 
-- **REQ-1 Classification**: Classify a completed assistant message whose phase is final or absent
-  under upstream semantics and whose visible text trims empty as an empty final answer. Exclude
-  commentary.
+- **REQ-1 Classification**: Preserve three states for each completed sampling response: no final
+  assistant message, only empty final assistant messages, and at least one non-empty final
+  assistant message. A completed assistant message whose phase is final or absent under upstream
+  semantics participates in this classification; commentary does not.
 - **REQ-2 Budget**: When no model, tool, or pending-user follow-up remains, continue the same regular
-  turn at most once.
+  turn at most once if no non-empty final answer was seen.
 - **REQ-3 Auditability**: Record a short model-visible recovery prompt through the normal
   conversation-history and rollout path.
 - **REQ-4 Completion**: A recovered response becomes the normal final assistant message and
   `TurnComplete.last_agent_message`.
 - **REQ-5 Ordering**: Stop hooks, after-agent hooks, and normal turn completion observe the
-  recovered result rather than the empty placeholder.
-- **REQ-6 Exhaustion**: If the one retry also completes empty, finish without a third request.
+  recovered result rather than the missing or empty result.
+- **REQ-6 Exhaustion**: If the one retry also completes without a non-empty final answer, finish
+  without a third request.
 
 ## Portability Constraints
 
@@ -39,6 +42,7 @@ message whose visible text is empty or whitespace.
   iteration.
 - **MUST** represent the recovery prompt through the repository's normal bounded contextual-user
   fragment mechanism.
+- **MUST** keep plan mode outside this regular-turn recovery policy.
 - **PREFERRED** keep the implementation at the existing sampling loop seam instead of introducing a
   separate retry subsystem.
 
@@ -57,19 +61,26 @@ Rediscover these semantics on every upstream base:
 
 ### Recovery
 
-Return an empty final answer, then a non-empty final answer. Prove exactly two model requests occur,
-the second request contains the recorded recovery prompt, and completion exposes the recovered
+Cover both recovery inputs:
+
+- Return an empty final answer, then a non-empty final answer.
+- After a tool follow-up, return reasoning without an assistant message, then a non-empty final
+  answer.
+
+Prove the recovery request contains the recorded prompt and completion exposes the recovered
 message.
 
 ### Retry Exhaustion
 
-Return empty final answers twice. Prove no third request occurs and the turn terminates normally.
+Use missing and empty final responses across the initial request and retry. Prove they share one
+budget, no third recovery request occurs, and the turn terminates normally.
 
 ### Classification
 
-Prove non-empty final output, empty commentary, and a turn with no assistant message do not trigger
-the retry. Prove an absent phase follows the same final-message semantics as the surrounding
-upstream turn pipeline.
+Prove non-empty final output does not trigger the retry. Prove commentary does not count as a final
+answer, a regular response containing only commentary is recoverable as missing a final answer, and
+plan mode does not use this recovery. Prove an absent phase follows the same final-message semantics
+as the surrounding upstream turn pipeline.
 
 ### Follow-Up And Ordering
 
