@@ -930,9 +930,15 @@ async fn queued_inter_agent_mail_does_not_restart_after_final_answer() {
         chunk(ev_completed("resp-1")),
     ];
 
+    let summary_chunks = vec![
+        chunk(ev_response_created("summary-resp")),
+        chunk(ev_message_item_done("summary-msg", "summary")),
+        chunk(ev_completed("summary-resp")),
+    ];
     let (server, _completions) = start_streaming_sse_server(vec![
         first_chunks,
-        response_completed_chunks("unexpected-resp-2"),
+        summary_chunks,
+        response_completed_chunks("resp-2"),
     ])
     .await;
     let codex = build_codex(&server).await;
@@ -940,9 +946,13 @@ async fn queued_inter_agent_mail_does_not_restart_after_final_answer() {
     submit_queue_only_agent_mail(&codex, "queued child update").await;
     submit_user_input(&codex, "first prompt").await;
     wait_for_turn_complete(&codex).await;
+    wait_for_event(&codex, |event| {
+        matches!(event, EventMsg::ChatTreeNodeSummaryUpdated(_))
+    })
+    .await;
 
     let mut requests = server.requests().await;
-    assert_eq!(requests.len(), 1);
+    assert_eq!(requests.len(), 2);
     let request: Value = from_slice(&requests[0]).expect("parse request");
     assert!(
         request["input"]
@@ -956,8 +966,8 @@ async fn queued_inter_agent_mail_does_not_restart_after_final_answer() {
     wait_for_turn_complete(&codex).await;
 
     requests = server.requests().await;
-    assert_eq!(requests.len(), 2);
-    let request: Value = from_slice(&requests[1]).expect("parse request");
+    assert_eq!(requests.len(), 3);
+    let request: Value = from_slice(&requests[2]).expect("parse request");
     let input = request["input"].as_array().expect("request input");
     let agent_message = input
         .iter()
