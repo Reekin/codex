@@ -366,6 +366,7 @@ pub(crate) async fn run_turn(
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
                     final_answer_state,
+                    had_output_item,
                 } = sampling_request_output;
                 if model_needs_follow_up {
                     sess.input_queue
@@ -467,10 +468,9 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     if turn_context.mode == ModeKind::Default
-                        && matches!(
-                            final_answer_state,
-                            FinalAnswerState::NotSeen | FinalAnswerState::EmptyOnly
-                        )
+                        && (matches!(final_answer_state, FinalAnswerState::EmptyOnly)
+                            || (matches!(final_answer_state, FinalAnswerState::NotSeen)
+                                && had_output_item))
                         && final_answer_retries == 0
                     {
                         final_answer_retries += 1;
@@ -1567,6 +1567,7 @@ struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
     final_answer_state: FinalAnswerState,
+    had_output_item: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2216,6 +2217,7 @@ async fn try_run_sampling_request(
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
     let mut final_answer_state = FinalAnswerState::NotSeen;
+    let mut had_output_item = false;
     let mut active_item: Option<TurnItem> = None;
     let mut active_tool_argument_diff_consumer: Option<(
         String,
@@ -2279,6 +2281,7 @@ async fn try_run_sampling_request(
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(mut item) => {
+                had_output_item = true;
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                     let call_id = match &item {
@@ -2394,6 +2397,7 @@ async fn try_run_sampling_request(
                         needs_follow_up: true,
                         last_agent_message,
                         final_answer_state,
+                        had_output_item,
                     });
                 }
             }
@@ -2575,6 +2579,7 @@ async fn try_run_sampling_request(
                     needs_follow_up,
                     last_agent_message,
                     final_answer_state,
+                    had_output_item,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
