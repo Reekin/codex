@@ -2996,6 +2996,14 @@ impl SessionSource {
         )
     }
 
+    pub fn participates_in_chat_tree(&self) -> bool {
+        !self.is_non_root_agent()
+            || matches!(
+                self,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+            )
+    }
+
     pub fn get_nickname(&self) -> Option<String> {
         match self {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_nickname, .. }) => {

@@ -460,6 +460,12 @@ impl Session {
         let mut active_history = ContextManager::new();
         let mut legacy_history = ContextManager::new();
         let mut saw_chat_tree_event = false;
+        let extends_inherited_tree = matches!(
+            turn_context.session_source,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+        );
+        let mut synthesized_node_ids = HashSet::new();
+        let mut active_synthesized_node_id = None;
 
         for item in rollout_items {
             match item {
@@ -610,7 +616,32 @@ impl Session {
                 }
                 RolloutItem::EventMsg(EventMsg::TurnStarted(payload)) => {
                     active_turn_id = Some(payload.turn_id.clone());
-                    if let Err(err) = domain.apply_event(&ChatTreeEvent::LegacyTurnStarted {
+                    let has_node = domain
+                        .projection()
+                        .nodes
+                        .iter()
+                        .any(|node| node.turn_id.as_deref() == Some(payload.turn_id.as_str()));
+                    if extends_inherited_tree && !has_node {
+                        let parent_history = domain
+                            .current_node_id()
+                            .and_then(|node_id| history_snapshots.get(node_id))
+                            .cloned()
+                            .unwrap_or_else(|| legacy_history.clone());
+                        if let Some(started) = domain.start_node(payload.turn_id.clone()) {
+                            active_history = parent_history.clone();
+                            history_snapshots.insert(started.node_id.clone(), parent_history);
+                            active_node_id = Some(started.node_id.clone());
+                            active_synthesized_node_id = Some(started.node_id.clone());
+                            synthesized_node_ids.insert(started.node_id);
+                            saw_chat_tree_event = true;
+                        }
+                    } else if extends_inherited_tree
+                        && domain.current_node_id() == Some(payload.turn_id.as_str())
+                        && let Some(history) = history_snapshots.get(&payload.turn_id).cloned()
+                    {
+                        active_history = history;
+                        active_node_id = Some(payload.turn_id.clone());
+                    } else if let Err(err) = domain.apply_event(&ChatTreeEvent::LegacyTurnStarted {
                         turn_id: payload.turn_id.clone(),
                     }) {
                         warn!(
@@ -620,12 +651,46 @@ impl Session {
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::TurnComplete(payload)) => {
+                    if synthesized_node_ids.remove(&payload.turn_id) {
+                        domain.finalize_node(
+                            &payload.turn_id,
+                            codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+                        );
+                        history_snapshots.insert(payload.turn_id.clone(), active_history.clone());
+                        if active_synthesized_node_id.as_deref() == Some(payload.turn_id.as_str()) {
+                            active_synthesized_node_id = None;
+                        }
+                    }
                     if active_turn_id.as_deref() == Some(payload.turn_id.as_str()) {
                         active_turn_id = None;
                         active_node_id = None;
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::TurnAborted(payload)) => {
+                    let turn_id = payload
+                        .turn_id
+                        .as_deref()
+                        .or(active_synthesized_node_id.as_deref());
+                    if let Some(turn_id) = turn_id
+                        && synthesized_node_ids.remove(turn_id)
+                    {
+                        domain.finalize_node(
+                            turn_id,
+                            match payload.reason {
+                                TurnAbortReason::Interrupted | TurnAbortReason::BudgetLimited => {
+                                    codex_protocol::protocol::ChatTreeNodeStatus::Interrupted
+                                }
+                                TurnAbortReason::Replaced => {
+                                    codex_protocol::protocol::ChatTreeNodeStatus::Replaced
+                                }
+                                TurnAbortReason::ReviewEnded => {
+                                    codex_protocol::protocol::ChatTreeNodeStatus::ReviewEnded
+                                }
+                            },
+                        );
+                        history_snapshots.insert(turn_id.to_string(), active_history.clone());
+                        active_synthesized_node_id = None;
+                    }
                     if payload.turn_id.as_deref() == active_turn_id.as_deref() {
                         active_turn_id = None;
                         active_node_id = None;
