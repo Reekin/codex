@@ -94,6 +94,10 @@ fn is_root_chat_tree_turn(turn_context: &TurnContext) -> bool {
     !turn_context.session_source.is_non_root_agent()
 }
 
+fn participates_in_chat_tree(turn_context: &TurnContext) -> bool {
+    turn_context.session_source.participates_in_chat_tree()
+}
+
 impl Session {
     pub(crate) async fn persist_rollout_items_durable(
         &self,
@@ -319,7 +323,7 @@ impl Session {
         turn_context: &TurnContext,
         input: &[TurnInput],
     ) {
-        if !is_root_chat_tree_turn(turn_context) {
+        if !participates_in_chat_tree(turn_context) {
             return;
         }
         let user_input = input
@@ -331,7 +335,9 @@ impl Session {
             .flatten()
             .cloned()
             .collect::<Vec<_>>();
-        turn_context.capture_chat_tree_summary_user_message(&user_input);
+        if is_root_chat_tree_turn(turn_context) {
+            turn_context.capture_chat_tree_summary_user_message(&user_input);
+        }
         if let Err(err) = self.start_chat_tree_node(turn_context).await {
             warn!(
                 turn_id = turn_context.sub_id.as_str(),
@@ -346,7 +352,7 @@ impl Session {
         turn_context: &TurnContext,
         last_agent_message: Option<String>,
     ) -> Option<ChatTreeSummaryJob> {
-        if !is_root_chat_tree_turn(turn_context) {
+        if !participates_in_chat_tree(turn_context) {
             return None;
         }
         let last_agent_message_for_summary =
@@ -354,7 +360,10 @@ impl Session {
         let finalized_chat_tree_node = self
             .finalize_chat_tree_node(turn_context, ChatTreeNodeStatus::Completed)
             .await;
-        if last_agent_message_for_summary.is_none() || !finalized_chat_tree_node {
+        if !is_root_chat_tree_turn(turn_context)
+            || last_agent_message_for_summary.is_none()
+            || !finalized_chat_tree_node
+        {
             return None;
         }
         Some(ChatTreeSummaryJob {
@@ -392,7 +401,7 @@ impl Session {
         turn_context: &TurnContext,
         reason: &TurnAbortReason,
     ) {
-        if !is_root_chat_tree_turn(turn_context) {
+        if !participates_in_chat_tree(turn_context) {
             return;
         }
         let chat_tree_status = chat_tree_status_from_abort_reason(reason);

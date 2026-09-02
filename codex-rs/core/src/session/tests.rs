@@ -10416,7 +10416,7 @@ async fn internal_session_task_does_not_enter_chat_tree_lifecycle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[test_log::test]
-async fn subagent_task_does_not_enter_chat_tree_lifecycle() {
+async fn review_subagent_task_does_not_enter_chat_tree_lifecycle() {
     let (sess, mut tc, rx) = make_session_and_context_with_rx().await;
     Arc::get_mut(&mut tc)
         .expect("turn context should be uniquely owned before spawn")
@@ -10467,6 +10467,51 @@ async fn subagent_task_does_not_enter_chat_tree_lifecycle() {
     );
     assert_eq!(projection_before, sess.chat_tree_projection().await);
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn thread_spawn_subagent_appends_child_local_chat_tree_node_without_summary_job() {
+    let (sess, mut tc, _rx) = make_session_and_context_with_rx().await;
+    Arc::get_mut(&mut tc)
+        .expect("turn context should be uniquely owned")
+        .session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+    let input = vec![TurnInput::UserInput {
+        content: vec![UserInput::Text {
+            text: "inspect child state".to_string(),
+            text_elements: Vec::new(),
+        }],
+        client_id: None,
+    }];
+
+    sess.start_chat_tree_node_for_turn(&tc, &input).await;
+    let summary_job = sess
+        .complete_chat_tree_node_before_turn_complete(&tc, Some("done".to_string()))
+        .await;
+
+    assert!(summary_job.is_none());
+    let projection = sess.chat_tree_projection().await;
+    assert_eq!(
+        projection.current_node_id.as_deref(),
+        Some(tc.sub_id.as_str())
+    );
+    assert_eq!(projection.visible_turn_ids, vec![tc.sub_id.clone()]);
+    assert_eq!(
+        projection.nodes,
+        vec![crate::chat_tree::ChatTreeNodeSnapshot {
+            node_id: tc.sub_id.clone(),
+            parent_node_id: None,
+            turn_id: Some(tc.sub_id.clone()),
+            order: 0,
+            status: codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+            summary: Some("Turn 1 · completed".to_string()),
+        }]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

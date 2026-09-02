@@ -31,8 +31,10 @@ branches.
 - **REQ-7 Summary**: A completed main-thread turn with non-empty assistant output schedules a
   separate asynchronous no-tools summary request. The bounded single-line result is persisted as a
   late update. Failure, cancellation, or empty output never fails or rewinds the completed turn.
-- **REQ-8 Isolation**: Subagents, side threads, and internal session sources create neither main-tree
-  nodes nor main-tree summary jobs.
+- **REQ-8 Isolation**: A thread-spawn subagent that inherits parent history clones the inherited
+  selected projection and appends its own turns as child-local continuation nodes without mutating
+  the parent tree or creating main-tree summary jobs. Other side threads and internal session
+  sources create no tree nodes.
 - **REQ-9 UI**: `/chattree` shows the complete tree, marks current and selected rows, supports
   navigation, confirmation, and cancellation, blocks unsafe switching, and refreshes the visible
   transcript immediately after current changes.
@@ -94,6 +96,8 @@ semantics, method names, and array shapes. Common client-handled error kinds inc
 - **MUST** centralize turn start, completion, abort, persistence ordering, summary ownership, and
   root-session eligibility behind feature-owned lifecycle methods. Task orchestration should only
   call those methods.
+- **MUST** scope a thread-spawn subagent's continuation nodes and selection to its cloned child
+  tree. Never route those mutations back to the parent thread.
 - **MUST** provide one authoritative set-current control path that owns running-task checks,
   revision checks, persistence, and history restoration.
 - **MUST** make loaded and unloaded app-server reads, legacy and paginated history, resume paths,
@@ -149,7 +153,9 @@ selected history survive. Exercise compaction and the declared rollback strategy
 
 Prove an eligible completed turn makes a separate no-tools summary request and persists the bounded
 result. Prove failure, cancellation, empty output, and missing assistant output do not fail the
-turn. Prove late updates leave context unchanged and non-root turns create no node or summary job.
+turn. Prove late updates leave context unchanged. Prove thread-spawn subagents append child-local
+nodes to the inherited selected projection without mutating the parent or creating summary jobs;
+other non-root turns create no node.
 
 ### Public Paths
 
