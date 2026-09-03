@@ -7,24 +7,33 @@ use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::protocol::TurnSettingsUpdate;
+use codex_protocol::protocol::TurnSettingsUpdateOutcome;
+use codex_protocol::request_user_input::RequestUserInputAnswer;
+use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
+use core_test_support::responses::ev_function_call;
+use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::collections::HashMap;
 use wiremock::MockServer;
 
 const REMOTE_ENABLED_MODEL: &str = "model-remote-enabled";
@@ -401,6 +410,154 @@ async fn provider_without_remote_compaction_keeps_enabled_model_on_local_path() 
     let requests = responses.requests();
     assert_eq!(requests.len(), 2);
     assert_local_compaction_request(&requests[1], REMOTE_ENABLED_MODEL);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mid_turn_local_compaction_uses_the_activated_models_metadata() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = MockServer::start().await;
+    let mut catalog = model_catalog();
+    catalog
+        .models
+        .iter_mut()
+        .find(|model| model.slug == REMOTE_DISABLED_MODEL)
+        .expect("remote-disabled test model")
+        .default_reasoning_summary = ReasoningSummary::Detailed;
+    let models_mock = mount_models_once(&server, catalog).await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("model-a-response"),
+                ev_function_call(
+                    "pause-before-model-switch",
+                    "request_user_input",
+                    &json!({
+                        "questions": [{
+                            "id": "continue",
+                            "header": "Continue",
+                            "question": "Continue after switching models?",
+                            "options": [{
+                                "label": "Yes (Recommended)",
+                                "description": "Continue the current turn."
+                            }, {
+                                "label": "No",
+                                "description": "Stop the current turn."
+                            }]
+                        }]
+                    })
+                    .to_string(),
+                ),
+                ev_completed_with_tokens("model-a-response", /*total_tokens*/ 20),
+            ]),
+            sse(vec![
+                ev_response_created("model-b-response"),
+                ev_function_call("model-b-tool", "unsupported_tool", "{}"),
+                ev_completed_with_tokens("model-b-response", /*total_tokens*/ 150_000),
+            ]),
+            local_compaction_response("mid-turn-local"),
+            sse(vec![
+                ev_assistant_message("continuation-message", "continuation-reply"),
+                ev_completed_with_tokens("continuation-response", /*total_tokens*/ 20),
+            ]),
+        ],
+    )
+    .await;
+    let provider = remote_capable_provider(&server);
+    let test = test_codex()
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+        .with_model(REMOTE_ENABLED_MODEL)
+        .with_config(move |config| {
+            config.model_provider = provider;
+            config.model_auto_compact_token_limit = Some(100_000);
+            config.model_reasoning_summary = None;
+            for feature in [
+                Feature::RemoteCompactionV2,
+                Feature::StepModelSwitching,
+                Feature::DefaultModeRequestUserInput,
+            ] {
+                config
+                    .features
+                    .enable(feature)
+                    .expect("test feature should be configurable");
+            }
+        })
+        .build_with_auto_env(&server)
+        .await?;
+
+    test.codex
+        .start_or_steer_turn(user_turn("switch models before mid-turn compaction"))
+        .await?;
+    let request = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::RequestUserInput(request) => Some(request.clone()),
+        _ => None,
+    })
+    .await;
+    let (reply, outcome) = tokio::sync::oneshot::channel();
+    test.codex
+        .submit(Op::TurnSettings {
+            turn_id: request.turn_id.clone(),
+            update: TurnSettingsUpdate {
+                model: Some(REMOTE_DISABLED_MODEL.to_string()),
+                ..Default::default()
+            },
+            reply,
+        })
+        .await?;
+    assert_eq!(
+        tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 10), outcome).await??,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    test.codex
+        .submit(Op::UserInputAnswer {
+            id: request.turn_id,
+            response: RequestUserInputResponse {
+                answers: HashMap::from([(
+                    request.questions[0].id.clone(),
+                    RequestUserInputAnswer {
+                        answers: vec!["Yes (Recommended)".to_string()],
+                    },
+                )]),
+            },
+        })
+        .await?;
+    wait_for_turn_complete(&test.codex).await;
+
+    assert_eq!(models_mock.requests().len(), 1);
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(
+        requests[0].body_json()["model"].as_str(),
+        Some(REMOTE_ENABLED_MODEL)
+    );
+    assert_eq!(
+        requests[1].body_json()["model"].as_str(),
+        Some(REMOTE_DISABLED_MODEL)
+    );
+    assert_local_compaction_request(&requests[2], REMOTE_DISABLED_MODEL);
+    assert_eq!(
+        requests[2].body_json()["reasoning"]["summary"].as_str(),
+        Some("detailed")
+    );
+    assert!(
+        requests[2]
+            .function_call_output("model-b-tool")
+            .to_string()
+            .contains("unsupported")
+    );
+    assert_local_compaction_follow_up(
+        &requests[3],
+        REMOTE_DISABLED_MODEL,
+        "local-summary-mid-turn-local",
+    );
+    assert_eq!(
+        requests[3].body_json()["reasoning"]["summary"].as_str(),
+        Some("detailed")
+    );
+    assert!(requests[3].body_contains_text("switch models before mid-turn compaction"));
 
     Ok(())
 }
