@@ -1,4 +1,5 @@
 use super::*;
+use codex_protocol::AgentPath;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelServiceTier;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -93,6 +94,12 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(!description.contains("hidden-model"));
     assert!(!description.contains("disabled-model"));
     assert!(properties.contains_key("task_name"));
+    assert_eq!(
+        properties
+            .get("task_name")
+            .and_then(|schema| schema.max_length),
+        Some(AgentPath::MAX_AGENT_NAME_BYTES)
+    );
     assert!(properties.contains_key("message"));
     assert_eq!(
         properties

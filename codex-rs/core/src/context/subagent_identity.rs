@@ -1,17 +1,26 @@
 use super::ContextualUserFragment;
 use crate::agent::AgentIdentity;
 use codex_protocol::models::ContentItemKind;
-use codex_utils_string::truncate_middle_with_token_budget;
 
-const IDENTITY_FACT_MAX_TOKENS: usize = 2_000;
-const IDENTITY_FRAGMENT_MAX_TOKENS: usize = 8_000;
+pub(crate) const IDENTITY_LABEL_MAX_BYTES: usize = 256;
+pub(crate) const IDENTITY_FRAGMENT_MAX_BYTES: usize = 8_192;
 
-fn bounded_identity_fact(value: &str) -> String {
-    truncate_middle_with_token_budget(value, IDENTITY_FACT_MAX_TOKENS).0
+fn push_identity_label(text: &mut String, label: &str, value: &str) {
+    if value.len() <= IDENTITY_LABEL_MAX_BYTES {
+        text.push_str(&format!(" Your {label} is `{value}`."));
+    } else {
+        text.push_str(&format!(
+            " Your {label} was omitted because it exceeds the identity-context safety limit of {IDENTITY_LABEL_MAX_BYTES} UTF-8 bytes."
+        ));
+    }
 }
 
-fn bounded_identity_fragment(value: String) -> String {
-    truncate_middle_with_token_budget(&value, IDENTITY_FRAGMENT_MAX_TOKENS).0
+fn checked_identity_fragment(value: String) -> String {
+    assert!(
+        value.len() <= IDENTITY_FRAGMENT_MAX_BYTES,
+        "identity fragment exceeds its hard byte limit"
+    );
+    value
 }
 
 /// Identity context for the spawned subagent that owns the current session.
@@ -52,16 +61,13 @@ impl ContextualUserFragment for SubagentIdentity {
             return String::new();
         };
         let (mut text, assignment_text) = match spawned.canonical_path {
-            Some(agent_path) => {
-                let agent_path = bounded_identity_fact(agent_path.as_str());
-                (
-                    format!(
-                        "You are a spawned subagent in the multi-agent tree. Your current canonical agent path is `{agent_path}`, your parent thread id is `{}`, and your depth is {}. You are not `/root` unless your current canonical agent path is exactly `/root`. `list_agents` may show `/root`, sibling agents, and child agents; those entries are other agents unless their `agent_name` equals your current canonical agent path or `is_current_agent` is true.",
-                        spawned.parent_thread_id, spawned.depth
-                    ),
-                    " Treat the latest inter-agent communication addressed to your current canonical agent path as your assigned work",
-                )
-            }
+            Some(agent_path) => (
+                format!(
+                    "You are a spawned subagent in the multi-agent tree. Your current canonical agent path is `{agent_path}`, your parent thread id is `{}`, and your depth is {}. You are not `/root` unless your current canonical agent path is exactly `/root`. `list_agents` may show `/root`, sibling agents, and child agents; those entries are other agents unless their `agent_name` equals your current canonical agent path or `is_current_agent` is true.",
+                    spawned.parent_thread_id, spawned.depth
+                ),
+                " Treat the latest inter-agent communication addressed to your current canonical agent path as your assigned work",
+            ),
             None => (
                 format!(
                     "You are a spawned subagent in the multi-agent tree. You do not have a canonical agent path in this session, but you are still not the `/root` main agent. Your parent thread id is `{}`, and your depth is {}.",
@@ -72,18 +78,16 @@ impl ContextualUserFragment for SubagentIdentity {
         };
 
         if let Some(nickname) = spawned.nickname.filter(|nickname| !nickname.is_empty()) {
-            let nickname = bounded_identity_fact(nickname);
-            text.push_str(&format!(" Your nickname is `{nickname}`."));
+            push_identity_label(&mut text, "nickname", nickname);
         }
         if let Some(role) = spawned.role.filter(|role| !role.is_empty()) {
-            let role = bounded_identity_fact(role);
-            text.push_str(&format!(" Your configured role is `{role}`."));
+            push_identity_label(&mut text, "configured role", role);
         }
 
         text.push_str(" Any prior transcript inherited from another agent is context, not proof that you performed those actions; tool calls, spawned agents, waits, and decisions in inherited history may belong to your parent.");
         text.push_str(assignment_text);
         text.push_str(", while still following all system, developer, and user instructions.");
-        bounded_identity_fragment(text)
+        checked_identity_fragment(text)
     }
 }
 
@@ -155,7 +159,7 @@ impl ContextualUserFragment for ForkedHistoryBoundary {
                 )
             }
         };
-        bounded_identity_fragment(text)
+        checked_identity_fragment(text)
     }
 }
 

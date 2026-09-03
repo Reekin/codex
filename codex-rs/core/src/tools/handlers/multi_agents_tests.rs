@@ -2149,25 +2149,55 @@ async fn multi_agent_v2_spawn_surfaces_task_name_validation_errors() {
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
     set_turn_config(&mut turn, config);
+    let max_task_name = "a".repeat(AgentPath::MAX_AGENT_NAME_BYTES);
+    let mut parent_path = AgentPath::root();
+    while let Ok(next) = parent_path.join(&max_task_name) {
+        parent_path = next;
+    }
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: Some(parent_path),
+        agent_nickname: None,
+        agent_role: None,
+    });
 
-    let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
-        "spawn_agent",
-        function_payload(json!({
-            "message": "inspect this repo",
-            "task_name": "BadName"
-        })),
-    );
-    let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
-        panic!("invalid agent name should be rejected");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(
-            "agent_name must use only lowercase letters, digits, and underscores".to_string()
-        )
-    );
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    for (task_name, expected) in [
+        (
+            "BadName".to_string(),
+            "agent_name must use only lowercase letters, digits, and underscores".to_string(),
+        ),
+        (
+            "a".repeat(AgentPath::MAX_AGENT_NAME_BYTES + 1),
+            format!(
+                "agent_name must not exceed {} UTF-8 bytes",
+                AgentPath::MAX_AGENT_NAME_BYTES
+            ),
+        ),
+        (
+            max_task_name,
+            format!(
+                "agent path must not exceed {} UTF-8 bytes",
+                AgentPath::MAX_PATH_BYTES
+            ),
+        ),
+    ] {
+        let invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "task_name": task_name
+            })),
+        );
+        let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
+            panic!("invalid agent name should be rejected");
+        };
+        assert_eq!(err, FunctionCallError::RespondToModel(expected));
+    }
 }
 
 // TODO(anp): Restore this test on Linux once sandbox helpers work inside test microVMs.

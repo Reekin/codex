@@ -16,3 +16,17 @@ fn json_schema_serializes_encrypted_marker() {
         })
     );
 }
+
+#[test]
+fn json_schema_serializes_max_length() {
+    let schema = JsonSchema::string(Some("Bounded value".to_string())).with_max_length(128);
+
+    assert_eq!(
+        serde_json::to_value(schema).expect("serialize schema"),
+        serde_json::json!({
+            "type": "string",
+            "description": "Bounded value",
+            "maxLength": 128,
+        })
+    );
+}
