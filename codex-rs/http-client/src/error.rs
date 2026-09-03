@@ -3,6 +3,7 @@
 use crate::client::HttpError;
 use http::HeaderMap;
 use http::StatusCode;
+use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -22,6 +23,16 @@ pub enum TransportError {
     Connection(#[source] HttpError),
     #[error("network error: {0}")]
     Network(String),
+    #[error(
+        "large request upload stalled after {elapsed:?}: submitted {submitted_bytes} of {total_bytes} bytes at {bytes_per_second} B/s with {estimated_remaining:?} remaining"
+    )]
+    SlowUpload {
+        total_bytes: usize,
+        submitted_bytes: usize,
+        elapsed: Duration,
+        bytes_per_second: u64,
+        estimated_remaining: Duration,
+    },
     #[error("request build error: {0}")]
     Build(String),
 }
