@@ -2,6 +2,7 @@ use crate::original_image_detail::sanitize_original_image_detail;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use crate::tools::sandboxing::PermissionRequestPayload;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use crate::unified_exec::format_output_omission_marker;
 use crate::unified_exec::resolve_max_tokens;
@@ -356,7 +357,7 @@ pub struct ExecCommandToolOutput {
     pub original_token_count: Option<usize>,
     /// Bytes omitted by the output collection cap before model-facing truncation.
     pub output_omitted_bytes: Option<NonZeroUsize>,
-    pub hook_command: Option<String>,
+    pub hook_metadata: Option<PermissionRequestPayload>,
 }
 
 impl ToolOutput for ExecCommandToolOutput {
@@ -396,13 +397,19 @@ impl ToolOutput for ExecCommandToolOutput {
     }
 
     fn post_tool_use_input(&self, _payload: &ToolPayload) -> Option<JsonValue> {
-        self.hook_command
+        self.hook_metadata
             .as_ref()
-            .map(|command| serde_json::json!({ "command": command }))
+            .map(|metadata| metadata.tool_input.clone())
+    }
+
+    fn post_tool_use_tool_name(&self) -> Option<String> {
+        self.hook_metadata
+            .as_ref()
+            .map(|metadata| metadata.tool_name.name().to_string())
     }
 
     fn post_tool_use_response(&self, _call_id: &str, _payload: &ToolPayload) -> Option<JsonValue> {
-        if self.process_id.is_some() || self.hook_command.is_none() {
+        if self.process_id.is_some() || self.hook_metadata.is_none() {
             return None;
         }
 

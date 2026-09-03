@@ -8,6 +8,7 @@ use crate::session::turn_context::TurnEnvironment;
 use crate::tools::approvals::ApprovalAction;
 use crate::tools::approvals::ApprovalContext;
 use crate::tools::events::truncate_rejection_message;
+use crate::tools::sandboxing::PermissionRequestPayload;
 use crate::tools::sandboxing::ToolError;
 use codex_network_proxy::BlockedRequest;
 use codex_network_proxy::BlockedRequestObserver;
@@ -54,7 +55,7 @@ pub(crate) struct NetworkApprovalSpec {
     pub trigger: GuardianNetworkAccessTrigger,
     /// Preserve the typed identity independently of Guardian's display-name payload.
     pub tool_name: ToolName,
-    pub command: String,
+    pub permission_request_payload: PermissionRequestPayload,
     pub environment_id: String,
     pub permission_profile: PermissionProfile,
     pub network_policy: Option<EnvironmentNetworkPolicy>,
@@ -236,7 +237,7 @@ struct ActiveNetworkApprovalCall {
     turn_id: String,
     trigger: GuardianNetworkAccessTrigger,
     tool_name: ToolName,
-    command: String,
+    permission_request_payload: PermissionRequestPayload,
     environment_id: String,
     permission_profile: PermissionProfile,
     cancellation_token: CancellationToken,
@@ -716,9 +717,10 @@ impl NetworkApprovalService {
             |call| format!("{guardian_approval_id}#{}", call.registration_id),
         );
         let prompt_command = vec!["network-access".to_string(), target.clone()];
-        let command = owner_call
-            .as_ref()
-            .map_or_else(|| prompt_command.join(" "), |call| call.command.clone());
+        let permission_request_payload = owner_call.as_ref().map_or_else(
+            || PermissionRequestPayload::bash(prompt_command.join(" "), /*description*/ None),
+            |call| call.permission_request_payload.clone(),
+        );
         let cwd = if let Some(cwd) = owner_call
             .as_ref()
             .and_then(|owner_call| owner_call.trigger.cwd.to_abs_path().ok())
@@ -744,6 +746,8 @@ impl NetworkApprovalService {
             || ToolName::plain("network_access"),
             |call| call.tool_name.clone(),
         );
+        let permission_request_payload =
+            permission_request_payload.with_description(format!("network-access {target}"));
         let action = ApprovalAction::NetworkAccess {
             id: guardian_approval_id,
             turn_id: turn_context.sub_id.clone(),
@@ -753,7 +757,7 @@ impl NetworkApprovalService {
             protocol,
             port: key.port,
             trigger: owner_call.as_ref().map(|call| call.trigger.clone()),
-            hook_command: command,
+            permission_request_payload,
             hook_run_id: hook_run_id_suffix,
             command: prompt_command,
             cwd,
@@ -1039,7 +1043,7 @@ pub(crate) async fn begin_network_approval(
         network,
         trigger,
         tool_name,
-        command,
+        permission_request_payload,
         environment_id,
         permission_profile,
         network_policy,
@@ -1143,7 +1147,7 @@ pub(crate) async fn begin_network_approval(
             turn_id: turn.sub_id.clone(),
             trigger,
             tool_name,
-            command,
+            permission_request_payload,
             environment_id,
             permission_profile,
             cancellation_token: cancellation_token.clone(),

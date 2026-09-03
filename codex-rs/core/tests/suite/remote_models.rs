@@ -122,7 +122,7 @@ async fn unknown_model_sends_builtin_instructions() -> Result<()> {
     let tools = body["tools"]
         .as_array()
         .expect("fallback model tools should be present");
-    for tool_name in ["exec_command", "write_stdin"] {
+    for tool_name in ["exec_argv", "exec_command", "write_stdin"] {
         assert!(
             tools
                 .iter()
@@ -745,7 +745,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
     let tools = body["tools"]
         .as_array()
         .expect("remote model tools should be present");
-    for tool_name in ["exec_command", "write_stdin"] {
+    for tool_name in ["exec_argv", "exec_command", "write_stdin"] {
         assert!(
             tools
                 .iter()

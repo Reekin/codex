@@ -115,6 +115,27 @@ fn exec_command_tool_can_hide_shell_parameter() {
 }
 
 #[test]
+fn exec_argv_tool_is_argv_first() {
+    let tool = create_exec_argv_tool_with_environment_id(
+        CommandToolOptions {
+            allow_login_shell: false,
+            exec_permission_approvals_enabled: false,
+        },
+        /*include_environment_id*/ true,
+    );
+    let value = serde_json::to_value(tool).expect("serialize tool");
+
+    assert_eq!(value["name"], "exec_argv");
+    assert_eq!(value["parameters"]["required"], serde_json::json!(["argv"]));
+    assert!(value["parameters"]["properties"].get("cmd").is_none());
+    assert!(
+        value["parameters"]["properties"]
+            .get("environment_id")
+            .is_some()
+    );
+}
+
+#[test]
 fn write_stdin_tool_matches_expected_spec() {
     let tool = create_write_stdin_tool();
 
