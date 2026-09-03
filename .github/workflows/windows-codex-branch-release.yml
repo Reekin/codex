@@ -23,6 +23,7 @@ jobs:
       run:
         working-directory: codex-rs
     env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
       CARGO_PROFILE_RELEASE_LTO: thin
       TARGET: x86_64-pc-windows-msvc
 
