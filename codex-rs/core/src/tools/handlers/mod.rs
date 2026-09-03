@@ -75,6 +75,8 @@ pub use send_message_to_user_async::SendMessageToUserAsyncHandler;
 pub use sleep::SleepHandler;
 pub use test_sync::TestSyncHandler;
 pub(crate) use tool_search::ToolSearchHandlerCache;
+pub use unified_exec::ExecArgvHandler;
+pub(crate) use unified_exec::ExecArgvHandlerOptions;
 pub use unified_exec::ExecCommandHandler;
 pub(crate) use unified_exec::ExecCommandHandlerOptions;
 pub use unified_exec::WriteStdinHandler;

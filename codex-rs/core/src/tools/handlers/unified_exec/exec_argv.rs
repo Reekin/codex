@@ -1,8 +1,18 @@
 use std::path::Path;
+#[cfg(any(windows, test))]
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
-use crate::exec::DEFAULT_EXEC_COMMAND_TIMEOUT_MS;
+use codex_features::Feature;
+use codex_sandboxing::SandboxManager;
+use codex_sandboxing::SandboxType;
+use codex_sandboxing::SandboxablePreference;
+use codex_tools::ToolName;
+use codex_tools::ToolSpec;
+use codex_utils_output_truncation::approx_token_count;
+use codex_utils_path_uri::PathConvention;
+use serde_json::Value;
+
 use crate::exec_policy::prompt_is_rejected_by_policy;
 use crate::function_tool::FunctionCallError;
 use crate::maybe_emit_implicit_skill_invocation;
@@ -19,8 +29,9 @@ use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::parse_arguments_with_base_path;
 use crate::tools::handlers::resolve_sandbox_permissions;
 use crate::tools::handlers::resolve_tool_environment;
-use crate::tools::handlers::rewrite_function_string_argument;
-use crate::tools::handlers::updated_hook_command;
+use crate::tools::handlers::rewrite_function_arguments;
+use crate::tools::handlers::shell_spec::CommandToolOptions;
+use crate::tools::handlers::shell_spec::create_exec_argv_tool_with_environment_id;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::CoreToolRuntime;
 use crate::tools::registry::PostToolUsePayload;
@@ -33,127 +44,39 @@ use crate::unified_exec::UnifiedExecError;
 use crate::unified_exec::UnifiedExecLaunchMode;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::generate_chunk_id;
-use codex_features::Feature;
-use codex_otel::SessionTelemetry;
-use codex_otel::TOOL_CALL_UNIFIED_EXEC_METRIC;
-use codex_sandboxing::SandboxManager;
-use codex_sandboxing::SandboxType;
-use codex_sandboxing::SandboxablePreference;
-use codex_shell_command::shell_detect::detect_shell_type;
-use codex_tools::JsonSchema;
-use codex_tools::ToolName;
-use codex_tools::ToolSpec;
-use codex_utils_output_truncation::approx_token_count;
-use codex_utils_path_uri::PathConvention;
-use codex_utils_string::truncate_middle_chars;
 
-use super::super::shell_spec::CommandToolOptions;
-use super::super::shell_spec::create_exec_command_tool_with_environment_id;
-use super::ExecCommandArgs;
+use super::ExecArgvArgs;
 use super::ExecCommandEnvironmentArgs;
-use super::get_command;
+use super::exec_command::emit_unified_exec_tty_metric;
 use super::post_unified_exec_tool_use_payload;
 use super::shell_mode_for_environment;
 
-// A byte limit is a conservative hard token bound even for byte-fallback tokenizers.
-const EXEC_COMMAND_REJECTION_MAX_BYTES: usize = 900;
-
 #[derive(Clone, Copy)]
-pub(crate) struct ExecCommandHandlerOptions {
-    pub(crate) allow_login_shell: bool,
-    pub(crate) allow_tty: bool,
+pub(crate) struct ExecArgvHandlerOptions {
     pub(crate) exec_permission_approvals_enabled: bool,
     pub(crate) include_environment_id: bool,
-    pub(crate) include_shell_parameter: bool,
-    pub(crate) include_windows_shell_guidance: bool,
 }
 
-#[derive(Clone, Copy)]
-enum ExecCommandLifetime {
-    Interactive,
-    OneShot,
+pub struct ExecArgvHandler {
+    options: ExecArgvHandlerOptions,
 }
 
-pub struct ExecCommandHandler {
-    options: ExecCommandHandlerOptions,
-    lifetime: ExecCommandLifetime,
-}
-
-impl Default for ExecCommandHandler {
+impl Default for ExecArgvHandler {
     fn default() -> Self {
         Self {
-            lifetime: ExecCommandLifetime::Interactive,
-            options: ExecCommandHandlerOptions {
-                allow_login_shell: false,
-                allow_tty: true,
+            options: ExecArgvHandlerOptions {
                 exec_permission_approvals_enabled: false,
                 include_environment_id: false,
-                include_shell_parameter: true,
-                include_windows_shell_guidance: cfg!(windows),
             },
         }
     }
 }
 
-impl ExecCommandHandler {
-    pub(crate) fn new(options: ExecCommandHandlerOptions) -> Self {
-        Self {
-            options,
-            lifetime: ExecCommandLifetime::Interactive,
-        }
+impl ExecArgvHandler {
+    pub(crate) fn new(options: ExecArgvHandlerOptions) -> Self {
+        Self { options }
     }
 
-    pub(crate) fn one_shot(options: ExecCommandHandlerOptions) -> Self {
-        Self {
-            options,
-            lifetime: ExecCommandLifetime::OneShot,
-        }
-    }
-}
-
-impl ToolExecutor<ToolInvocation> for ExecCommandHandler {
-    fn tool_name(&self) -> ToolName {
-        ToolName::plain("exec_command")
-    }
-
-    fn spec(&self) -> ToolSpec {
-        let spec = create_exec_command_tool_with_environment_id(
-            CommandToolOptions {
-                allow_login_shell: self.options.allow_login_shell,
-                exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
-            },
-            self.options.include_environment_id,
-            self.options.include_shell_parameter,
-            self.options.include_windows_shell_guidance,
-        );
-        let mut spec = match self.lifetime {
-            ExecCommandLifetime::Interactive => spec,
-            ExecCommandLifetime::OneShot => one_shot_exec_command_spec(spec),
-        };
-        if !self.options.allow_tty
-            && let ToolSpec::Function(spec) = &mut spec
-        {
-            spec.parameters
-                .properties
-                .get_or_insert_default()
-                .remove("tty");
-        }
-        spec
-    }
-
-    fn supports_parallel_tool_calls(&self) -> bool {
-        true
-    }
-
-    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
-    where
-        ToolInvocation: 'a,
-    {
-        Box::pin(self.handle_call(invocation))
-    }
-}
-
-impl ExecCommandHandler {
     async fn handle_call(
         &self,
         invocation: ToolInvocation,
@@ -168,14 +91,10 @@ impl ExecCommandHandler {
             payload,
             ..
         } = invocation;
-
-        let arguments = match payload {
-            ToolPayload::Function { arguments } => arguments,
-            _ => {
-                return Err(FunctionCallError::RespondToModel(
-                    "exec_command handler received unsupported payload".to_string(),
-                ));
-            }
+        let ToolPayload::Function { arguments } = payload else {
+            return Err(FunctionCallError::RespondToModel(
+                "exec_argv handler received unsupported payload".to_string(),
+            ));
         };
 
         let manager: &UnifiedExecProcessManager = &session.services.unified_exec_manager;
@@ -183,7 +102,7 @@ impl ExecCommandHandler {
             session.clone(),
             step_context.clone(),
             cancellation_token,
-            call_id.clone(),
+            call_id,
         );
         let environment_args: ExecCommandEnvironmentArgs = parse_arguments(&arguments)?;
         let Some(turn_environment) = resolve_tool_environment(
@@ -207,9 +126,6 @@ impl ExecCommandHandler {
             .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
         let environment = Arc::clone(&turn_environment.environment);
         let fs = environment.get_filesystem();
-
-        // Remote executors enforce URI-native sandbox policy themselves. Only a host-local
-        // sandbox needs a native cwd for resolving paths nested in the permissions config.
         let requires_host_native_cwd = !environment.is_remote()
             && SandboxManager::new().select_initial(
                 turn_environment.permission_profile(),
@@ -217,8 +133,6 @@ impl ExecCommandHandler {
                 turn_environment.config().windows_sandbox_level,
                 turn.network.is_some(),
             ) != SandboxType::None;
-        // `to_abs_path()` alone cannot identify foreign drive paths: `file:///C:/repo` is
-        // representable as `/C:/repo` on POSIX. Require the inferred convention to match too.
         let cwd_uses_native_convention =
             cwd.infer_path_convention() == Some(PathConvention::native());
         let native_cwd = match cwd.to_abs_path() {
@@ -232,25 +146,14 @@ impl ExecCommandHandler {
                 )));
             }
         };
-        let mut args: ExecCommandArgs = match native_cwd.as_ref() {
-            Some(native_cwd) => {
-                // The base path only resolves paths nested in the permissions config types.
-                parse_arguments_with_base_path(&arguments, native_cwd)?
-            }
-            None => {
-                // Foreign executor cwd values cannot seed this host's AbsolutePathBufGuard.
-                // Sandbox intent and URI-native roots are still sent to the executor.
-                parse_arguments(&arguments)?
-            }
+        let args: ExecArgvArgs = match native_cwd.as_ref() {
+            Some(native_cwd) => parse_arguments_with_base_path(&arguments, native_cwd)?,
+            None => parse_arguments(&arguments)?,
         };
-        if args.tty && !session.features().enabled(Feature::UnifiedExecTty) {
-            return Err(FunctionCallError::RespondToModel(
-                "TTY execution is disabled by config; omit `tty` or set it to false.".to_string(),
-            ));
-        }
-        let sandbox_permissions =
-            resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
-        let hook_command = args.cmd.clone();
+        let command = validate_argv(args.argv)?;
+        let hook_command = codex_shell_command::parse_command::shlex_join(&command);
+        let hook_metadata =
+            PermissionRequestPayload::exec_argv(hook_command.clone(), command.clone());
         maybe_emit_implicit_skill_invocation(
             session.as_ref(),
             context.step_context.turn.as_ref(),
@@ -260,65 +163,19 @@ impl ExecCommandHandler {
             &turn_environment.selection.environment_id,
         )
         .await;
-        let shell_mode =
-            shell_mode_for_environment(&turn.unified_exec_shell_mode, environment.as_ref());
-        // Remote environments may use a different OS and must build commands with their native
-        // shell; fall back to the session shell when the environment did not report one.
-        let shell = turn_environment
-            .shell
-            .clone()
-            .map(Arc::new)
-            .unwrap_or_else(|| session.user_shell());
-        // TODO(anp): Resolve requested shells in remote environments instead of restricting
-        // commands to the reported default shell.
-        if environment.is_remote()
-            && let Some(requested_shell) = args.shell.take()
-        {
-            let Some(remote_shell) = turn_environment.shell.as_ref() else {
-                return Err(FunctionCallError::RespondToModel(format!(
-                    "environment `{}` does not report a shell",
-                    turn_environment.selection.environment_id
-                )));
-            };
-            if detect_shell_type(Path::new(&requested_shell)) != Some(remote_shell.shell_type) {
-                return Err(FunctionCallError::RespondToModel(format!(
-                    "environment `{}` only supports `{}`",
-                    turn_environment.selection.environment_id,
-                    remote_shell.name()
-                )));
-            }
-        }
-        let process_id = manager.allocate_process_id().await;
-        let resolved_command = get_command(
-            &args,
-            shell,
-            &shell_mode,
-            turn_environment.config().allow_login_shell,
-        )
-        .map_err(FunctionCallError::RespondToModel)?;
-        let command = resolved_command.command;
-        let shell_type = resolved_command.shell_type;
-        let ExecCommandArgs {
-            mut tty,
+        let ExecArgvArgs {
+            tty,
             yield_time_ms,
-            timeout_ms,
             max_output_tokens,
-            sandbox_permissions: _,
+            sandbox_permissions,
             additional_permissions,
             justification,
             prefix_rule,
             ..
         } = args;
-        let completion_timeout = match self.lifetime {
-            ExecCommandLifetime::Interactive => None,
-            ExecCommandLifetime::OneShot => {
-                tty = false;
-                Some(Duration::from_millis(
-                    timeout_ms.unwrap_or(DEFAULT_EXEC_COMMAND_TIMEOUT_MS),
-                ))
-            }
-        };
-
+        let sandbox_permissions =
+            resolve_sandbox_permissions(sandbox_permissions, justification.as_deref())?;
+        let process_id = manager.allocate_process_id().await;
         let exec_permission_approvals_enabled =
             session.features().enabled(Feature::ExecPermissionApprovals);
         let requested_additional_permissions = additional_permissions.clone();
@@ -343,9 +200,6 @@ impl ExecCommandHandler {
         let additional_permissions_allowed = exec_permission_approvals_enabled
             || (session.features().enabled(Feature::RequestPermissionsTool)
                 && effective_additional_permissions.permissions_preapproved);
-
-        // Sticky turn permissions have already been approved, so they should
-        // continue through the normal exec approval flow for the command.
         let approval_policy = context.step_context.settings.approval_policy();
         if effective_additional_permissions
             .sandbox_permissions
@@ -358,7 +212,6 @@ impl ExecCommandHandler {
                 "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
             )));
         }
-
         let normalized_additional_permissions = match implicit_granted_permissions(
             sandbox_permissions,
             requested_additional_permissions.as_ref(),
@@ -394,11 +247,9 @@ impl ExecCommandHandler {
             context.cancellation_token.clone(),
             Some(&tracker),
             &context.call_id,
-            "exec_command",
+            "exec_argv",
         )
         .await;
-        // Keep the reservation when interception returns `Ok(None)`: the normal command below
-        // still needs this process ID.
         if intercepted_patch.is_err() {
             manager.release_process_id(process_id).await;
         }
@@ -420,21 +271,22 @@ impl ExecCommandHandler {
         }
 
         emit_unified_exec_tty_metric(&turn.session_telemetry, tty);
+        let argv0 = command[0].clone();
         let request = ExecCommandRequest {
             command,
-            launch_mode: UnifiedExecLaunchMode::Shell(shell_type),
-            tool_name: ToolName::plain("exec_command"),
-            hook_metadata: PermissionRequestPayload::bash(
-                hook_command.clone(),
-                /*description*/ None,
-            ),
+            launch_mode: UnifiedExecLaunchMode::Argv,
+            tool_name: ToolName::plain("exec_argv"),
+            hook_metadata: hook_metadata.clone(),
             process_id,
             yield_time_ms,
             max_output_tokens,
             cwd,
             sandbox_cwd: native_environment_cwd,
             turn_environment: turn_environment.clone(),
-            shell_mode,
+            shell_mode: shell_mode_for_environment(
+                &turn.unified_exec_shell_mode,
+                environment.as_ref(),
+            ),
             network: context.step_context.turn.network.clone(),
             tty,
             sandbox_permissions: effective_additional_permissions.sandbox_permissions,
@@ -444,14 +296,7 @@ impl ExecCommandHandler {
             justification,
             prefix_rule,
         };
-        let result = match completion_timeout {
-            Some(timeout) => {
-                UnifiedExecProcessManager::exec_command_to_completion(request, &context, timeout)
-                    .await
-            }
-            None => manager.exec_command(request, &context).await,
-        };
-        match result {
+        match manager.exec_command(request, &context).await {
             Ok(response) => Ok(boxed_tool_output(response)),
             Err(UnifiedExecError::SandboxDenied {
                 output,
@@ -469,59 +314,51 @@ impl ExecCommandHandler {
                     raw_output: output_text.into_bytes(),
                     truncation_policy: turn.model_info().truncation_policy.into(),
                     max_output_tokens,
-                    // Sandbox denial is terminal, so there is no live
-                    // process for write_stdin to resume.
                     process_id: None,
                     exit_code: Some(output.exit_code),
                     original_token_count: Some(original_token_count),
                     output_omitted_bytes,
-                    hook_metadata: Some(PermissionRequestPayload::bash(
-                        hook_command,
-                        /*description*/ None,
-                    )),
+                    hook_metadata: Some(hook_metadata),
                 }))
             }
-            Err(err) => {
-                let message = format!("exec_command failed: {err:?}");
-                Err(FunctionCallError::RespondToModel(truncate_middle_chars(
-                    &message,
-                    EXEC_COMMAND_REJECTION_MAX_BYTES,
-                )))
-            }
+            Err(err) => Err(FunctionCallError::RespondToModel(format_exec_argv_error(
+                &hook_command,
+                &argv0,
+                native_cwd.as_deref(),
+                &err,
+            ))),
         }
     }
 }
 
-fn one_shot_exec_command_spec(spec: ToolSpec) -> ToolSpec {
-    let ToolSpec::Function(mut spec) = spec else {
-        unreachable!("exec_command has a function schema");
-    };
-    spec.description = spec.description.replacen(
-        "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
-        "Runs a command to completion and returns its output. The process is terminated on timeout or cancellation and cannot be resumed.",
-        1,
-    );
-    let properties = spec.parameters.properties.get_or_insert_default();
-    properties.remove("tty");
-    properties.remove("yield_time_ms");
-    properties.insert(
-        "timeout_ms".to_string(),
-        JsonSchema::number(Some(
-            "Maximum command runtime. Defaults to 10000 ms.".to_string(),
-        )),
-    );
-    if let Some(output_properties) = spec
-        .output_schema
-        .as_mut()
-        .and_then(|schema| schema.get_mut("properties"))
-        .and_then(serde_json::Value::as_object_mut)
-    {
-        output_properties.remove("session_id");
+impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain("exec_argv")
     }
-    ToolSpec::Function(spec)
+
+    fn spec(&self) -> ToolSpec {
+        create_exec_argv_tool_with_environment_id(
+            CommandToolOptions {
+                allow_login_shell: false,
+                exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
+            },
+            self.options.include_environment_id,
+        )
+    }
+
+    fn supports_parallel_tool_calls(&self) -> bool {
+        true
+    }
+
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
+        Box::pin(self.handle_call(invocation))
+    }
 }
 
-impl CoreToolRuntime for ExecCommandHandler {
+impl CoreToolRuntime for ExecArgvHandler {
     fn matches_kind(&self, payload: &ToolPayload) -> bool {
         matches!(payload, ToolPayload::Function { .. })
     }
@@ -530,32 +367,33 @@ impl CoreToolRuntime for ExecCommandHandler {
         let ToolPayload::Function { arguments } = &invocation.payload else {
             return None;
         };
-
-        parse_arguments::<ExecCommandArgs>(arguments)
-            .ok()
-            .map(|args| PreToolUsePayload {
-                tool_name: HookToolName::bash(),
-                tool_input: serde_json::json!({ "command": args.cmd }),
-            })
+        let args = parse_arguments::<ExecArgvArgs>(arguments).ok()?;
+        let argv = validate_argv(args.argv).ok()?;
+        Some(PreToolUsePayload {
+            tool_name: HookToolName::new("exec_argv"),
+            tool_input: PermissionRequestPayload::exec_argv(
+                codex_shell_command::parse_command::shlex_join(&argv),
+                argv,
+            )
+            .tool_input,
+        })
     }
 
     fn with_updated_hook_input(
         &self,
         mut invocation: ToolInvocation,
-        updated_input: serde_json::Value,
+        updated_input: Value,
     ) -> Result<ToolInvocation, FunctionCallError> {
         let ToolPayload::Function { arguments } = invocation.payload else {
             return Err(FunctionCallError::RespondToModel(
-                "hook input rewrite received unsupported exec_command payload".to_string(),
+                "hook input rewrite received unsupported exec_argv payload".to_string(),
             ));
         };
+        let argv = updated_hook_argv(&updated_input)?;
         invocation.payload = ToolPayload::Function {
-            arguments: rewrite_function_string_argument(
-                &arguments,
-                "exec_command",
-                "cmd",
-                updated_hook_command(&updated_input)?,
-            )?,
+            arguments: rewrite_function_arguments(&arguments, "exec_argv", |arguments| {
+                arguments.insert("argv".to_string(), serde_json::json!(argv));
+            })?,
         };
         Ok(invocation)
     }
@@ -569,10 +407,144 @@ impl CoreToolRuntime for ExecCommandHandler {
     }
 }
 
-pub(super) fn emit_unified_exec_tty_metric(session_telemetry: &SessionTelemetry, tty: bool) {
-    session_telemetry.counter(
-        TOOL_CALL_UNIFIED_EXEC_METRIC,
-        /*inc*/ 1,
-        &[("tty", if tty { "true" } else { "false" })],
-    );
+fn validate_argv(argv: Vec<String>) -> Result<Vec<String>, FunctionCallError> {
+    let Some(program) = argv.first() else {
+        return Err(FunctionCallError::RespondToModel(
+            "exec_argv requires a non-empty argv array.".to_string(),
+        ));
+    };
+    if program.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "exec_argv requires argv[0] to name a program.".to_string(),
+        ));
+    }
+    if argv.iter().any(|arg| arg.contains('\0')) {
+        return Err(FunctionCallError::RespondToModel(
+            "exec_argv arguments must not contain NUL bytes.".to_string(),
+        ));
+    }
+    Ok(argv)
+}
+
+fn updated_hook_argv(updated_input: &Value) -> Result<Vec<String>, FunctionCallError> {
+    let Some(Value::Array(items)) = updated_input.get("argv") else {
+        return Err(FunctionCallError::RespondToModel(
+            "hook returned updatedInput for exec_argv without array field `argv`".to_string(),
+        ));
+    };
+    let argv = items
+        .iter()
+        .map(|item| {
+            item.as_str().map(str::to_string).ok_or_else(|| {
+                FunctionCallError::RespondToModel(
+                    "hook returned updatedInput.argv for exec_argv with a non-string argument"
+                        .to_string(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_argv(argv)
+}
+
+fn format_exec_argv_error(
+    hook_command: &str,
+    argv0: &str,
+    cwd: Option<&Path>,
+    err: &UnifiedExecError,
+) -> String {
+    let mut message = format!("exec_argv failed for `{hook_command}`: {err:?}");
+    if let UnifiedExecError::CreateProcess {
+        message: create_process_message,
+    } = err
+        && create_process_error_may_be_program_lookup(create_process_message)
+        && let Some(hint) = cwd.and_then(|cwd| windows_pathext_resolution_hint(argv0, cwd))
+    {
+        message.push_str("\n\n");
+        message.push_str(&hint);
+    }
+    message
+}
+
+fn create_process_error_may_be_program_lookup(message: &str) -> bool {
+    let lowercase = message.to_ascii_lowercase();
+    lowercase.contains("program not found")
+        || lowercase.contains("not found")
+        || lowercase.contains("os error 2")
+        || message.contains("找不到指定的文件")
+}
+
+#[cfg(windows)]
+fn windows_pathext_resolution_hint(program: &str, cwd: &Path) -> Option<String> {
+    let path_entries = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    let candidates = windows_pathext_candidates(program, cwd, path_entries, &pathext);
+    if candidates.is_empty() {
+        return None;
+    }
+    let formatted_candidates = candidates
+        .iter()
+        .take(5)
+        .map(|path| format!("`{}`", path.display()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let first = candidates[0].display();
+    Some(format!(
+        "Windows note: `exec_argv` does not ask a shell to resolve PATHEXT entries for argv[0]. Found candidate command shim(s): {formatted_candidates}. Try using the full path with its extension, for example `{first}` as argv[0]."
+    ))
+}
+
+#[cfg(not(windows))]
+fn windows_pathext_resolution_hint(_program: &str, _cwd: &Path) -> Option<String> {
+    None
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn windows_pathext_candidates(
+    program: &str,
+    cwd: &Path,
+    path_entries: impl IntoIterator<Item = PathBuf>,
+    pathext: &str,
+) -> Vec<PathBuf> {
+    let program_path = Path::new(program.trim());
+    if program_path.as_os_str().is_empty() || program_path.extension().is_some() {
+        return Vec::new();
+    }
+    let extensions = pathext
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| extension.starts_with('.') && extension.len() > 1)
+        .collect::<Vec<_>>();
+    if extensions.is_empty() {
+        return Vec::new();
+    }
+    let has_path_separator = program.contains('\\') || program.contains('/');
+    let bases = if has_path_separator {
+        vec![if program_path.is_absolute() {
+            program_path.to_path_buf()
+        } else {
+            cwd.join(program_path)
+        }]
+    } else {
+        path_entries
+            .into_iter()
+            .map(|path_entry| path_entry.join(program))
+            .collect()
+    };
+    let mut candidates = Vec::new();
+    for base in bases {
+        for extension in &extensions {
+            let Some(mut file_name) = base.file_name().map(std::ffi::OsStr::to_os_string) else {
+                continue;
+            };
+            file_name.push(extension);
+            let mut candidate = base.clone();
+            candidate.set_file_name(file_name);
+            if candidate.is_file() && !candidates.contains(&candidate) {
+                candidates.push(candidate);
+            }
+        }
+    }
+    candidates
 }

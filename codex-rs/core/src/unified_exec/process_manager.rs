@@ -40,6 +40,7 @@ use crate::tools::runtimes::is_managed_proxy_env_var;
 use crate::tools::runtimes::unified_exec::UnifiedExecAttempt;
 use crate::tools::runtimes::unified_exec::UnifiedExecRequest as UnifiedExecToolRequest;
 use crate::tools::runtimes::unified_exec::UnifiedExecRuntime;
+use crate::tools::sandboxing::PermissionRequestPayload;
 use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
@@ -52,6 +53,7 @@ use crate::unified_exec::ProcessEntry;
 use crate::unified_exec::ProcessStore;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::UnifiedExecError;
+use crate::unified_exec::UnifiedExecLaunchMode;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::WriteStdinInteractionEvent;
 use crate::unified_exec::WriteStdinRequest;
@@ -264,7 +266,7 @@ struct PreparedProcessHandles {
     session: Option<Arc<crate::session::session::Session>>,
     network_approval: Option<DeferredNetworkApproval>,
     call_id: String,
-    hook_command: String,
+    hook_metadata: PermissionRequestPayload,
     process_id: i32,
     tty: bool,
 }
@@ -574,7 +576,7 @@ impl UnifiedExecProcessManager {
                 Arc::clone(&process),
                 context,
                 &request.command,
-                request.hook_command.clone(),
+                request.hook_metadata.clone(),
                 cwd.clone(),
                 request.turn_environment.selection.environment_id.clone(),
                 permissions,
@@ -805,7 +807,7 @@ impl UnifiedExecProcessManager {
             exit_code,
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
-            hook_command: Some(request.hook_command.clone()),
+            hook_metadata: Some(request.hook_metadata.clone()),
         };
 
         Ok(response)
@@ -909,7 +911,7 @@ impl UnifiedExecProcessManager {
             session,
             network_approval,
             call_id,
-            hook_command,
+            hook_metadata,
             process_id,
             tty,
             ..
@@ -1040,7 +1042,7 @@ impl UnifiedExecProcessManager {
             exit_code,
             original_token_count: Some(original_token_count),
             output_omitted_bytes,
-            hook_command: Some(hook_command),
+            hook_metadata: Some(hook_metadata),
         };
 
         let should_emit_interaction = !request.input.is_empty() || response.process_id.is_some();
@@ -1117,7 +1119,7 @@ impl UnifiedExecProcessManager {
             session,
             network_approval: entry.network_approval.clone(),
             call_id: entry.call_id.clone(),
-            hook_command: entry.hook_command.clone(),
+            hook_metadata: entry.hook_metadata.clone(),
             process_id: entry.process_id,
             tty: entry.tty,
         })
@@ -1129,7 +1131,7 @@ impl UnifiedExecProcessManager {
         process: Arc<UnifiedExecProcess>,
         context: &UnifiedExecContext,
         command: &[String],
-        hook_command: String,
+        hook_metadata: PermissionRequestPayload,
         cwd: PathUri,
         environment_id: String,
         permissions: super::TerminalPermissions,
@@ -1152,7 +1154,7 @@ impl UnifiedExecProcessManager {
             process_id,
             cwd: cwd.clone(),
             initial_exec_command_active,
-            hook_command,
+            hook_metadata,
             tty,
             environment_id,
             permissions,
@@ -1402,34 +1404,50 @@ impl UnifiedExecProcessManager {
             Some("windows") | Some(_) => DangerousCommandPlatform::Windows,
             None => DangerousCommandPlatform::host(),
         };
-        let exec_approval_requirement = context
-            .session
-            .services
-            .exec_policy
-            .create_exec_approval_requirement_for_shell(
-                ExecApprovalRequest {
-                    command: &request.command,
-                    approval_policy: context.step_context.settings.approval_policy(),
-                    permission_profile: request.turn_environment.permission_profile().clone(),
-                    environment_policy: request.turn_environment.config().exec_policy.as_ref(),
-                    windows_sandbox_level: request.turn_environment.config().windows_sandbox_level,
-                    sandbox_permissions: if request.additional_permissions_preapproved {
-                        crate::sandboxing::SandboxPermissions::UseDefault
-                    } else {
-                        request.sandbox_permissions
-                    },
-                    prefix_rule: request.prefix_rule.clone(),
-                    allow_prefix_rules: context.step_context.turn.allow_prefix_rules(),
-                },
-                configured_shell,
-                &request.shell_mode,
-                command_platform,
-            )
-            .await;
+        let approval_request = ExecApprovalRequest {
+            command: &request.command,
+            approval_policy: context.step_context.settings.approval_policy(),
+            permission_profile: request.turn_environment.permission_profile().clone(),
+            environment_policy: request.turn_environment.config().exec_policy.as_ref(),
+            windows_sandbox_level: request.turn_environment.config().windows_sandbox_level,
+            sandbox_permissions: if request.additional_permissions_preapproved {
+                crate::sandboxing::SandboxPermissions::UseDefault
+            } else {
+                request.sandbox_permissions
+            },
+            prefix_rule: request.prefix_rule.clone(),
+            allow_prefix_rules: context.step_context.turn.allow_prefix_rules(),
+        };
+        let exec_approval_requirement = match request.launch_mode {
+            UnifiedExecLaunchMode::Shell(_) => {
+                context
+                    .session
+                    .services
+                    .exec_policy
+                    .create_exec_approval_requirement_for_shell(
+                        approval_request,
+                        configured_shell,
+                        &request.shell_mode,
+                        command_platform,
+                    )
+                    .await
+            }
+            UnifiedExecLaunchMode::Argv => {
+                context
+                    .session
+                    .services
+                    .exec_policy
+                    .create_exec_approval_requirement_for_command_platform(
+                        approval_request,
+                        command_platform,
+                    )
+                    .await
+            }
+        };
         let req = UnifiedExecToolRequest {
             command: request.command.clone(),
-            shell_type: request.shell_type,
-            hook_command: request.hook_command.clone(),
+            launch_mode: request.launch_mode,
+            hook_metadata: request.hook_metadata.clone(),
             process_id: request.process_id,
             cwd,
             sandbox_cwd: request.sandbox_cwd.clone(),
@@ -1452,7 +1470,7 @@ impl UnifiedExecProcessManager {
             step_context: Arc::clone(&context.step_context),
             cancellation_token: context.cancellation_token.clone(),
             call_id: context.call_id.clone(),
-            tool_name: ToolName::plain("exec_command"),
+            tool_name: request.tool_name.clone(),
         };
         orchestrator
             .run(&mut runtime, &req, &tool_ctx)
@@ -1709,7 +1727,11 @@ impl UnifiedExecProcessManager {
             .map(|entry| BackgroundTerminalInfo {
                 item_id: entry.call_id.clone(),
                 process_id: entry.process_id.to_string(),
-                command: entry.hook_command.clone(),
+                command: entry
+                    .hook_metadata
+                    .command()
+                    .unwrap_or_default()
+                    .to_string(),
                 cwd: entry.cwd.clone(),
             })
             .collect()

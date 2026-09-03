@@ -30,6 +30,7 @@ use std::sync::Weak;
 
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_tools::ToolName;
 use codex_tools::UnifiedExecShellMode;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_path_uri::PathUri;
@@ -45,6 +46,7 @@ use crate::session::turn_context::TurnContext;
 use crate::session::turn_context::TurnEnvironment;
 use crate::shell::ShellType;
 use crate::tools::network_approval::DeferredNetworkApproval;
+use crate::tools::sandboxing::PermissionRequestPayload;
 use codex_core_plugins::PluginMetricsSidecar;
 
 mod async_watcher;
@@ -107,8 +109,9 @@ impl UnifiedExecContext {
 #[derive(Debug)]
 pub(crate) struct ExecCommandRequest {
     pub command: Vec<String>,
-    pub shell_type: ShellType,
-    pub hook_command: String,
+    pub launch_mode: UnifiedExecLaunchMode,
+    pub tool_name: ToolName,
+    pub hook_metadata: PermissionRequestPayload,
     pub process_id: i32,
     pub yield_time_ms: u64,
     pub max_output_tokens: Option<usize>,
@@ -123,6 +126,21 @@ pub(crate) struct ExecCommandRequest {
     pub additional_permissions_preapproved: bool,
     pub justification: Option<String>,
     pub prefix_rule: Option<Vec<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnifiedExecLaunchMode {
+    Shell(ShellType),
+    Argv,
+}
+
+impl UnifiedExecLaunchMode {
+    pub(crate) fn shell_type(self) -> Option<ShellType> {
+        match self {
+            Self::Shell(shell_type) => Some(shell_type),
+            Self::Argv => None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -187,7 +205,7 @@ struct ProcessEntry {
     process_id: i32,
     cwd: PathUri,
     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
-    hook_command: String,
+    hook_metadata: PermissionRequestPayload,
     tty: bool,
     environment_id: String,
     permissions: TerminalPermissions,

@@ -440,8 +440,12 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
             "-lc".to_string(),
             "echo before".to_string(),
         ],
-        shell_type: crate::shell::ShellType::Sh,
-        hook_command: "echo before".to_string(),
+        launch_mode: UnifiedExecLaunchMode::Shell(crate::shell::ShellType::Sh),
+        tool_name: codex_tools::ToolName::plain("exec_command"),
+        hook_metadata: crate::tools::sandboxing::PermissionRequestPayload::bash(
+            "echo before".to_string(),
+            /*description*/ None,
+        ),
         process_id: 123,
         yield_time_ms: 1000,
         max_output_tokens: None,
@@ -614,7 +618,10 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
                 process_id,
                 cwd: cwd.clone(),
                 initial_exec_command_active: Arc::new(AtomicBool::new(false)),
-                hook_command: format!("command-{process_id}"),
+                hook_metadata: crate::tools::sandboxing::PermissionRequestPayload::bash(
+                    format!("command-{process_id}"),
+                    /*description*/ None,
+                ),
                 tty: false,
                 environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
                 permissions: super::super::TerminalPermissions::for_launch(

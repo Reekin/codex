@@ -1366,7 +1366,11 @@ async fn danger_full_access_tool_attempts_do_not_enforce_managed_network() -> an
                 id: call_id.to_string(),
                 environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
                 command: Vec::new(),
-                hook_command: String::new(),
+                permission_request_payload:
+                    crate::tools::sandboxing::PermissionRequestPayload::bash(
+                        String::new(),
+                        /*description*/ None,
+                    ),
                 cwd: PathUri::from_abs_path(&std::env::temp_dir().abs()),
                 sandbox_permissions: crate::sandboxing::SandboxPermissions::UseDefault,
                 additional_permissions: None,

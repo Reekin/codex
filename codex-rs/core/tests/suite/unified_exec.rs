@@ -240,6 +240,124 @@ async fn submit_unified_exec_turn(
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_argv_preserves_literal_arguments_through_background_completion() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex();
+    let test = builder.build_with_auto_env(&server).await?;
+    let marker = test.config.cwd.join("exec-argv-shell-side-effect");
+    let _ = fs::remove_file(marker.as_path());
+    let literal_args = vec![
+        "two words".to_string(),
+        "$HOME".to_string(),
+        "| cat".to_string(),
+        "*.rs".to_string(),
+        format!("> {}", marker.as_path().display()),
+        "&& echo injected".to_string(),
+        "; exit 99".to_string(),
+    ];
+    let delay_ms = if cfg!(windows) { 12_000 } else { 750 };
+    let mut argv = vec![
+        std::env::current_exe()?.to_string_lossy().into_owned(),
+        super::EXEC_ARGV_TEST_HELPER_ARG.to_string(),
+        delay_ms.to_string(),
+    ];
+    argv.extend(literal_args.clone());
+    let start_call_id = "exec-argv-literal-start";
+    let poll_call_id = "exec-argv-literal-poll";
+    let start_args = json!({
+        "argv": argv.clone(),
+        "tty": false,
+        "yield_time_ms": 250,
+    });
+    let poll_args = json!({
+        "session_id": 1000,
+        "chars": "",
+        "yield_time_ms": 30_000,
+    });
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    start_call_id,
+                    "exec_argv",
+                    &serde_json::to_string(&start_args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_function_call(
+                    poll_call_id,
+                    "write_stdin",
+                    &serde_json::to_string(&poll_args)?,
+                ),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "run the argv-native background process",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let mut begin_command = None;
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| match event {
+            EventMsg::ExecCommandBegin(event) if event.call_id == start_call_id => {
+                begin_command = Some(event.command.clone());
+                false
+            }
+            EventMsg::TurnComplete(_) => true,
+            _ => false,
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let outputs = collect_tool_outputs(
+        &request_log
+            .requests()
+            .iter()
+            .map(core_test_support::responses::ResponsesRequest::body_json)
+            .collect::<Vec<_>>(),
+    )?;
+    let start_output = outputs
+        .get(start_call_id)
+        .expect("missing initial exec_argv output");
+    assert_eq!(start_output.process_id.as_deref(), Some("1000"));
+    assert_eq!(start_output.exit_code, None);
+    let poll_output = outputs
+        .get(poll_call_id)
+        .expect("missing write_stdin completion output");
+    assert_eq!(poll_output.process_id, None);
+    assert_eq!(poll_output.exit_code, Some(0));
+    assert_eq!(
+        poll_output.output.trim(),
+        serde_json::to_string(&literal_args)?
+    );
+    assert_eq!(begin_command, Some(argv));
+    assert!(
+        fs::metadata(marker.as_path()).is_err(),
+        "shell metacharacters must not create a side-effect file"
+    );
+
+    Ok(())
+}
+
 async fn create_workspace_directory(
     test: &TestCodex,
     rel_path: impl AsRef<std::path::Path>,

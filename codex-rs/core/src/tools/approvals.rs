@@ -70,7 +70,7 @@ pub(crate) enum ApprovalAction {
         environment_id: String,
         command: Vec<String>,
         #[serde(skip_serializing)]
-        hook_command: String,
+        permission_request_payload: PermissionRequestPayload,
         cwd: PathUri,
         sandbox_permissions: SandboxPermissions,
         additional_permissions: Option<AdditionalPermissionProfile>,
@@ -141,7 +141,7 @@ pub(crate) enum ApprovalAction {
         port: u16,
         trigger: Option<GuardianNetworkAccessTrigger>,
         #[serde(skip_serializing)]
-        hook_command: String,
+        permission_request_payload: PermissionRequestPayload,
         #[serde(skip_serializing)]
         hook_run_id: String,
         command: Vec<String>,
@@ -166,10 +166,17 @@ impl ApprovalAction {
     pub(crate) fn permission_request_payload(&self) -> PermissionRequestPayload {
         match self {
             Self::ExecCommand {
-                hook_command,
+                permission_request_payload,
                 justification,
                 ..
-            } => PermissionRequestPayload::bash(hook_command.clone(), justification.clone()),
+            } => justification.clone().map_or_else(
+                || permission_request_payload.clone(),
+                |description| {
+                    permission_request_payload
+                        .clone()
+                        .with_description(description)
+                },
+            ),
             Self::WriteStdin {
                 id,
                 approval_id,
@@ -214,13 +221,9 @@ impl ApprovalAction {
                     .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
             },
             Self::NetworkAccess {
-                hook_command,
-                target,
+                permission_request_payload,
                 ..
-            } => PermissionRequestPayload::bash(
-                hook_command.clone(),
-                Some(format!("network-access {target}")),
-            ),
+            } => permission_request_payload.clone(),
             Self::RequestPermissions {
                 reason,
                 permissions,
