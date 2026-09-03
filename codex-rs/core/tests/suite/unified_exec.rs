@@ -241,12 +241,34 @@ async fn submit_unified_exec_turn(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exec_argv_preserves_literal_arguments_through_background_completion() -> Result<()> {
+async fn exec_argv_preserves_literal_arguments_and_skips_shell_transforms_through_background_completion()
+-> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex();
-    let test = builder.build_with_auto_env(&server).await?;
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should enable shell snapshots");
+        config
+            .features
+            .enable(Feature::ShellSnapshotV2)
+            .expect("test config should enable in-memory shell snapshots");
+    });
+    let test = builder.build(&server).await?;
+    #[cfg(unix)]
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let snapshot_dir = test.home.path().join("shell_snapshots");
+        loop {
+            if fs::read_dir(&snapshot_dir).is_ok_and(|mut entries| entries.next().is_some()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("shell snapshot did not become ready before exec_argv")?;
     let marker = test.config.cwd.join("exec-argv-shell-side-effect");
     let _ = fs::remove_file(marker.as_path());
     let literal_args = vec![
@@ -259,12 +281,7 @@ async fn exec_argv_preserves_literal_arguments_through_background_completion() -
         "; exit 99".to_string(),
     ];
     let delay_ms = if cfg!(windows) { 12_000 } else { 750 };
-    let mut argv = vec![
-        std::env::current_exe()?.to_string_lossy().into_owned(),
-        super::EXEC_ARGV_TEST_HELPER_ARG.to_string(),
-        delay_ms.to_string(),
-    ];
-    argv.extend(literal_args.clone());
+    let argv = super::exec_argv_test_helper_argv(delay_ms, literal_args.clone())?;
     let start_call_id = "exec-argv-literal-start";
     let poll_call_id = "exec-argv-literal-poll";
     let start_args = json!({
@@ -353,6 +370,90 @@ async fn exec_argv_preserves_literal_arguments_through_background_completion() -
     assert!(
         fs::metadata(marker.as_path()).is_err(),
         "shell metacharacters must not create a side-effect file"
+    );
+
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_argv_reports_pathext_candidate_without_running_cmd_shim() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should enable shell snapshots");
+        config
+            .features
+            .enable(Feature::ShellSnapshotV2)
+            .expect("test config should enable in-memory shell snapshots");
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let shim_base = "exec-argv-pathext-no-shell";
+    let shim_path = test.config.cwd.join(format!("{shim_base}.CMD"));
+    let marker = test.config.cwd.join("exec-argv-pathext-shim-ran");
+    let _ = fs::remove_file(marker.as_path());
+    fs::write(
+        shim_path.as_path(),
+        format!("@echo off\r\necho executed>\"{}\"\r\n", marker.display()),
+    )?;
+
+    let argv0 = format!(".\\{shim_base}");
+    let argv = vec![
+        argv0.clone(),
+        "$HOME | cat > injected && exit 99".to_string(),
+    ];
+    let call_id = "exec-argv-pathext-create-process-failure";
+    let args = json!({
+        "argv": argv,
+        "tty": false,
+        "yield_time_ms": 1_000,
+    });
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-pathext-1"),
+                ev_function_call(call_id, "exec_argv", &serde_json::to_string(&args)?),
+                ev_completed("resp-pathext-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-pathext", "done"),
+                ev_completed("resp-pathext-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "try the argv-native command shim without a shell",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let mut expected_candidate = test.config.cwd.as_path().join(&argv0);
+    expected_candidate.set_file_name(format!("{shim_base}.CMD"));
+    let output = request_log
+        .requests()
+        .iter()
+        .find_map(|request| request.function_call_output_text(call_id))
+        .context("missing exec_argv create-process failure output")?;
+    assert!(output.contains("does not ask a shell to resolve PATHEXT"));
+    assert!(
+        output.contains(&expected_candidate.display().to_string()),
+        "expected exact PATHEXT candidate {expected_candidate:?}, got {output:?}"
+    );
+    assert!(
+        fs::metadata(marker.as_path()).is_err(),
+        "exec_argv must not execute a discovered .CMD shim"
     );
 
     Ok(())
