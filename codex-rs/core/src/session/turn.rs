@@ -1138,55 +1138,57 @@ async fn maybe_run_previous_model_inline_compact(
             .await,
     );
 
-    if should_compact_for_comp_hash_change {
-        let step_context = sess
-            .capture_step_context(Arc::clone(&previous_model_turn_context), cancellation_token)
-            .await?;
-        let fallback_step_context = capture_current_model_fallback_step_context(
-            sess,
-            turn_context,
-            previous_model.as_str(),
-            cancellation_token,
-        )
-        .await?;
-        run_auto_compact(
-            sess,
-            step_context,
-            fallback_step_context,
-            client_session,
-            InitialContextInjection::DoNotInject,
-            CompactionReason::CompHashChanged,
-            CompactionPhase::PreTurn,
-        )
-        .await?;
-        return Ok(());
-    }
-
-    let Some(old_context_window) = previous_model_turn_context.model_context_window() else {
-        return Ok(());
-    };
-    let Some(new_context_window) = turn_context.model_context_window() else {
-        return Ok(());
-    };
-    let active_context_tokens = sess.get_total_token_usage().await;
-    let previous_model_limit_reached = match turn_context
-        .config
-        .model_auto_compact_token_limit_scope
-    {
-        AutoCompactTokenLimitScope::Total => {
-            let new_auto_compact_limit = turn_context
-                .model_info()
-                .auto_compact_token_limit()
-                .unwrap_or(i64::MAX);
-            active_context_tokens > new_auto_compact_limit
-                || active_context_tokens >= new_context_window
+    let reason = if should_compact_for_comp_hash_change {
+        CompactionReason::CompHashChanged
+    } else {
+        let Some(old_context_window) = previous_model_turn_context.model_context_window() else {
+            return Ok(());
+        };
+        let Some(new_context_window) = turn_context.model_context_window() else {
+            return Ok(());
+        };
+        let active_context_tokens = sess.get_total_token_usage().await;
+        let previous_model_limit_reached =
+            match turn_context.config.model_auto_compact_token_limit_scope {
+                AutoCompactTokenLimitScope::Total => {
+                    let new_auto_compact_limit = turn_context
+                        .model_info()
+                        .auto_compact_token_limit()
+                        .unwrap_or(i64::MAX);
+                    active_context_tokens > new_auto_compact_limit
+                        || active_context_tokens >= new_context_window
+                }
+                AutoCompactTokenLimitScope::BodyAfterPrefix => {
+                    active_context_tokens >= new_context_window
+                }
+            };
+        let should_run = previous_model_limit_reached
+            && previous_model_turn_context.model_info().slug != turn_context.model_info().slug
+            && old_context_window > new_context_window;
+        if !should_run {
+            return Ok(());
         }
-        AutoCompactTokenLimitScope::BodyAfterPrefix => active_context_tokens >= new_context_window,
+        CompactionReason::ModelDownshift
     };
-    let should_run = previous_model_limit_reached
-        && previous_model_turn_context.model_info().slug != turn_context.model_info().slug
-        && old_context_window > new_context_window;
-    if should_run {
+
+    let previous_support = crate::compaction_policy::remote_compaction_support(
+        previous_model_turn_context
+            .provider
+            .capabilities()
+            .remote_compaction,
+        previous_model_turn_context.model_info(),
+    );
+    let current_support = crate::compaction_policy::remote_compaction_support(
+        turn_context.provider.capabilities().remote_compaction,
+        turn_context.model_info(),
+    );
+    let (step_context, fallback_step_context) = if previous_support != current_support {
+        (
+            sess.capture_step_context(Arc::clone(turn_context), cancellation_token)
+                .await?,
+            None,
+        )
+    } else {
         let step_context = sess
             .capture_step_context(Arc::clone(&previous_model_turn_context), cancellation_token)
             .await?;
@@ -1197,17 +1199,18 @@ async fn maybe_run_previous_model_inline_compact(
             cancellation_token,
         )
         .await?;
-        run_auto_compact(
-            sess,
-            step_context,
-            fallback_step_context,
-            client_session,
-            InitialContextInjection::DoNotInject,
-            CompactionReason::ModelDownshift,
-            CompactionPhase::PreTurn,
-        )
-        .await?;
-    }
+        (step_context, fallback_step_context)
+    };
+    run_auto_compact(
+        sess,
+        step_context,
+        fallback_step_context,
+        client_session,
+        InitialContextInjection::DoNotInject,
+        reason,
+        CompactionPhase::PreTurn,
+    )
+    .await?;
     Ok(())
 }
 
@@ -1239,7 +1242,10 @@ async fn run_auto_compact(
         return Ok(());
     }
 
-    match turn_context.provider.capabilities().remote_compaction {
+    match crate::compaction_policy::remote_compaction_support(
+        turn_context.provider.capabilities().remote_compaction,
+        step_context.settings.model_info.as_ref(),
+    ) {
         RemoteCompactionSupport::V2
             if turn_context
                 .config

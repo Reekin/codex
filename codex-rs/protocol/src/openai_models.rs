@@ -442,6 +442,9 @@ pub struct ModelInfo {
     /// Opaque identifier for compaction-compatible model configurations.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comp_hash: Option<String>,
+    /// Whether the model supports provider-native Responses compaction.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub supports_remote_compaction: bool,
     /// Percentage of the context window considered usable for inputs, after
     /// reserving headroom for system prompts, tool overhead, and model output.
     #[serde(default = "default_effective_context_window_percent")]
@@ -993,6 +996,7 @@ mod tests {
             max_context_window: None,
             auto_compact_token_limit: None,
             comp_hash: None,
+            supports_remote_compaction: true,
             effective_context_window_percent: 95,
             experimental_supported_tools: vec![],
             input_modalities: default_input_modalities(),
@@ -1763,9 +1767,34 @@ mod tests {
         assert!(!model.node_repl_auto_review_required);
         assert!(!model.node_repl_disabled);
         assert_eq!(model.comp_hash, None);
+        assert!(model.supports_remote_compaction);
         assert_eq!(model.auto_review_model_override, None);
         assert_eq!(model.tool_mode, None);
         assert_eq!(model.multi_agent_reasoning_effort, None);
+    }
+
+    #[test]
+    fn model_info_remote_compaction_defaults_enabled_and_serializes_only_opt_out() {
+        let omitted =
+            serde_json::to_value(test_model(/*spec*/ None)).expect("serialize test model");
+        assert!(omitted.get("supports_remote_compaction").is_none());
+
+        let defaulted =
+            serde_json::from_value::<ModelInfo>(omitted).expect("deserialize omitted capability");
+        assert!(defaulted.supports_remote_compaction);
+
+        let opted_out = ModelInfo {
+            supports_remote_compaction: false,
+            ..test_model(/*spec*/ None)
+        };
+        let serialized = serde_json::to_value(&opted_out).expect("serialize model opt-out");
+        assert_eq!(serialized["supports_remote_compaction"], false);
+        assert_eq!(
+            serde_json::from_value::<ModelInfo>(serialized)
+                .expect("deserialize model opt-out")
+                .supports_remote_compaction,
+            false
+        );
     }
 
     #[test]
