@@ -1,5 +1,6 @@
 use super::multi_agents_common::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
 use super::multi_agents_common::model_supports_multi_agent_backend;
+use codex_protocol::AgentPath;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::JsonSchema;
@@ -115,9 +116,12 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
     properties.insert(
         "task_name".to_string(),
         JsonSchema::string(Some(
-            "Task name for the new agent. Use lowercase letters, digits, and underscores."
-                .to_string(),
-        )),
+            format!(
+                "Task name for the new agent. Use at most {} lowercase ASCII letters, digits, and underscores.",
+                AgentPath::MAX_AGENT_NAME_BYTES
+            ),
+        ))
+        .with_max_length(AgentPath::MAX_AGENT_NAME_BYTES),
     );
 
     ToolSpec::Function(ResponsesApiTool {
