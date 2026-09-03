@@ -359,8 +359,9 @@ async fn exec_argv_skips_ready_legacy_shell_snapshot_prefix() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
+    let shell_path = "/bin/bash".to_string();
     let shell =
-        codex_core::shell::get_shell_by_model_provided_path(&std::path::PathBuf::from("/bin/bash"));
+        codex_core::shell::get_shell_by_model_provided_path(&std::path::PathBuf::from(&shell_path));
     let mut builder = test_codex().with_user_shell(shell).with_config(|config| {
         config
             .features
@@ -388,10 +389,12 @@ async fn exec_argv_skips_ready_legacy_shell_snapshot_prefix() -> Result<()> {
     })
     .await
     .context("legacy shell snapshot did not become ready")?;
-    let prefix_marker = test.config.cwd.join("exec-argv-snapshot-prefix-ran");
-    let _ = fs::remove_file(prefix_marker.as_path());
-    let quoted_marker = shlex::try_quote(
-        prefix_marker
+    let expected_marker = test.config.cwd.join("exec-argv-command-ran");
+    let forbidden_marker = test.config.cwd.join("exec-argv-snapshot-prefix-ran");
+    let _ = fs::remove_file(expected_marker.as_path());
+    let _ = fs::remove_file(forbidden_marker.as_path());
+    let quoted_forbidden_marker = shlex::try_quote(
+        forbidden_marker
             .as_path()
             .to_str()
             .context("snapshot prefix marker path is not UTF-8")?,
@@ -402,17 +405,23 @@ async fn exec_argv_skips_ready_legacy_shell_snapshot_prefix() -> Result<()> {
         snapshot.contains("# Snapshot file"),
         "expected a real legacy shell snapshot"
     );
-    snapshot.push_str(&format!("\nprintf snapshot-prefix-ran > {quoted_marker}\n"));
+    snapshot.push_str(&format!(
+        "\nprintf snapshot-prefix-ran > {quoted_forbidden_marker}\n"
+    ));
     fs::write(&snapshot_path, snapshot)?;
 
-    let literal_args = vec![
-        "two words".to_string(),
-        "$HOME".to_string(),
-        "| cat".to_string(),
-        "*.rs".to_string(),
-        "&& exit 99".to_string(),
-    ];
-    let argv = super::exec_argv_test_helper_argv(/*delay_ms*/ 0, literal_args.clone())?;
+    let quoted_expected_marker = shlex::try_quote(
+        expected_marker
+            .as_path()
+            .to_str()
+            .context("expected marker path is not UTF-8")?,
+    )
+    .context("quote expected marker path")?;
+    let expected_output = "exec-argv-command-output|argc=0|argv=";
+    let command = format!(
+        "printf expected > {quoted_expected_marker}; printf 'exec-argv-command-output|argc=%s|argv=%s' \"$#\" \"$*\""
+    );
+    let argv = vec![shell_path, "-lc".to_string(), command];
     let call_id = "exec-argv-legacy-snapshot-prefix";
     let args = json!({
         "argv": argv.clone(),
@@ -460,10 +469,11 @@ async fn exec_argv_skips_ready_legacy_shell_snapshot_prefix() -> Result<()> {
     )?;
     let output = outputs.get(call_id).context("missing exec_argv output")?;
     assert_eq!(output.exit_code, Some(0));
-    assert_eq!(output.output.trim(), serde_json::to_string(&literal_args)?);
+    assert_eq!(output.output.trim(), expected_output);
     assert_eq!(begin.command, argv);
+    assert_eq!(fs::read_to_string(expected_marker.as_path())?, "expected");
     assert!(
-        fs::metadata(prefix_marker.as_path()).is_err(),
+        fs::metadata(forbidden_marker.as_path()).is_err(),
         "argv launch must not execute the ready shell snapshot prefix"
     );
 
