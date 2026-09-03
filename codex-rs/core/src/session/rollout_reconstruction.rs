@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::ForkedHistoryBoundary;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
 use codex_history::ResponseItemEnvelope;
@@ -378,10 +379,29 @@ impl Session {
                         // prompt shape.
                         // TODO(ccunningham): if we drop support for None replacement_history compaction items,
                         // we can get rid of this second loop entirely and just build `history` directly in the first loop.
+                        let initial_context = history
+                            .annotated_items()
+                            .last()
+                            .filter(|item| {
+                                matches!(
+                                    &item.item,
+                                    ResponseItem::Message {
+                                        internal_chat_message_metadata_passthrough: Some(metadata),
+                                        ..
+                                    } if metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
+                                        kinds.iter().any(
+                                            ForkedHistoryBoundary::matches_content_kind,
+                                        )
+                                    })
+                                )
+                            })
+                            .cloned()
+                            .into_iter()
+                            .collect();
                         let user_messages =
                             compact::collect_annotated_user_messages(history.annotated_items());
                         let rebuilt = compact::build_compacted_history(
-                            Vec::new(),
+                            initial_context,
                             &user_messages,
                             &compacted.message,
                         );
