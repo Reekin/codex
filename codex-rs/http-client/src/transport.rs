@@ -4,6 +4,9 @@ use crate::error::TransportError;
 use crate::request::Request;
 use crate::request::RequestBody;
 use crate::request::Response;
+use crate::upload::UploadMonitor;
+use crate::upload::UploadPolicy;
+use crate::upload::monitored_body;
 use bytes::Bytes;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -13,6 +16,7 @@ use http::StatusCode;
 use tracing::Level;
 use tracing::enabled;
 use tracing::trace;
+use tracing::warn;
 
 pub type ByteStream = BoxStream<'static, Result<Bytes, TransportError>>;
 
@@ -36,20 +40,33 @@ pub trait HttpTransport: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct ReqwestTransport {
     client: HttpClient,
+    upload_policy: UploadPolicy,
 }
 
 impl ReqwestTransport {
     pub fn new(client: reqwest::Client) -> Self {
         Self {
             client: HttpClient::new(client),
+            upload_policy: UploadPolicy::default(),
         }
     }
 
     pub fn from_http_client(client: HttpClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            upload_policy: UploadPolicy::default(),
+        }
     }
 
-    fn build(&self, req: Request) -> Result<RequestBuilder, TransportError> {
+    #[cfg(test)]
+    fn with_upload_policy(mut self, upload_policy: UploadPolicy) -> Self {
+        self.upload_policy = upload_policy;
+        self
+    }
+
+    fn build(&self, req: Request) -> Result<BuiltRequest, TransportError> {
+        let monitor_upload = matches!(req.body.as_ref(), Some(RequestBody::EncodedJson(_)))
+            && !req.slow_upload_retry_claimed();
         let prepared = req.prepare_body_for_send().map_err(TransportError::Build)?;
 
         let Request {
@@ -59,6 +76,7 @@ impl ReqwestTransport {
             body: _,
             compression: _,
             timeout,
+            slow_upload_retry_claimed: _,
         } = req;
 
         let mut builder = self.client.request(
@@ -71,10 +89,24 @@ impl ReqwestTransport {
         }
 
         builder = builder.headers(prepared.headers);
+        let mut upload_monitor = None;
         if let Some(body) = prepared.body {
-            builder = builder.body(body);
+            if monitor_upload {
+                let body_len = body.len();
+                let (body, monitor) = monitored_body(body, self.upload_policy);
+                if monitor.is_some() {
+                    builder = builder.header(http::header::CONTENT_LENGTH, body_len);
+                }
+                builder = builder.body(body);
+                upload_monitor = monitor;
+            } else {
+                builder = builder.body(body);
+            }
         }
-        Ok(builder)
+        Ok(BuiltRequest {
+            builder,
+            upload_monitor,
+        })
     }
 
     fn map_error(err: reqwest::Error) -> TransportError {
@@ -97,6 +129,58 @@ impl ReqwestTransport {
             );
         }
     }
+
+    async fn send(&self, req: Request) -> Result<reqwest::Response, TransportError> {
+        loop {
+            let BuiltRequest {
+                builder,
+                upload_monitor,
+            } = self.build(req.clone())?;
+            let result = send_once(builder, upload_monitor).await;
+            match result {
+                Err(TransportError::SlowUpload {
+                    total_bytes,
+                    submitted_bytes,
+                    elapsed,
+                    bytes_per_second,
+                    estimated_remaining,
+                }) if req.claim_slow_upload_retry() => {
+                    warn!(
+                        total_bytes,
+                        submitted_bytes,
+                        elapsed_ms = elapsed.as_millis(),
+                        bytes_per_second,
+                        estimated_remaining_ms = estimated_remaining.as_millis(),
+                        fresh_connection_retry = true,
+                        "large request upload stalled; retrying after dropping the incomplete connection"
+                    );
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
+struct BuiltRequest {
+    builder: RequestBuilder,
+    upload_monitor: Option<UploadMonitor>,
+}
+
+async fn send_once(
+    builder: RequestBuilder,
+    upload_monitor: Option<UploadMonitor>,
+) -> Result<reqwest::Response, TransportError> {
+    let send = builder.send();
+    tokio::pin!(send);
+    match upload_monitor {
+        Some(upload_monitor) => {
+            tokio::select! {
+                result = &mut send => result.map_err(ReqwestTransport::map_error),
+                error = upload_monitor.wait_for_stall() => Err(error),
+            }
+        }
+        None => send.await.map_err(ReqwestTransport::map_error),
+    }
 }
 
 fn request_body_for_trace(req: &Request) -> String {
@@ -115,8 +199,7 @@ impl HttpTransport for ReqwestTransport {
         self.trace_request(&req);
 
         let url = req.url.clone();
-        let builder = self.build(req)?;
-        let resp = builder.send().await.map_err(Self::map_error)?;
+        let resp = self.send(req).await?;
         let status = resp.status();
         let headers = resp.headers().clone();
         let bytes = resp.bytes().await.map_err(Self::map_error)?;
@@ -140,8 +223,7 @@ impl HttpTransport for ReqwestTransport {
         self.trace_request(&req);
 
         let url = req.url.clone();
-        let builder = self.build(req)?;
-        let resp = builder.send().await.map_err(Self::map_error)?;
+        let resp = self.send(req).await?;
         let status = resp.status();
         let headers = resp.headers().clone();
         if !status.is_success() {
