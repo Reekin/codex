@@ -441,6 +441,11 @@ fn canonicalize_snapshot_text(text: &str) -> String {
     if text.starts_with("Another language model started to solve this problem")
         && let Some((_, summary)) = text.split_once('\n')
     {
+        let summary = summary
+            .split_once(
+                "\n\nThe complete pre-compaction conversation remains available in the rollout at:",
+            )
+            .map_or(summary, |(summary, _)| summary);
         return format!("<COMPACTION_SUMMARY>\n{summary}");
     }
     normalize_dynamic_snapshot_paths(text)
