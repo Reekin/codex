@@ -773,6 +773,37 @@ async fn get_model_info_uses_custom_catalog() {
 }
 
 #[tokio::test]
+async fn get_model_info_preserves_remote_compaction_capability_from_catalog() {
+    let enabled = remote_model("remote-enabled", "Enabled", /*priority*/ 0);
+    let mut disabled = remote_model("remote-disabled", "Disabled", /*priority*/ 1);
+    disabled.supports_remote_compaction = false;
+    let manager = static_manager_for_tests(ModelsResponse {
+        models: vec![enabled.clone(), disabled.clone()],
+    });
+    let config = ModelsManagerConfig::default();
+
+    let actual_enabled = manager
+        .get_model_info("remote-enabled-experiment", &config)
+        .await;
+    let actual_disabled = manager
+        .get_model_info("remote-disabled-experiment", &config)
+        .await;
+    let expected_enabled = ModelInfo {
+        slug: "remote-enabled-experiment".to_string(),
+        ..enabled
+    };
+    let expected_disabled = ModelInfo {
+        slug: "remote-disabled-experiment".to_string(),
+        ..disabled
+    };
+
+    assert_eq!(
+        (actual_enabled, actual_disabled),
+        (expected_enabled, expected_disabled)
+    );
+}
+
+#[tokio::test]
 async fn get_model_info_matches_namespaced_suffix() {
     let config = ModelsManagerConfig::default();
     let mut remote = remote_model("gpt-image", "Image", /*priority*/ 0);
