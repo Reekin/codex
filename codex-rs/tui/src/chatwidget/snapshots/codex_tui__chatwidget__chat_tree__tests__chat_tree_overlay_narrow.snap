@@ -1,0 +1,39 @@
+---
+source: tui/src/chatwidget/chat_tree_tests.rs
+assertion_line: 75
+expression: "format!(\"{:?}\", render_view(36))"
+---
+Buffer {
+    area: Rect { x: 0, y: 0, width: 36, height: 14 },
+    content: [
+        "                                    ",
+        "  Chat tree                         ",
+        "  Select a node for future turns.   ",
+        "    [ ] Inspect the project and     ",
+        "        identify the migration      ",
+        "        surface                     ",
+        "    [ ]   Implement protocol and    ",
+        "          core adapters             ",
+        "    [ ]     Turn 3 · interrupted    ",
+        "  > [*]   Add app-server RPC and    ",
+        "          TUI validation            ",
+        "  Space/Enter switch | Up/Down/j/k  ",
+        "  move | q/Esc close                ",
+        "                                    ",
+    ],
+    styles: [
+        x: 0, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 11, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 33, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 9, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 32, y: 9, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 10, fg: Reset, bg: Reset, underline: Reset, modifier: BOLD,
+        x: 24, y: 10, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 11, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 34, y: 11, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+        x: 2, y: 12, fg: Reset, bg: Reset, underline: Reset, modifier: DIM,
+        x: 20, y: 12, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+    ]
+}

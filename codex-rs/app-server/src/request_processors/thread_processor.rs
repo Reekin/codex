@@ -872,6 +872,24 @@ impl ThreadRequestProcessor {
         Ok(Some(response.into()))
     }
 
+    pub(crate) async fn chat_tree_read(
+        &self,
+        params: ChatTreeReadParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.chat_tree_read_response_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
+    pub(crate) async fn chat_tree_set_current(
+        &self,
+        params: ChatTreeSetCurrentParams,
+    ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
+        self.chat_tree_set_current_response_inner(params)
+            .await
+            .map(|response| Some(response.into()))
+    }
+
     pub(crate) async fn thread_turns_list(
         &self,
         params: ThreadTurnsListParams,
@@ -2806,6 +2824,89 @@ impl ThreadRequestProcessor {
         Ok(ThreadReadResponse { thread })
     }
 
+    async fn chat_tree_read_response_inner(
+        &self,
+        params: ChatTreeReadParams,
+    ) -> Result<ChatTreeReadResponse, JSONRPCErrorError> {
+        let ChatTreeReadParams { thread_id } = params;
+        let thread_uuid = ThreadId::from_string(&thread_id).map_err(|err| {
+            chat_tree_read_error(
+                &thread_id,
+                ThreadReadViewError::InvalidThreadId(format!("invalid thread id: {err}")),
+            )
+        })?;
+        let chat_tree = self
+            .chat_tree_projection_for_thread(thread_uuid)
+            .await
+            .map_err(|err| chat_tree_read_error(&thread_id, err))?;
+        Ok(ChatTreeReadResponse {
+            thread_id,
+            chat_tree: Box::new(chat_tree),
+        })
+    }
+
+    async fn chat_tree_projection_for_thread(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<codex_app_server_protocol::ChatTreeProjection, ThreadReadViewError> {
+        if let Ok(loaded_thread) = self.thread_manager.get_thread(thread_id).await {
+            return Ok(crate::chat_tree_projection::chat_tree_projection_from_core(
+                loaded_thread.chat_tree_projection().await,
+            ));
+        }
+        let history = self.load_thread_turns_list_history(thread_id).await?;
+        Ok(codex_app_server_protocol::build_chat_tree_projection_from_rollout_items(&history))
+    }
+
+    async fn chat_tree_set_current_response_inner(
+        &self,
+        params: ChatTreeSetCurrentParams,
+    ) -> Result<ChatTreeSetCurrentResponse, JSONRPCErrorError> {
+        let ChatTreeSetCurrentParams {
+            thread_id,
+            node_id,
+            expected_revision,
+        } = params;
+        let thread_uuid = ThreadId::from_string(&thread_id).map_err(|err| {
+            chat_tree_error_with_kind(
+                format!("invalid thread id: {err}"),
+                "invalidThreadId",
+                &thread_id,
+                Some(&node_id),
+            )
+        })?;
+        let loaded_thread = self
+            .thread_manager
+            .get_thread(thread_uuid)
+            .await
+            .map_err(|_| {
+                chat_tree_error_with_kind(
+                    format!("thread not loaded: {thread_id}"),
+                    "threadNotLoaded",
+                    &thread_id,
+                    Some(&node_id),
+                )
+            })?;
+        if matches!(loaded_thread.agent_status().await, AgentStatus::Running) {
+            return Err(chat_tree_error_with_kind(
+                "Cannot switch chat tree nodes while a task is running.",
+                "taskRunning",
+                &thread_id,
+                Some(&node_id),
+            ));
+        }
+        loaded_thread
+            .set_current_chat_tree_node(&node_id, expected_revision)
+            .await
+            .map_err(|err| chat_tree_set_current_error(&thread_id, &node_id, err))?;
+        Ok(ChatTreeSetCurrentResponse {
+            thread_id,
+            chat_tree: Box::new(crate::chat_tree_projection::chat_tree_projection_from_core(
+                loaded_thread.chat_tree_projection().await,
+            )),
+        })
+    }
+
     /// Builds the API view for `thread/read` from persisted metadata plus optional live state.
     async fn read_thread_view(
         &self,
@@ -2904,6 +3005,12 @@ impl ThreadRequestProcessor {
                     .paginated_thread_full_turns(thread_id)
                     .await
                     .map_err(ThreadReadViewError::JsonRpc)?;
+                let history = self.load_thread_turns_list_history(thread_id).await?;
+                let projection =
+                    codex_app_server_protocol::build_chat_tree_projection_from_rollout_items(
+                        &history,
+                    );
+                filter_turns_for_chat_tree(&mut thread.turns, &projection);
                 return Ok(Some(thread));
             }
         }
@@ -2917,6 +3024,11 @@ impl ThreadRequestProcessor {
             thread_from_stored_thread(stored_thread, fallback_provider, &self.config.cwd);
         if include_turns && let Some(history) = history {
             thread.turns = build_legacy_api_turns_from_rollout_items(&history.items);
+            let projection =
+                codex_app_server_protocol::build_chat_tree_projection_from_rollout_items(
+                    &history.items,
+                );
+            filter_turns_for_chat_tree(&mut thread.turns, &projection);
         }
         Ok(Some(thread))
     }
@@ -3011,6 +3123,10 @@ impl ThreadRequestProcessor {
                     .paginated_thread_full_turns(thread_id)
                     .await
                     .map_err(ThreadReadViewError::JsonRpc)?;
+                let projection = crate::chat_tree_projection::chat_tree_projection_from_core(
+                    loaded_thread.chat_tree_projection().await,
+                );
+                filter_turns_for_chat_tree(&mut thread.turns, &projection);
                 return Ok(());
             }
             let history = loaded_thread
@@ -3018,6 +3134,10 @@ impl ThreadRequestProcessor {
                 .await
                 .map_err(|err| thread_read_history_load_error(thread_id, err))?;
             thread.turns = build_legacy_api_turns_from_rollout_items(&history.items);
+            let projection = crate::chat_tree_projection::chat_tree_projection_from_core(
+                loaded_thread.chat_tree_projection().await,
+            );
+            filter_turns_for_chat_tree(&mut thread.turns, &projection);
         }
 
         Ok(())
@@ -3073,6 +3193,10 @@ impl ThreadRequestProcessor {
             .load_thread_turns_list_history(thread_uuid)
             .await
             .map_err(thread_read_view_error)?;
+        let projection = self
+            .chat_tree_projection_for_thread(thread_uuid)
+            .await
+            .map_err(thread_read_view_error)?;
         // This API optimizes network transfer by letting clients page through a
         // thread's turns incrementally, but it still replays the entire rollout on
         // every request. Rollback and compaction events can change earlier turns, so
@@ -3105,6 +3229,7 @@ impl ThreadRequestProcessor {
                 limit,
                 sort_direction: sort_direction.unwrap_or(SortDirection::Desc),
                 items_view: items_view.unwrap_or(TurnItemsView::Summary),
+                chat_tree_projection: Some(&projection),
             },
         )
     }
@@ -3189,37 +3314,66 @@ impl ThreadRequestProcessor {
             TurnItemsView::Summary => StoredTurnItemsView::Summary,
             TurnItemsView::Full => StoredTurnItemsView::NotLoaded,
         };
-        let page = self
-            .thread_store
-            .list_turns(StoreListTurnsParams {
-                thread_id,
-                include_archived: true,
-                cursor,
-                page_size,
-                sort_direction,
-                items_view: stored_items_view,
-            })
+        let projection = self
+            .chat_tree_projection_for_thread(thread_id)
             .await
-            .map_err(|err| match err {
-                ThreadStoreError::InvalidRequest { message } => invalid_request(message),
-                ThreadStoreError::Unsupported { operation } => {
-                    unsupported_thread_store_operation(operation)
-                }
-                ThreadStoreError::ThreadNotFound { thread_id } => {
-                    invalid_request(format!("no rollout found for thread id {thread_id}"))
-                }
-                err => internal_error(format!("failed to list thread history: {err}")),
-            })?;
-        let mut turns = Vec::with_capacity(page.turns.len());
-        for turn in page.turns {
-            let mut turn = stored_turn_to_api_turn(turn, items_view)?;
-            if matches!(items_view, TurnItemsView::Full) {
-                turn.items = self
-                    .paginated_turn_full_items(thread_id, turn.id.as_str())
-                    .await?;
+            .map_err(thread_read_view_error)?;
+        let mut cursor = cursor;
+        let mut turns = Vec::with_capacity(page_size);
+        let mut backwards_cursor = None;
+        let next_cursor = loop {
+            let previous_cursor = cursor.clone();
+            let page = self
+                .thread_store
+                .list_turns(StoreListTurnsParams {
+                    thread_id,
+                    include_archived: true,
+                    cursor,
+                    page_size: page_size - turns.len(),
+                    sort_direction,
+                    items_view: stored_items_view,
+                })
+                .await
+                .map_err(|err| match err {
+                    ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+                    ThreadStoreError::Unsupported { operation } => {
+                        unsupported_thread_store_operation(operation)
+                    }
+                    ThreadStoreError::ThreadNotFound { thread_id } => {
+                        invalid_request(format!("no rollout found for thread id {thread_id}"))
+                    }
+                    err => internal_error(format!("failed to list thread history: {err}")),
+                })?;
+            if backwards_cursor.is_none() {
+                backwards_cursor = page.backwards_cursor.clone();
             }
-            turns.push(turn);
-        }
+            for turn in page.turns {
+                if !projection.nodes.is_empty()
+                    && !projection.visible_turn_ids.contains(&turn.turn_id)
+                {
+                    continue;
+                }
+                let mut turn = stored_turn_to_api_turn(turn, items_view)?;
+                if matches!(items_view, TurnItemsView::Full) {
+                    turn.items = self
+                        .paginated_turn_full_items(thread_id, turn.id.as_str())
+                        .await?;
+                }
+                turns.push(turn);
+            }
+            let Some(page_next_cursor) = page.next_cursor else {
+                break None;
+            };
+            if turns.len() == page_size {
+                break Some(page_next_cursor);
+            }
+            if previous_cursor.as_ref() == Some(&page_next_cursor) {
+                return Err(internal_error(format!(
+                    "failed to list visible thread turns for {thread_id}: thread store returned a repeated cursor"
+                )));
+            }
+            cursor = Some(page_next_cursor);
+        };
         let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
         let has_live_running_thread = match loaded_thread.as_ref() {
             Some(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
@@ -3234,8 +3388,8 @@ impl ThreadRequestProcessor {
         );
         Ok(ThreadTurnsListResponse {
             data: turns,
-            next_cursor: page.next_cursor,
-            backwards_cursor: page.backwards_cursor,
+            next_cursor,
+            backwards_cursor,
         })
     }
 
@@ -3938,6 +4092,11 @@ impl ThreadRequestProcessor {
                     thread_status,
                     /*has_live_in_progress_turn*/ false,
                 );
+                let chat_tree_projection =
+                    crate::chat_tree_projection::chat_tree_projection_from_core(
+                        codex_thread.chat_tree_projection().await,
+                    );
+                filter_turns_for_chat_tree(&mut thread.turns, &chat_tree_projection);
                 let config_snapshot = codex_thread.config_snapshot().await;
                 let (turns_backwards_cursor, items_backwards_cursor) =
                     if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
@@ -3971,6 +4130,7 @@ impl ThreadRequestProcessor {
                             /*has_live_running_thread*/ false,
                             /*active_turn*/ None,
                             params,
+                            &chat_tree_projection,
                         )
                     };
                     match initial_turns_page_result {
@@ -5370,6 +5530,16 @@ impl ThreadRequestProcessor {
     }
 }
 
+pub(super) fn filter_turns_for_chat_tree(
+    turns: &mut Vec<Turn>,
+    projection: &codex_app_server_protocol::ChatTreeProjection,
+) {
+    if projection.nodes.is_empty() {
+        return;
+    }
+    turns.retain(|turn| projection.visible_turn_ids.contains(&turn.id));
+}
+
 fn xcode_26_4_mcp_elicitations_auto_deny(
     client_name: Option<&str>,
     client_version: Option<&str>,
@@ -5535,6 +5705,7 @@ struct ThreadTurnsPageOptions<'a> {
     limit: Option<u32>,
     sort_direction: SortDirection,
     items_view: TurnItemsView,
+    chat_tree_projection: Option<&'a codex_app_server_protocol::ChatTreeProjection>,
 }
 
 fn build_thread_turns_page_response(
@@ -5550,6 +5721,9 @@ fn build_thread_turns_page_response(
         has_live_running_thread,
         active_turn,
     );
+    if let Some(projection) = options.chat_tree_projection {
+        filter_turns_for_chat_tree(&mut turns, projection);
+    }
     apply_thread_turns_items_view(&mut turns, options.items_view);
     let page = paginate_thread_turns(turns, options.cursor, options.limit, options.sort_direction)?;
     Ok(ThreadTurnsListResponse {
@@ -5565,6 +5739,7 @@ pub(super) fn build_thread_resume_initial_turns_page(
     has_live_running_thread: bool,
     active_turn: Option<Turn>,
     params: &ThreadResumeInitialTurnsPageParams,
+    chat_tree_projection: &codex_app_server_protocol::ChatTreeProjection,
 ) -> Result<codex_app_server_protocol::TurnsPage, JSONRPCErrorError> {
     build_thread_turns_page_response(
         items,
@@ -5576,6 +5751,7 @@ pub(super) fn build_thread_resume_initial_turns_page(
             limit: params.limit,
             sort_direction: params.sort_direction.unwrap_or(SortDirection::Desc),
             items_view: params.items_view.unwrap_or(TurnItemsView::Summary),
+            chat_tree_projection: Some(chat_tree_projection),
         },
     )
     .map(Into::into)
@@ -5654,6 +5830,7 @@ pub(super) fn normalize_thread_turns_status(
 }
 
 enum ThreadReadViewError {
+    InvalidThreadId(String),
     InvalidRequest(String),
     Unsupported(&'static str),
     Internal(String),
@@ -5662,6 +5839,7 @@ enum ThreadReadViewError {
 
 fn thread_read_view_error(err: ThreadReadViewError) -> JSONRPCErrorError {
     match err {
+        ThreadReadViewError::InvalidThreadId(message) => invalid_request(message),
         ThreadReadViewError::InvalidRequest(message) => invalid_request(message),
         ThreadReadViewError::Unsupported(operation) => {
             unsupported_thread_store_operation(operation)
@@ -5669,6 +5847,34 @@ fn thread_read_view_error(err: ThreadReadViewError) -> JSONRPCErrorError {
         ThreadReadViewError::Internal(message) => internal_error(message),
         ThreadReadViewError::JsonRpc(error) => error,
     }
+}
+
+fn chat_tree_read_error(thread_id: &str, err: ThreadReadViewError) -> JSONRPCErrorError {
+    let (mut error, kind) = match err {
+        ThreadReadViewError::InvalidThreadId(message) => {
+            (invalid_request(message), "invalidThreadId")
+        }
+        ThreadReadViewError::InvalidRequest(message)
+            if message.contains("not materialized yet")
+                || message.starts_with("thread not loaded:") =>
+        {
+            (invalid_request(message), "threadNotMaterialized")
+        }
+        ThreadReadViewError::InvalidRequest(message) => {
+            (invalid_request(message), "threadStoreInvalidRequest")
+        }
+        ThreadReadViewError::Unsupported(operation) => (
+            unsupported_thread_store_operation(operation),
+            "chatTreeUnavailable",
+        ),
+        ThreadReadViewError::Internal(message) => (internal_error(message), "internal"),
+        ThreadReadViewError::JsonRpc(error) => (error, "internal"),
+    };
+    error.data = Some(serde_json::json!({
+        "kind": kind,
+        "threadId": thread_id,
+    }));
+    error
 }
 
 fn paginated_history_list_error(err: ThreadStoreError) -> JSONRPCErrorError {
@@ -5730,6 +5936,72 @@ fn stored_turn_to_api_turn(
 
 pub(super) fn unsupported_thread_store_operation(operation: &'static str) -> JSONRPCErrorError {
     method_not_found(format!("{operation} is not supported yet"))
+}
+
+fn chat_tree_error_with_kind(
+    message: impl Into<String>,
+    kind: &'static str,
+    thread_id: &str,
+    node_id: Option<&str>,
+) -> JSONRPCErrorError {
+    let mut error = invalid_request(message);
+    error.data = Some(serde_json::json!({
+        "kind": kind,
+        "threadId": thread_id,
+        "nodeId": node_id,
+    }));
+    error
+}
+
+fn chat_tree_set_current_error(
+    thread_id: &str,
+    node_id: &str,
+    err: ChatTreeError,
+) -> JSONRPCErrorError {
+    match err {
+        ChatTreeError::UnknownNode(unknown_node_id) => chat_tree_error_with_kind(
+            format!("unknown chat tree node: {unknown_node_id}"),
+            "unknownNode",
+            thread_id,
+            Some(node_id),
+        ),
+        ChatTreeError::RevisionConflict { expected, actual } => {
+            let mut error = chat_tree_error_with_kind(
+                format!("chat tree revision conflict: expected {expected}, actual {actual}"),
+                "revisionConflict",
+                thread_id,
+                Some(node_id),
+            );
+            error.data = Some(serde_json::json!({
+                "kind": "revisionConflict",
+                "threadId": thread_id,
+                "nodeId": node_id,
+                "expectedRevision": expected,
+                "actualRevision": actual,
+            }));
+            error
+        }
+        ChatTreeError::MissingSnapshot(missing_node_id) => {
+            let mut error = internal_error(format!(
+                "chat tree history snapshot missing for node: {missing_node_id}"
+            ));
+            error.data = Some(serde_json::json!({
+                "kind": "internal",
+                "threadId": thread_id,
+                "nodeId": node_id,
+            }));
+            error
+        }
+        ChatTreeError::Persistence(message) => {
+            let mut error = internal_error(format!("failed to switch chat tree node: {message}"));
+            error.data = Some(serde_json::json!({
+                "kind": "internal",
+                "threadId": thread_id,
+                "nodeId": node_id,
+            }));
+            error
+        }
+    }
 }
 
 fn thread_store_list_error(err: ThreadStoreError) -> JSONRPCErrorError {

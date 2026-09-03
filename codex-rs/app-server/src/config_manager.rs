@@ -36,6 +36,7 @@ pub(crate) struct ConfigManager {
     cloud_config_bundle: Arc<RwLock<CloudConfigBundleLoader>>,
     arg0_paths: Arg0DispatchPaths,
     thread_config_loader: Arc<dyn ThreadConfigLoader>,
+    chat_tree_summaries_enabled: Option<bool>,
 }
 
 impl ConfigManager {
@@ -57,7 +58,13 @@ impl ConfigManager {
             cloud_config_bundle: Arc::new(RwLock::new(cloud_config_bundle)),
             arg0_paths,
             thread_config_loader,
+            chat_tree_summaries_enabled: None,
         }
+    }
+
+    pub(crate) fn with_chat_tree_summaries_enabled(mut self, enabled: Option<bool>) -> Self {
+        self.chat_tree_summaries_enabled = enabled;
+        self
     }
 
     pub(crate) fn codex_home(&self) -> &Path {
@@ -164,6 +171,7 @@ impl ConfigManager {
             .await?;
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
+        self.apply_chat_tree_summaries_enabled(&mut config);
         Ok(config)
     }
 
@@ -180,6 +188,7 @@ impl ConfigManager {
             .await?;
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
+        self.apply_chat_tree_summaries_enabled(&mut config);
         Ok(config)
     }
 
@@ -251,6 +260,7 @@ impl ConfigManager {
             .await?;
         self.apply_runtime_feature_enablement(&mut config);
         self.apply_arg0_paths(&mut config);
+        self.apply_chat_tree_summaries_enabled(&mut config);
         Ok(config)
     }
 
@@ -295,6 +305,12 @@ impl ConfigManager {
         config.codex_self_exe = self.arg0_paths.codex_self_exe.clone();
         config.codex_linux_sandbox_exe = self.arg0_paths.codex_linux_sandbox_exe.clone();
         config.main_execve_wrapper_exe = self.arg0_paths.main_execve_wrapper_exe.clone();
+    }
+
+    fn apply_chat_tree_summaries_enabled(&self, config: &mut Config) {
+        if let Some(enabled) = self.chat_tree_summaries_enabled {
+            config.chat_tree_summaries_enabled = enabled;
+        }
     }
 
     #[cfg(test)]

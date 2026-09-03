@@ -178,6 +178,7 @@ pub(super) async fn spawn_review_thread(
         server_model_warning_emitted: AtomicBool::new(false),
         model_verification_emitted: AtomicBool::new(false),
         cyber_access_program: None,
+        chat_tree_summary_user_message: std::sync::Mutex::new(None),
     };
 
     // Seed the child task with the review prompt as the initial user message.

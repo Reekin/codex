@@ -12,6 +12,7 @@ use super::AdditionalContextStore;
 use super::auto_compact_window::AutoCompactWindow;
 use super::auto_compact_window::AutoCompactWindowIds;
 use super::auto_compact_window::AutoCompactWindowSnapshot;
+use crate::chat_tree::ChatTreeState;
 use crate::context_manager::ContextManager;
 use crate::context_manager::HistoryReplacement;
 use crate::session::PreviousTurnSettings;
@@ -35,6 +36,7 @@ pub(crate) struct SessionState {
     /// Persisted origin of the session base instructions, when known.
     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
     pub(crate) history: ContextManager,
+    pub(crate) chat_tree: ChatTreeState,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
     pub(crate) server_reasoning_included: bool,
@@ -76,6 +78,7 @@ impl SessionState {
             session_configuration,
             base_instructions_provenance: None,
             history,
+            chat_tree: ChatTreeState::default(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
             server_reasoning_included: false,
@@ -150,6 +153,11 @@ impl SessionState {
         }
         self.history
             .set_reference_context_item(reference_context_item);
+        self.auto_compact_window.clear_prefill();
+    }
+
+    pub(crate) fn replace_history_snapshot(&mut self, history: ContextManager) {
+        self.history = history;
         self.auto_compact_window.clear_prefill();
     }
 

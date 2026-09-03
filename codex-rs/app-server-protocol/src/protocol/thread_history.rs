@@ -5,6 +5,10 @@ use crate::protocol::item_builders::build_file_change_begin_item;
 use crate::protocol::item_builders::build_file_change_end_item;
 use crate::protocol::item_builders::build_item_from_guardian_event;
 use crate::protocol::item_builders::review_output_text;
+use crate::protocol::v2::ChatTreeChange;
+use crate::protocol::v2::ChatTreeChangeKind;
+use crate::protocol::v2::ChatTreeNode;
+use crate::protocol::v2::ChatTreeProjection;
 use crate::protocol::v2::CollabAgentState;
 use crate::protocol::v2::CollabAgentTool;
 use crate::protocol::v2::CollabAgentToolCallStatus;
@@ -27,6 +31,10 @@ use crate::protocol::v2::WebSearchAction;
 use crate::protocol::v2::WebSearchItem;
 use crate::protocol::v2::web_search_action_from_core;
 use codex_extension_items::image_generation::ImageGenerationItem;
+use codex_protocol::chat_tree::ChatTreeProjection as DomainChatTreeProjection;
+use codex_protocol::chat_tree::ChatTreeState as DomainChatTreeState;
+use codex_protocol::chat_tree::overlay_entries_from_projection;
+use codex_protocol::chat_tree_protocol::chat_tree_event_from_protocol_event;
 use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AgentReasoningEvent;
@@ -62,8 +70,181 @@ use codex_protocol::review_format::REVIEW_FALLBACK_MESSAGE;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use tracing::warn;
 use uuid::Uuid;
+
+pub fn build_chat_tree_projection_from_rollout_items(items: &[RolloutItem]) -> ChatTreeProjection {
+    let mut state = DomainChatTreeState::default();
+    let extends_inherited_tree = items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => Some(matches!(
+            meta.meta.source,
+            codex_protocol::protocol::SessionSource::SubAgent(
+                codex_protocol::protocol::SubAgentSource::ThreadSpawn { .. }
+            )
+        )),
+        _ => None,
+    }) == Some(true)
+        && items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(
+                    EventMsg::ChatTreeNodeStarted(_)
+                        | EventMsg::ChatTreeNodeFinalized(_)
+                        | EventMsg::ChatTreeNodeSummaryUpdated(_)
+                        | EventMsg::ChatTreeCurrentNodeChanged(_)
+                )
+            )
+        });
+    let mut synthesized_node_ids = HashSet::new();
+    let mut active_synthesized_node_id = None;
+    for item in items {
+        if extends_inherited_tree
+            && let RolloutItem::EventMsg(EventMsg::TurnStarted(event)) = item
+            && !state
+                .projection()
+                .nodes
+                .iter()
+                .any(|node| node.turn_id.as_deref() == Some(event.turn_id.as_str()))
+        {
+            if let Some(started) = state.start_node(event.turn_id.clone()) {
+                active_synthesized_node_id = Some(started.node_id.clone());
+                synthesized_node_ids.insert(started.node_id);
+            }
+            continue;
+        }
+        if let RolloutItem::EventMsg(EventMsg::TurnComplete(event)) = item
+            && synthesized_node_ids.remove(&event.turn_id)
+        {
+            state.finalize_node(
+                &event.turn_id,
+                codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+            );
+            if active_synthesized_node_id.as_deref() == Some(event.turn_id.as_str()) {
+                active_synthesized_node_id = None;
+            }
+            continue;
+        }
+        if let RolloutItem::EventMsg(EventMsg::TurnAborted(event)) = item {
+            let turn_id = event
+                .turn_id
+                .as_deref()
+                .or(active_synthesized_node_id.as_deref());
+            if let Some(turn_id) = turn_id
+                && synthesized_node_ids.remove(turn_id)
+            {
+                state.finalize_node(
+                    turn_id,
+                    match event.reason {
+                        codex_protocol::protocol::TurnAbortReason::Interrupted
+                        | codex_protocol::protocol::TurnAbortReason::BudgetLimited => {
+                            codex_protocol::protocol::ChatTreeNodeStatus::Interrupted
+                        }
+                        codex_protocol::protocol::TurnAbortReason::Replaced => {
+                            codex_protocol::protocol::ChatTreeNodeStatus::Replaced
+                        }
+                        codex_protocol::protocol::TurnAbortReason::ReviewEnded => {
+                            codex_protocol::protocol::ChatTreeNodeStatus::ReviewEnded
+                        }
+                    },
+                );
+                active_synthesized_node_id = None;
+                continue;
+            }
+        }
+        if let RolloutItem::EventMsg(event_msg) = item
+            && let Some(event) = chat_tree_event_from_protocol_event(event_msg)
+            && let Err(err) = state.apply_event(&event)
+        {
+            warn!(
+                ?err,
+                "invalid durable chat tree event ignored while building projection"
+            );
+        }
+    }
+    chat_tree_projection_from_domain(state.projection())
+}
+
+pub fn chat_tree_projection_from_domain(
+    projection: DomainChatTreeProjection,
+) -> ChatTreeProjection {
+    ChatTreeProjection {
+        version: projection.version,
+        revision: projection.revision,
+        current_node_id: projection.current_node_id,
+        visible_node_ids: projection.visible_node_ids,
+        visible_turn_ids: projection.visible_turn_ids,
+        nodes: projection
+            .nodes
+            .into_iter()
+            .map(|node| ChatTreeNode {
+                node_id: node.node_id,
+                parent_node_id: node.parent_node_id,
+                turn_id: node.turn_id,
+                order: node.order,
+                status: node.status.into(),
+                summary: node.summary,
+            })
+            .collect(),
+    }
+}
+
+pub fn chat_tree_change_from_event(event: &EventMsg) -> Option<ChatTreeChange> {
+    let (r#type, node_id) = match event {
+        EventMsg::ChatTreeNodeStarted(payload) => (
+            ChatTreeChangeKind::NodeStarted,
+            Some(payload.node_id.clone()),
+        ),
+        EventMsg::ChatTreeNodeFinalized(payload) => (
+            ChatTreeChangeKind::NodeFinalized,
+            Some(payload.node_id.clone()),
+        ),
+        EventMsg::ChatTreeNodeSummaryUpdated(payload) => (
+            ChatTreeChangeKind::NodeSummaryUpdated,
+            Some(payload.node_id.clone()),
+        ),
+        EventMsg::ChatTreeCurrentNodeChanged(payload) => (
+            ChatTreeChangeKind::CurrentNodeChanged,
+            Some(payload.node_id.clone()),
+        ),
+        EventMsg::ThreadRolledBack(_) => (ChatTreeChangeKind::TreeRebuilt, None),
+        _ => return None,
+    };
+    Some(ChatTreeChange { r#type, node_id })
+}
+
+pub fn chat_tree_overlay_entries(
+    projection: &ChatTreeProjection,
+) -> Vec<codex_protocol::chat_tree::ChatTreeOverlayEntry> {
+    overlay_entries_from_projection(&domain_chat_tree_projection(projection))
+}
+
+pub fn refresh_chat_tree_projection(projection: &mut ChatTreeProjection) {
+    let state = DomainChatTreeState::from_projection(domain_chat_tree_projection(projection));
+    *projection = chat_tree_projection_from_domain(state.projection());
+}
+
+fn domain_chat_tree_projection(projection: &ChatTreeProjection) -> DomainChatTreeProjection {
+    DomainChatTreeProjection {
+        version: projection.version,
+        revision: projection.revision,
+        current_node_id: projection.current_node_id.clone(),
+        visible_node_ids: projection.visible_node_ids.clone(),
+        visible_turn_ids: projection.visible_turn_ids.clone(),
+        nodes: projection
+            .nodes
+            .iter()
+            .map(|node| codex_protocol::chat_tree::ChatTreeNode {
+                node_id: node.node_id.clone(),
+                parent_node_id: node.parent_node_id.clone(),
+                turn_id: node.turn_id.clone(),
+                order: node.order,
+                status: node.status.to_core(),
+                summary: node.summary.clone(),
+            })
+            .collect(),
+    }
+}
 
 #[cfg(test)]
 use crate::protocol::v2::CommandAction;
@@ -1693,7 +1874,11 @@ mod tests {
     use codex_protocol::protocol::McpToolCallEndEvent;
     use codex_protocol::protocol::PatchApplyBeginEvent;
     use codex_protocol::protocol::ReviewTarget;
+    use codex_protocol::protocol::SessionMeta;
+    use codex_protocol::protocol::SessionMetaLine;
+    use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentActivityKind as CoreSubAgentActivityKind;
+    use codex_protocol::protocol::SubAgentSource;
     use codex_protocol::protocol::ThreadRolledBackEvent;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
@@ -1743,6 +1928,73 @@ mod tests {
             expected.push(appended);
             assert_eq!(items, expected);
         }
+    }
+
+    #[test]
+    fn subagent_rollout_continues_inherited_chat_tree() {
+        let parent_thread_id = ThreadId::new();
+        let mut inherited_tree = DomainChatTreeState::default();
+        let parent_started = inherited_tree
+            .start_node("parent-turn".to_string())
+            .expect("parent node");
+        let parent_finalized = inherited_tree
+            .finalize_node(
+                "parent-turn",
+                codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+            )
+            .expect("parent finalization");
+        let items = vec![
+            RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                        parent_thread_id,
+                        depth: 1,
+                        agent_path: None,
+                        agent_nickname: None,
+                        agent_role: None,
+                    }),
+                    ..SessionMeta::default()
+                },
+                git: None,
+            }),
+            RolloutItem::EventMsg(EventMsg::ChatTreeNodeStarted(Box::new(
+                parent_started.into(),
+            ))),
+            RolloutItem::EventMsg(EventMsg::ChatTreeNodeFinalized(Box::new(
+                parent_finalized.into(),
+            ))),
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: "child-turn".to_string(),
+                trace_id: None,
+                started_at: Some(10),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+            RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+                turn_id: None,
+                reason: TurnAbortReason::Interrupted,
+                started_at: Some(10),
+                completed_at: Some(20),
+                duration_ms: Some(10_000),
+            })),
+        ];
+
+        let projection = build_chat_tree_projection_from_rollout_items(&items);
+
+        assert_eq!(
+            projection.visible_turn_ids,
+            vec!["parent-turn".to_string(), "child-turn".to_string()]
+        );
+        assert_eq!(projection.current_node_id.as_deref(), Some("child-turn"));
+        assert_eq!(projection.nodes.len(), 2);
+        assert_eq!(
+            projection.nodes[1].parent_node_id.as_deref(),
+            Some("parent-turn")
+        );
+        assert_eq!(
+            projection.nodes[1].status,
+            crate::protocol::v2::ChatTreeNodeStatus::Interrupted
+        );
     }
 
     #[test]

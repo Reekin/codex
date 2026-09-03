@@ -39,6 +39,8 @@ pub enum SlashCommand {
     Init,
     Compact,
     Recap,
+    #[strum(serialize = "chattree")]
+    ChatTree,
     Plan,
     Goal,
     Agents,
@@ -94,6 +96,7 @@ impl SlashCommand {
             SlashCommand::Recap => "summarize the current conversation now",
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Rename => "rename the current thread",
+            SlashCommand::ChatTree => "inspect and switch chat tree branches",
             SlashCommand::Resume => "resume a saved chat",
             SlashCommand::Archive => "archive this session and exit",
             SlashCommand::Delete => "permanently delete this session and exit",
@@ -222,6 +225,7 @@ impl SlashCommand {
             | SlashCommand::Memories
             | SlashCommand::Import
             | SlashCommand::Review
+            | SlashCommand::ChatTree
             | SlashCommand::Plan
             | SlashCommand::Cd
             | SlashCommand::Clear

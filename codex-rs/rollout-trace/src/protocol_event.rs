@@ -379,6 +379,10 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
         | EventMsg::ThreadGoalUpdated(_)
         | EventMsg::ThreadQueueChanged(_)
         | EventMsg::TurnStarted(_)
+        | EventMsg::ChatTreeNodeStarted(_)
+        | EventMsg::ChatTreeNodeFinalized(_)
+        | EventMsg::ChatTreeNodeSummaryUpdated(_)
+        | EventMsg::ChatTreeCurrentNodeChanged(_)
         | EventMsg::ThreadSettingsApplied(_)
         | EventMsg::TurnComplete(_)
         | EventMsg::TokenCount(_)
@@ -441,6 +445,10 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
         EventMsg::TurnComplete(_) => Some("turn_complete"),
         EventMsg::TurnAborted(_) => Some("turn_aborted"),
         EventMsg::ThreadRolledBack(_) => Some("thread_rolled_back"),
+        EventMsg::ChatTreeNodeStarted(_) => Some("chat_tree_node_started"),
+        EventMsg::ChatTreeNodeFinalized(_) => Some("chat_tree_node_finalized"),
+        EventMsg::ChatTreeNodeSummaryUpdated(_) => Some("chat_tree_node_summary_updated"),
+        EventMsg::ChatTreeCurrentNodeChanged(_) => Some("chat_tree_current_node_changed"),
         EventMsg::Error(_) => Some("error"),
         EventMsg::Warning(_) => Some("warning"),
         EventMsg::ShutdownComplete => Some("shutdown_complete"),

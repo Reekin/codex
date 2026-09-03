@@ -797,6 +797,21 @@ impl App {
                 self.chat_widget.expect_manual_thread_name(thread_id, name);
                 Ok(true)
             }
+            AppCommand::SetCurrentChatTreeNode {
+                node_id,
+                expected_revision,
+            } => {
+                let response = app_server
+                    .chat_tree_set_current(thread_id, node_id.clone(), *expected_revision)
+                    .await?;
+                let chat_tree = *response.chat_tree;
+                self.chat_widget.set_chat_tree_projection(chat_tree.clone());
+                self.app_event_tx.send(AppEvent::RefreshChatTreeTranscript {
+                    thread_id,
+                    chat_tree,
+                });
+                Ok(true)
+            }
             AppCommand::Review { target } => {
                 let response = app_server.review_start(thread_id, target.clone()).await?;
                 let review_thread_id = ThreadId::from_string(&response.review_thread_id)
@@ -835,6 +850,56 @@ impl App {
             }
             _ => Ok(false),
         }
+    }
+
+    pub(super) async fn refresh_chat_tree_transcript(
+        &mut self,
+        tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
+        thread_id: ThreadId,
+        chat_tree: codex_app_server_protocol::ChatTreeProjection,
+    ) -> Result<()> {
+        if self.active_thread_id != Some(thread_id) {
+            return Ok(());
+        }
+        let thread = match app_server
+            .thread_read(thread_id, /*include_turns*/ true)
+            .await
+        {
+            Ok(thread) => thread,
+            Err(err) => {
+                self.chat_widget.add_error_message(format!(
+                    "Failed to refresh transcript after chat tree switch: {err}"
+                ));
+                return Ok(());
+            }
+        };
+        if self.active_thread_id != Some(thread_id) {
+            return Ok(());
+        }
+
+        let turns = thread.turns.clone();
+        let session = self.session_state_for_thread_read(thread_id, &thread).await;
+        if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.set_session(session.clone(), turns.clone());
+            store.rebase_buffer_after_session_refresh();
+        }
+
+        self.reset_for_thread_switch(tui)?;
+        self.chat_widget
+            .set_queue_autosend_suppressed(/*suppressed*/ true);
+        self.chat_widget.handle_thread_session_quiet(session);
+        self.chat_widget.set_chat_tree_projection(chat_tree);
+        if !turns.is_empty() {
+            self.chat_widget
+                .replay_thread_turns(turns, ReplayKind::ThreadSnapshot);
+        }
+        self.chat_widget
+            .set_queue_autosend_suppressed(/*suppressed*/ false);
+        self.refresh_status_line();
+        tui.frame_requester().schedule_frame();
+        Ok(())
     }
 
     pub(super) fn turn_permissions_override_from_config(

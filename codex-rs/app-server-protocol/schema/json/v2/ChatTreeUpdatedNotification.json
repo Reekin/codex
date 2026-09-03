@@ -1,0 +1,145 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ChatTreeChange": {
+      "properties": {
+        "nodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "$ref": "#/definitions/ChatTreeChangeKind"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "ChatTreeChangeKind": {
+      "enum": [
+        "nodeStarted",
+        "nodeFinalized",
+        "nodeSummaryUpdated",
+        "currentNodeChanged",
+        "treeRebuilt"
+      ],
+      "type": "string"
+    },
+    "ChatTreeNode": {
+      "properties": {
+        "nodeId": {
+          "type": "string"
+        },
+        "order": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "parentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/ChatTreeNodeStatus"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "turnId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "nodeId",
+        "order",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ChatTreeNodeStatus": {
+      "enum": [
+        "pending",
+        "completed",
+        "interrupted",
+        "replaced",
+        "reviewEnded"
+      ],
+      "type": "string"
+    },
+    "ChatTreeProjection": {
+      "properties": {
+        "currentNodeId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/definitions/ChatTreeNode"
+          },
+          "type": "array"
+        },
+        "revision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "version": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "visibleNodeIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "visibleTurnIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "nodes",
+        "revision",
+        "version",
+        "visibleNodeIds",
+        "visibleTurnIds"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "change": {
+      "$ref": "#/definitions/ChatTreeChange"
+    },
+    "chatTree": {
+      "$ref": "#/definitions/ChatTreeProjection"
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "change",
+    "chatTree",
+    "threadId"
+  ],
+  "title": "ChatTreeUpdatedNotification",
+  "type": "object"
+}

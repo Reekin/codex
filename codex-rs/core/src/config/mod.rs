@@ -628,6 +628,10 @@ pub struct Config {
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
 
+    /// Runtime-only switch used by integration harnesses that do not model background summaries.
+    #[doc(hidden)]
+    pub chat_tree_summaries_enabled: bool,
+
     /// Controls whether `model_auto_compact_token_limit` applies to the full
     /// active context or only tokens after the carried compaction-window prefix.
     pub model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope,
@@ -4135,6 +4139,16 @@ impl Config {
             review_model,
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
+            chat_tree_summaries_enabled: {
+                #[cfg(debug_assertions)]
+                {
+                    std::env::var_os("CODEX_CHAT_TREE_SUMMARIES_DISABLED_FOR_TESTS").is_none()
+                }
+                #[cfg(not(debug_assertions))]
+                {
+                    true
+                }
+            },
             model_auto_compact_token_limit_scope: cfg
                 .model_auto_compact_token_limit_scope
                 .unwrap_or_default(),

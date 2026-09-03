@@ -6623,6 +6623,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        chat_tree_summary_jobs: Mutex::new(std::collections::HashMap::new()),
+        chat_tree_summary_jobs_changed: tokio::sync::Notify::new(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
@@ -8156,11 +8158,19 @@ async fn spawn_task_turn_span_inherits_dispatch_trace_context() {
     .instrument(dispatch_span)
     .await;
 
-    let evt = tokio::time::timeout(StdDuration::from_secs(2), rx.recv())
-        .await
-        .expect("timeout waiting for turn completion")
-        .expect("event");
-    assert!(matches!(evt.msg, EventMsg::TurnComplete(_)));
+    let mut observed = Vec::new();
+    let turn_complete = tokio::time::timeout(StdDuration::from_secs(2), async {
+        loop {
+            let evt = rx.recv().await.expect("event");
+            if matches!(evt.msg, EventMsg::TurnComplete(_)) {
+                break evt;
+            }
+            observed.push(evt.msg);
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timeout waiting for turn completion; observed {observed:?}"));
+    assert!(matches!(turn_complete.msg, EventMsg::TurnComplete(_)));
 
     let task_trace = captured_trace
         .lock()
@@ -8923,6 +8933,8 @@ where
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        chat_tree_summary_jobs: Mutex::new(std::collections::HashMap::new()),
+        chat_tree_summary_jobs_changed: tokio::sync::Notify::new(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         fork_persistence: ForkPersistence::Copied,
@@ -11533,10 +11545,12 @@ async fn turn_complete_flushes_terminal_event_after_delivery() {
     let event = recv_terminal_event(&rx, TerminalEventKind::TurnComplete).await;
     assert!(matches!(event.msg, EventMsg::TurnComplete(_)));
     // Expected flushes:
-    // 1. Task-runner flush after the task body finishes, before TurnComplete is emitted.
-    // 2. Terminal-event flush after TurnComplete is appended.
-    let calls = wait_for_flush_count(&store, /*expected_flushes*/ 2).await;
-    assert_eq!(2, calls.flush_thread);
+    // 1. Chat tree node start flush.
+    // 2. Task-runner flush after the task body finishes, before TurnComplete is emitted.
+    // 3. Chat tree node finalization flush.
+    // 4. Terminal-event flush after TurnComplete is appended.
+    let calls = wait_for_flush_count(&store, /*expected_flushes*/ 4).await;
+    assert_eq!(4, calls.flush_thread);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11578,11 +11592,14 @@ async fn turn_aborted_flushes_terminal_event_after_delivery() {
     }
     abort_task.await.expect("abort task should finish");
     // Expected flushes:
-    // 1. Task-runner flush after the task body observes cancellation.
-    // 2. Interrupted-marker flush before TurnAborted so abort observers can reread it.
-    // 3. Terminal-event flush after TurnAborted is appended.
-    let calls = wait_for_flush_count(&store, /*expected_flushes*/ 3).await;
-    assert_eq!(3, calls.flush_thread);
+    // 1. Chat tree node start flush.
+    // 2. Task-runner flush after the task body observes cancellation.
+    // 3. Interrupted-marker flush before TurnAborted so abort observers can reread it.
+    // 4. Chat tree node finalization flush.
+    // 5. Chat tree node summary flush.
+    // 6. Terminal-event flush after TurnAborted is appended.
+    let calls = wait_for_flush_count(&store, /*expected_flushes*/ 6).await;
+    assert_eq!(6, calls.flush_thread);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11608,12 +11625,43 @@ async fn abort_regular_task_emits_marker_before_turn_aborted() {
 
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 
+    let started = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout waiting for chat tree node started event")
+        .expect("event");
+    assert!(matches!(
+        started.msg,
+        EventMsg::ChatTreeNodeStarted(event)
+            if event.turn_id.as_deref() == Some(tc.sub_id.as_str())
+    ));
+
     // Interrupts surface the model-visible `<turn_aborted>` marker before the abort event.
     let marker_evt = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
         .expect("timeout waiting for marker event")
         .expect("event");
     assert!(matches!(marker_evt.msg, EventMsg::RawResponseItem(_)));
+
+    let finalized = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout waiting for chat tree node finalized event")
+        .expect("event");
+    assert!(matches!(
+        finalized.msg,
+        EventMsg::ChatTreeNodeFinalized(event)
+            if event.node_id == tc.sub_id
+                && event.status == codex_protocol::protocol::ChatTreeNodeStatus::Interrupted
+    ));
+
+    let summary = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout waiting for chat tree node summary event")
+        .expect("event");
+    assert!(matches!(
+        summary.msg,
+        EventMsg::ChatTreeNodeSummaryUpdated(event)
+            if event.node_id == tc.sub_id && event.summary.as_deref() == Some("turn interrupted")
+    ));
 
     let evt = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
@@ -11625,6 +11673,254 @@ async fn abort_regular_task_emits_marker_before_turn_aborted() {
     }
     // No extra events should be emitted after an abort.
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test_log::test]
+async fn internal_session_task_does_not_enter_chat_tree_lifecycle() {
+    let (sess, mut tc, rx) = make_session_and_context_with_rx().await;
+    Arc::get_mut(&mut tc)
+        .expect("turn context should be uniquely owned before spawn")
+        .session_source = SessionSource::Internal(
+        codex_protocol::protocol::InternalSessionSource::MemoryConsolidation,
+    );
+    let projection_before = sess.chat_tree_projection().await;
+    let input = vec![TurnInput::UserInput {
+        content: vec![UserInput::Text {
+            text: "memory consolidation work".to_string(),
+            text_elements: Vec::new(),
+        }],
+        client_id: None,
+    }];
+    sess.spawn_task(
+        Arc::clone(&tc),
+        input,
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: false,
+        },
+    )
+    .await;
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+
+    let mut observed = Vec::new();
+    timeout(StdDuration::from_secs(2), async {
+        loop {
+            let event = rx.recv().await.expect("event");
+            let is_aborted = matches!(event.msg, EventMsg::TurnAborted(_));
+            observed.push(event.msg);
+            if is_aborted {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timeout waiting for TurnAborted; observed events: {observed:?}"));
+    assert!(
+        observed.iter().all(|event| {
+            !matches!(
+                event,
+                EventMsg::ChatTreeNodeStarted(_)
+                    | EventMsg::ChatTreeNodeFinalized(_)
+                    | EventMsg::ChatTreeNodeSummaryUpdated(_)
+            )
+        }),
+        "internal sessions must not emit chat tree lifecycle events: {observed:?}"
+    );
+    assert_eq!(projection_before, sess.chat_tree_projection().await);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test_log::test]
+async fn review_subagent_task_does_not_enter_chat_tree_lifecycle() {
+    let (sess, mut tc, rx) = make_session_and_context_with_rx().await;
+    Arc::get_mut(&mut tc)
+        .expect("turn context should be uniquely owned before spawn")
+        .session_source = SessionSource::SubAgent(SubAgentSource::Review);
+    let projection_before = sess.chat_tree_projection().await;
+    let input = vec![TurnInput::UserInput {
+        content: vec![UserInput::Text {
+            text: "subagent review work".to_string(),
+            text_elements: Vec::new(),
+        }],
+        client_id: None,
+    }];
+    sess.spawn_task(
+        Arc::clone(&tc),
+        input,
+        NeverEndingTask {
+            kind: TaskKind::Regular,
+            listen_to_cancellation_token: false,
+        },
+    )
+    .await;
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+
+    let mut observed = Vec::new();
+    timeout(StdDuration::from_secs(2), async {
+        loop {
+            let event = rx.recv().await.expect("event");
+            let is_aborted = matches!(event.msg, EventMsg::TurnAborted(_));
+            observed.push(event.msg);
+            if is_aborted {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timeout waiting for TurnAborted; observed events: {observed:?}"));
+    assert!(
+        observed.iter().all(|event| {
+            !matches!(
+                event,
+                EventMsg::ChatTreeNodeStarted(_)
+                    | EventMsg::ChatTreeNodeFinalized(_)
+                    | EventMsg::ChatTreeNodeSummaryUpdated(_)
+            )
+        }),
+        "subagent sessions must not emit chat tree lifecycle events: {observed:?}"
+    );
+    assert_eq!(projection_before, sess.chat_tree_projection().await);
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn thread_spawn_subagent_appends_child_local_chat_tree_node_without_summary_job() {
+    let (sess, mut tc, _rx) = make_session_and_context_with_rx().await;
+    Arc::get_mut(&mut tc)
+        .expect("turn context should be uniquely owned")
+        .session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+    {
+        let mut state = sess.state.lock().await;
+        let parent_history = state.clone_history();
+        state
+            .chat_tree
+            .start_node("parent-turn".to_string(), parent_history.clone())
+            .expect("parent node");
+        state
+            .chat_tree
+            .finalize_node(
+                "parent-turn",
+                codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+                parent_history,
+            )
+            .expect("parent finalization");
+    }
+    let input = vec![TurnInput::UserInput {
+        content: vec![UserInput::Text {
+            text: "inspect child state".to_string(),
+            text_elements: Vec::new(),
+        }],
+        client_id: None,
+    }];
+
+    sess.start_chat_tree_node_for_turn(&tc, &input).await;
+    let summary_job = sess
+        .complete_chat_tree_node_before_turn_complete(&tc, Some("done".to_string()))
+        .await;
+
+    assert!(summary_job.is_none());
+    let projection = sess.chat_tree_projection().await;
+    assert_eq!(
+        projection.current_node_id.as_deref(),
+        Some(tc.sub_id.as_str())
+    );
+    assert_eq!(
+        projection.visible_turn_ids,
+        vec!["parent-turn".to_string(), tc.sub_id.clone()]
+    );
+    assert_eq!(
+        projection.nodes,
+        vec![
+            crate::chat_tree::ChatTreeNodeSnapshot {
+                node_id: "parent-turn".to_string(),
+                parent_node_id: None,
+                turn_id: Some("parent-turn".to_string()),
+                order: 0,
+                status: codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+                summary: Some("Turn 1 · completed".to_string()),
+            },
+            crate::chat_tree::ChatTreeNodeSnapshot {
+                node_id: tc.sub_id.clone(),
+                parent_node_id: Some("parent-turn".to_string()),
+                turn_id: Some(tc.sub_id.clone()),
+                order: 1,
+                status: codex_protocol::protocol::ChatTreeNodeStatus::Completed,
+                summary: Some("Turn 2 · completed".to_string()),
+            },
+        ]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test_log::test]
+async fn abort_replaced_and_review_ended_finalize_chat_tree_nodes() {
+    for (reason, expected_status, expected_summary) in [
+        (
+            TurnAbortReason::Replaced,
+            codex_protocol::protocol::ChatTreeNodeStatus::Replaced,
+            "turn replaced",
+        ),
+        (
+            TurnAbortReason::ReviewEnded,
+            codex_protocol::protocol::ChatTreeNodeStatus::ReviewEnded,
+            "turn review ended",
+        ),
+    ] {
+        let (sess, tc, rx) = make_session_and_context_with_rx().await;
+        let input = vec![TurnInput::UserInput {
+            content: vec![UserInput::Text {
+                text: "abort lifecycle work".to_string(),
+                text_elements: Vec::new(),
+            }],
+            client_id: None,
+        }];
+        sess.spawn_task(
+            Arc::clone(&tc),
+            input,
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: false,
+            },
+        )
+        .await;
+
+        sess.abort_all_tasks(reason.clone()).await;
+
+        let mut finalized_status = None;
+        let mut summary = None;
+        timeout(StdDuration::from_secs(2), async {
+            loop {
+                let event = rx.recv().await.expect("event");
+                match event.msg {
+                    EventMsg::ChatTreeNodeFinalized(event) => {
+                        finalized_status = Some(event.status);
+                    }
+                    EventMsg::ChatTreeNodeSummaryUpdated(event) => {
+                        summary = event.summary.clone();
+                    }
+                    EventMsg::TurnAborted(event) => {
+                        assert_eq!(event.reason, reason);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .expect("timeout waiting for chat tree abort lifecycle");
+        assert_eq!(finalized_status, Some(expected_status));
+        assert_eq!(summary.as_deref(), Some(expected_summary));
+    }
 }
 
 #[tokio::test]
@@ -11649,12 +11945,43 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
 
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 
+    let started = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout waiting for chat tree node started event")
+        .expect("event");
+    assert!(matches!(
+        started.msg,
+        EventMsg::ChatTreeNodeStarted(event)
+            if event.turn_id.as_deref() == Some(tc.sub_id.as_str())
+    ));
+
     // Gracefully cancelled tasks surface the model-visible marker before the abort event too.
     let marker_evt = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
         .expect("timeout waiting for marker event")
         .expect("event");
     assert!(matches!(marker_evt.msg, EventMsg::RawResponseItem(_)));
+
+    let finalized = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout waiting for chat tree node finalized event")
+        .expect("event");
+    assert!(matches!(
+        finalized.msg,
+        EventMsg::ChatTreeNodeFinalized(event)
+            if event.node_id == tc.sub_id
+                && event.status == codex_protocol::protocol::ChatTreeNodeStatus::Interrupted
+    ));
+
+    let summary = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("timeout waiting for chat tree node summary event")
+        .expect("event");
+    assert!(matches!(
+        summary.msg,
+        EventMsg::ChatTreeNodeSummaryUpdated(event)
+            if event.node_id == tc.sub_id && event.summary.as_deref() == Some("turn interrupted")
+    ));
 
     let evt = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
@@ -11686,6 +12013,36 @@ async fn submit_steer_only(
     )
     .await
     .expect("steer-only submission should be valid")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_all_summary_jobs_cancels_registered_pre_spawn_job() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let token = sess
+        .register_chat_tree_summary_job_for_test("summary-node")
+        .await;
+    let sess_for_cancel = Arc::clone(&sess);
+    let cancel_task =
+        tokio::spawn(async move { sess_for_cancel.cancel_all_chat_tree_summary_jobs().await });
+
+    timeout(StdDuration::from_secs(2), async {
+        while !token.is_cancelled() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("registered summary job should be cancelled");
+    assert!(
+        !cancel_task.is_finished(),
+        "shutdown should wait for a registered summary job to be removed"
+    );
+
+    sess.finish_chat_tree_summary_job_for_test("summary-node")
+        .await;
+    timeout(StdDuration::from_secs(2), cancel_task)
+        .await
+        .expect("summary job cancellation should finish after job removal")
+        .expect("summary job cancellation task should not panic");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -11791,10 +12148,21 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
 
     let fifth = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
         .await
-        .expect("expected turn complete event")
+        .expect("expected chat tree node finalized event")
         .expect("channel open");
     assert!(matches!(
         fifth.msg,
+        EventMsg::ChatTreeNodeFinalized(event)
+            if event.node_id == tc.sub_id
+                && event.status == codex_protocol::protocol::ChatTreeNodeStatus::Completed
+    ));
+
+    let sixth = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        .await
+        .expect("expected turn complete event")
+        .expect("channel open");
+    assert!(matches!(
+        sixth.msg,
         EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id,
             last_agent_message: None,
