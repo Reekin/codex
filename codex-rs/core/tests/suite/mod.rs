@@ -69,6 +69,7 @@ mod exec_policy;
 #[cfg(not(target_os = "windows"))]
 mod extension_sandbox;
 mod external_auth;
+mod final_answer_retry;
 mod fork_thread;
 mod git_enrichment;
 mod guardian_authorization;
