@@ -42,6 +42,7 @@ use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses;
 use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::mount_models_once;
+use core_test_support::responses::strip_metadata_from_json;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::local_selections;
@@ -99,6 +100,8 @@ const GLOBAL_AGENTS_OVERRIDE_FILENAME: &str = "AGENTS.override.md";
 const NEW_GLOBAL_INSTRUCTIONS: &str = "new global instructions";
 const OLD_GLOBAL_INSTRUCTIONS: &str = "old global instructions";
 const REMOTE_V2_SUMMARY: &str = "global-instructions-remote-v2-summary";
+const ROLLOUT_RECOVERY_INTRO: &str =
+    "The complete pre-compaction conversation remains available in the rollout at:";
 
 pub(super) const COMPACT_WARNING_MESSAGE: &str = "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.";
 
@@ -154,6 +157,23 @@ fn auto_summary(summary: &str) -> String {
 
 fn summary_with_prefix(summary: &str) -> String {
     format!("{SUMMARY_PREFIX}\n{summary}")
+}
+
+fn assert_rollout_recovery(summary: &str, rollout_path: &Path) {
+    assert!(
+        summary.contains(ROLLOUT_RECOVERY_INTRO),
+        "compaction summary should identify the rollout recovery source"
+    );
+    assert!(
+        summary.contains(&format!("`{}`", rollout_path.display())),
+        "compaction summary should contain the canonical rollout path"
+    );
+    assert!(
+        summary.contains(
+            "If exact code, tool output, errors, or decisions are needed, read that rollout instead of guessing."
+        ),
+        "compaction summary should direct exact-detail recovery to the rollout"
+    );
 }
 
 fn set_test_compact_prompt(config: &mut Config) {
@@ -535,10 +555,11 @@ async fn summarize_context_three_requests_and_instructions(
 
     // SSE 3: minimal completed; we only need to capture the request body.
     let sse3 = sse(vec![ev_completed("r3")]);
+    let sse4 = sse(vec![ev_completed("r4")]);
 
-    // Mount the three expected requests in sequence so the assertions below can
+    // Mount the expected requests in sequence so the assertions below can
     // inspect them without relying on specific prompt markers.
-    let request_log = mount_sse_sequence(&server, vec![sse1, sse2, sse3]).await;
+    let request_log = mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
 
     // Build config pointing to the mock server and spawn Codex.
     let model_provider = non_openai_model_provider(&server);
@@ -549,12 +570,16 @@ async fn summarize_context_three_requests_and_instructions(
             config.base_instructions = Some(CUSTOM_INSTRUCTIONS.to_string());
         }
         config.model_provider = model_provider;
-        set_test_compact_prompt(config);
         config.model_auto_compact_token_limit = Some(200_000);
     });
     let test = builder.build(&server).await?;
     let codex = test.codex.clone();
-    let rollout_path = test.session_configured.rollout_path.expect("rollout path");
+    let home = Arc::clone(&test.home);
+    let rollout_path = test
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
 
     // 1) Normal user input – should hit server once.
     codex
@@ -638,7 +663,7 @@ async fn summarize_context_three_requests_and_instructions(
     );
 
     let mut messages: Vec<(String, String)> = Vec::new();
-    let expected_summary_message = summary_with_prefix(SUMMARY_TEXT);
+    let expected_summary_prefix = summary_with_prefix(SUMMARY_TEXT);
 
     for item in input3 {
         if let Some("message") = item.get("type").and_then(|v| v.as_str()) {
@@ -677,9 +702,16 @@ async fn summarize_context_three_requests_and_instructions(
     assert!(
         messages
             .iter()
-            .any(|(r, t)| r == "user" && t == &expected_summary_message),
+            .any(|(r, t)| r == "user" && t.starts_with(&expected_summary_prefix)),
         "third request should include the summary message"
     );
+    let installed_summary = messages
+        .iter()
+        .find_map(|(role, text)| {
+            (role == "user" && text.starts_with(&expected_summary_prefix)).then_some(text.as_str())
+        })
+        .expect("third request should include the installed summary");
+    assert_rollout_recovery(installed_summary, &rollout_path);
     assert!(
         !messages
             .iter()
@@ -693,6 +725,30 @@ async fn summarize_context_three_requests_and_instructions(
 
     let replacement_history = replacement_history_from_rollout(&rollout_path)
         .expect("local compaction should persist replacement history");
+    let persisted_replacement = replacement_history
+        .iter()
+        .cloned()
+        .map(strip_response_item_ids_from_json)
+        .map(strip_metadata_from_json)
+        .collect::<Vec<_>>();
+    let live_replacement = input3
+        .iter()
+        .filter(|item| {
+            item.get("type").and_then(Value::as_str) == Some("message")
+                && item.get("role").and_then(Value::as_str) == Some("user")
+                && item["content"][0]["text"].as_str().is_some_and(|text| {
+                    text == "hello world second fragment"
+                        || text.starts_with(&expected_summary_prefix)
+                })
+        })
+        .cloned()
+        .map(strip_response_item_ids_from_json)
+        .map(strip_metadata_from_json)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted_replacement, live_replacement,
+        "persisted replacement history should match the model-visible compacted history sent on follow-up"
+    );
     let compacted_user_message = replacement_history
         .iter()
         .find(|item| item["content"][0]["text"] == "hello world second fragment")
@@ -730,7 +786,12 @@ async fn summarize_context_three_requests_and_instructions(
             RolloutItem::TurnContext(_) => {
                 regular_turn_context_count += 1;
             }
-            RolloutItem::Compacted(ci) if ci.message == expected_summary_message => {
+            RolloutItem::Compacted(ci)
+                if ci.message.starts_with(&expected_summary_prefix)
+                    && ci
+                        .message
+                        .contains(&format!("`{}`", rollout_path.display())) =>
+            {
                 let summary_item = ci
                     .replacement_history
                     .as_ref()
@@ -749,7 +810,7 @@ async fn summarize_context_three_requests_and_instructions(
                         "role": "user",
                         "content": [{
                             "type": "input_text",
-                            "text": expected_summary_message,
+                            "text": ci.message,
                         }],
                         "content_item_kinds": ["compaction.summary"],
                     })
@@ -767,6 +828,57 @@ async fn summarize_context_three_requests_and_instructions(
     assert!(
         saw_compacted_summary,
         "expected a Compacted entry containing the summarizer output"
+    );
+
+    let model_provider = non_openai_model_provider(&server);
+    let mut resume_builder = test_codex().with_config(move |config| {
+        config.model = Some("gpt-5.2".to_string());
+        config.model_provider = model_provider;
+        set_test_compact_prompt(config);
+        config.model_auto_compact_token_limit = Some(200_000);
+    });
+    let resumed = resume_builder
+        .resume(&server, home, rollout_path.clone())
+        .await
+        .expect("resume compacted session");
+    resumed
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "after cold resume".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect("submit resumed turn");
+    wait_for_event(&resumed.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 4, "expected cold-resume follow-up request");
+    let resumed_summary = requests[3]
+        .message_input_texts("user")
+        .into_iter()
+        .find(|text| text.starts_with(&expected_summary_prefix))
+        .expect("cold-resume request should replay the compact summary");
+    assert_eq!(
+        resumed_summary, installed_summary,
+        "cold resume should replay persisted replacement history verbatim"
+    );
+    let resumed_replacement = requests[3]
+        .input()
+        .into_iter()
+        .filter(|item| {
+            item.get("type").and_then(Value::as_str) == Some("message")
+                && item.get("role").and_then(Value::as_str) == Some("user")
+                && item["content"][0]["text"].as_str().is_some_and(|text| {
+                    text == "hello world second fragment"
+                        || text.starts_with(&expected_summary_prefix)
+                })
+        })
+        .map(strip_response_item_ids_from_json)
+        .map(strip_metadata_from_json)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        resumed_replacement, live_replacement,
+        "cold resume should reconstruct the persisted replacement history"
     );
     Ok(())
 }
@@ -913,7 +1025,9 @@ async fn manual_compact_uses_custom_prompt() {
         ev_assistant_message("m1", SUMMARY_TEXT),
         ev_completed_with_tokens("r1", /*total_tokens*/ 100),
     ]);
-    let request_log = mount_sse_sequence(&server, vec![first_turn, compact_turn]).await;
+    let follow_up_turn = sse(vec![ev_completed("r2")]);
+    let request_log =
+        mount_sse_sequence(&server, vec![first_turn, compact_turn, follow_up_turn]).await;
 
     let custom_prompt = "Use this compact prompt instead";
 
@@ -922,11 +1036,13 @@ async fn manual_compact_uses_custom_prompt() {
         config.model_provider = model_provider;
         config.compact_prompt = Some(custom_prompt.to_string());
     });
-    let codex = builder
-        .build(&server)
-        .await
-        .expect("create conversation")
-        .codex;
+    let test = builder.build(&server).await.expect("create conversation");
+    let rollout_path = test
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+    let codex = test.codex;
 
     codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -945,11 +1061,20 @@ async fn manual_compact_uses_custom_prompt() {
     assert_eq!(message, COMPACT_WARNING_MESSAGE);
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
+    codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "USER_TWO".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect("submit follow-up turn");
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
     let requests = request_log.requests();
     assert_eq!(
         requests.len(),
-        2,
-        "expected first turn and compact requests"
+        3,
+        "expected first turn, compact, and follow-up requests"
     );
     let body = requests[1].body_json();
 
@@ -973,19 +1098,18 @@ async fn manual_compact_uses_custom_prompt() {
         }
     }
 
-    let used_prompt = found_custom_prompt || found_default_prompt;
-    if used_prompt {
-        assert!(found_custom_prompt, "custom prompt should be injected");
-        assert!(
-            !found_default_prompt,
-            "default prompt should be replaced when a compact prompt is used"
-        );
-    } else {
-        assert!(
-            !found_default_prompt,
-            "summarization prompt should not appear if compaction omits a prompt"
-        );
-    }
+    assert!(found_custom_prompt, "custom prompt should be injected");
+    assert!(
+        !found_default_prompt,
+        "default prompt should be completely replaced by the custom prompt"
+    );
+
+    let installed_summary = requests[2]
+        .message_input_texts("user")
+        .into_iter()
+        .find(|text| text.starts_with(&summary_with_prefix(SUMMARY_TEXT)))
+        .expect("follow-up request should contain the compact summary");
+    assert_rollout_recovery(&installed_summary, &rollout_path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1331,7 +1455,15 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                     return None;
                 }
                 if role == Some("user") {
-                    return strip_agents_parts_from_user_message(&value);
+                    let mut value = strip_agents_parts_from_user_message(&value)?;
+                    if let Some(text) = value["content"][0]["text"].as_str()
+                        && text.starts_with(SUMMARY_PREFIX)
+                        && let Some((summary, _)) =
+                            text.split_once(&format!("\n\n{ROLLOUT_RECOVERY_INTRO}"))
+                    {
+                        value["content"][0]["text"] = json!(summary);
+                    }
+                    return Some(value);
                 }
                 Some(value)
             })
@@ -3919,7 +4051,6 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
     let final_user_message = "post compact follow-up";
     let first_summary = "FIRST_MANUAL_SUMMARY";
     let second_summary = "SECOND_MANUAL_SUMMARY";
-    let expected_second_summary = summary_with_prefix(second_summary);
 
     let server = start_mock_server().await;
 
@@ -3965,7 +4096,13 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         config.model_provider = model_provider;
         set_test_compact_prompt(config);
     });
-    let codex = builder.build(&server).await.unwrap().codex;
+    let test = builder.build(&server).await.unwrap();
+    let rollout_path = test
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+    let codex = test.codex;
 
     codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -4136,12 +4273,26 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
     let history_before_seeded_prefix = final_request_before_last_user
         .strip_suffix(initial_seeded_user_prefix)
         .expect("final request should end with the seeded user prefix from the first request");
-    let expected_history = vec![
-        first_user_message.to_string(),
-        second_user_message.to_string(),
-        expected_second_summary,
-    ];
-    assert_eq!(history_before_seeded_prefix, expected_history.as_slice());
+    let [
+        first_history_message,
+        second_history_message,
+        installed_summary,
+    ] = history_before_seeded_prefix
+    else {
+        panic!("final request should contain two user messages and the latest compact summary");
+    };
+    assert_eq!(
+        [
+            first_history_message.as_str(),
+            second_history_message.as_str()
+        ],
+        [first_user_message, second_user_message]
+    );
+    assert!(
+        installed_summary.starts_with(&summary_with_prefix(second_summary)),
+        "final request should contain the latest compact summary"
+    );
+    assert_rollout_recovery(installed_summary, &rollout_path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4291,7 +4442,13 @@ async fn snapshot_request_shape_mid_turn_continuation_compaction() {
         config.model_context_window = Some(context_window);
         config.model_auto_compact_token_limit = Some(limit);
     });
-    let codex = builder.build(&server).await.unwrap().codex;
+    let test = builder.build(&server).await.unwrap();
+    let rollout_path = test
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+    let codex = test.codex;
 
     codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -4336,6 +4493,13 @@ async fn snapshot_request_shape_mid_turn_continuation_compaction() {
         body_contains_text(&auto_compact_body, SUMMARIZATION_PROMPT),
         "mid-turn auto compact request should include the summarization prompt after exceeding 95% (limit {limit})"
     );
+    let installed_summary = post_auto_compact_mock
+        .single_request()
+        .message_input_texts("user")
+        .into_iter()
+        .find(|text| text.starts_with(&summary_with_prefix(AUTO_SUMMARY_TEXT)))
+        .expect("mid-turn continuation should contain the compact summary");
+    assert_rollout_recovery(&installed_summary, &rollout_path);
 
     insta::assert_snapshot!(
         "mid_turn_compaction_shapes",
@@ -4883,7 +5047,7 @@ async fn snapshot_request_shape_pre_turn_compaction_including_incoming_user_mess
     let request_log = mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
 
     let model_provider = non_openai_model_provider(&server);
-    let codex = test_codex()
+    let test = test_codex()
         .with_config(move |config| {
             config.update_plan_enabled = true;
             config.model_provider = model_provider;
@@ -4892,8 +5056,13 @@ async fn snapshot_request_shape_pre_turn_compaction_including_incoming_user_mess
         })
         .build(&server)
         .await
-        .expect("build codex")
-        .codex;
+        .expect("build codex");
+    let rollout_path = test
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("rollout path");
+    let codex = test.codex;
 
     for user in ["USER_ONE", "USER_TWO"] {
         codex
@@ -4958,6 +5127,11 @@ async fn snapshot_request_shape_pre_turn_compaction_including_incoming_user_mess
         follow_up_user_texts.iter().any(|text| text == "USER_THREE"),
         "expected post-compaction follow-up request to keep incoming user text"
     );
+    let installed_summary = follow_up_user_texts
+        .iter()
+        .find(|text| text.starts_with(&summary_with_prefix("PRE_TURN_SUMMARY")))
+        .expect("pre-turn follow-up should contain the compact summary");
+    assert_rollout_recovery(installed_summary, &rollout_path);
     let follow_up_user_images = requests[3].message_input_image_urls("user");
     assert!(
         follow_up_user_images
