@@ -1,5 +1,6 @@
 use super::analytics::ToolCallAnalytics;
 use super::*;
+use crate::agent::AgentIdentity;
 use crate::agent::control::ListedAgent;
 use crate::tools::handlers::multi_agents_spec::create_list_agents_tool;
 use codex_tools::ToolSpec;
@@ -48,11 +49,20 @@ impl Handler {
         let agents = session
             .services
             .agent_control
-            .list_agents(&turn.session_source, args.path_prefix.as_deref())
+            .list_agents(
+                session.thread_id,
+                &turn.session_source,
+                args.path_prefix.as_deref(),
+            )
             .await
             .map_err(collab_spawn_error)?;
+        let current_agent_name = AgentIdentity::from_session_source(&turn.session_source)
+            .current_agent_name(session.thread_id);
 
-        Ok(boxed_tool_output(ListAgentsResult { agents }))
+        Ok(boxed_tool_output(ListAgentsResult {
+            current_agent_name,
+            agents,
+        }))
     }
 }
 
@@ -70,6 +80,7 @@ struct ListAgentsArgs {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ListAgentsResult {
+    current_agent_name: String,
     agents: Vec<ListedAgent>,
 }
 
