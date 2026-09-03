@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::AgentIdentity;
 use crate::agent::status::is_final;
 use crate::session::session::Session;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
@@ -66,6 +67,13 @@ impl Handler {
         let arguments = function_arguments(payload)?;
         let args: WaitArgs = parse_arguments(&arguments)?;
         let receiver_thread_ids = parse_agent_id_targets(args.targets)?;
+        if receiver_thread_ids.contains(&session.thread_id) {
+            let current_agent_name = AgentIdentity::from_session_source(&turn.session_source)
+                .current_agent_name(session.thread_id);
+            return Err(FunctionCallError::RespondToModel(format!(
+                "wait_agent cannot wait for the current agent `{current_agent_name}`. Return your result if your task is complete, or wait only for another agent id."
+            )));
+        }
         let mut receiver_agents = Vec::with_capacity(receiver_thread_ids.len());
         let mut target_by_thread_id = HashMap::with_capacity(receiver_thread_ids.len());
         for receiver_thread_id in &receiver_thread_ids {

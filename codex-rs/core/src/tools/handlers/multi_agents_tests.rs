@@ -202,13 +202,35 @@ where
 
 #[derive(Debug, Deserialize)]
 struct ListAgentsResult {
+    current_agent_name: String,
     agents: Vec<ListedAgentResult>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ListedAgentResult {
     agent_name: String,
+    is_current_agent: bool,
     agent_status: serde_json::Value,
+}
+
+fn multi_agent_v2_wait_result(
+    current_agent_name: &str,
+    timed_out: bool,
+) -> crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+    let message = if timed_out {
+        format!(
+            "Wait timed out for your mailbox as `{current_agent_name}`. This wait only observes updates delivered to your own mailbox; it does not wait for `/root`'s child tasks unless you are `/root`."
+        )
+    } else {
+        format!(
+            "Wait completed for your mailbox as `{current_agent_name}`. This wait only observed an update delivered to your own mailbox; it did not wait for another agent's mailbox."
+        )
+    };
+    crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+        current_agent_name: current_agent_name.to_string(),
+        message,
+        timed_out,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1334,6 +1356,9 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
     session.thread_id = root.thread_id;
     let mut config = (*turn.config).clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
+    config.multi_agent_v2.min_wait_timeout_ms = 0;
+    config.multi_agent_v2.max_wait_timeout_ms = 0;
+    config.multi_agent_v2.default_wait_timeout_ms = 0;
     set_turn_config(&mut turn, config);
 
     let session = Arc::new(session);
@@ -1362,7 +1387,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .get_thread(agent_id)
         .await
         .expect("child thread should exist");
-    let child_turn = child_thread.session.new_default_turn().await;
+    let child_session = Arc::clone(&child_thread.session);
+    let child_turn = child_session.new_default_turn().await;
     child_thread
         .session
         .send_event(
@@ -1381,8 +1407,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
 
     let output = ListAgentsHandlerV2
         .handle(invocation(
-            session,
-            turn,
+            Arc::clone(&child_session),
+            Arc::clone(&child_turn),
             "list_agents",
             function_payload(json!({})),
         ))
@@ -1392,6 +1418,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
+    assert_eq!(result.current_agent_name, "/root/worker");
     let agent_names = result
         .agents
         .iter()
@@ -1403,8 +1430,34 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .iter()
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
+    assert!(worker.is_current_agent);
+    assert!(
+        !result
+            .agents
+            .iter()
+            .find(|agent| agent.agent_name == "/root")
+            .expect("root agent should be listed")
+            .is_current_agent
+    );
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
     assert_eq!(success, Some(true));
+
+    let output = WaitAgentHandlerV2::default()
+        .handle(invocation(
+            child_session,
+            child_turn,
+            "wait_agent",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("wait_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let wait_result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+    assert_eq!(
+        wait_result,
+        multi_agent_v2_wait_result("/root/worker", true)
+    );
 }
 
 #[tokio::test]
@@ -1487,8 +1540,10 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
+    assert_eq!(result.current_agent_name, "/root/researcher");
     assert_eq!(result.agents.len(), 1);
     assert_eq!(result.agents[0].agent_name, worker_path.as_str());
+    assert!(!result.agents[0].is_current_agent);
 }
 
 #[tokio::test]
@@ -2823,6 +2878,26 @@ async fn wait_agent_rejects_empty_targets() {
 }
 
 #[tokio::test]
+async fn wait_agent_rejects_current_agent_target() {
+    let (session, turn) = make_session_and_context().await;
+    let current_thread_id = session.thread_id;
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "wait_agent",
+        function_payload(json!({"targets": [current_thread_id.to_string()]})),
+    );
+    let Err(err) = WaitAgentHandler::default().handle(invocation).await else {
+        panic!("current agent target should be rejected");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected respond-to-model error");
+    };
+    assert!(message.contains("wait_agent cannot wait for the current agent `/root`"));
+    assert!(message.contains("Return your result if your task is complete"));
+}
+
+#[tokio::test]
 async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -2904,13 +2979,7 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
+    assert_eq!(result, multi_agent_v2_wait_result("/root", false));
     assert_eq!(success, None);
 }
 
@@ -2952,9 +3021,8 @@ async fn multi_agent_v2_wait_agent_clamps_timeout_below_configured_min() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message:
-                "Wait timed out.\n\nRequested timeout of 1ms was clamped to the minimum of 50ms."
-                    .to_string(),
+            current_agent_name: "/root".to_string(),
+            message: "Wait timed out for your mailbox as `/root`. This wait only observes updates delivered to your own mailbox; it does not wait for `/root`'s child tasks unless you are `/root`.\n\nRequested timeout of 1ms was clamped to the minimum of 50ms.".to_string(),
             timed_out: true,
         }
     );
@@ -2986,13 +3054,7 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_min() 
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
+    assert_eq!(result, multi_agent_v2_wait_result("/root", true));
     assert_eq!(success, None);
 }
 
@@ -3041,13 +3103,7 @@ async fn multi_agent_v2_wait_agent_uses_configured_default_timeout() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
+    assert_eq!(result, multi_agent_v2_wait_result("/root", true));
     assert_eq!(success, None);
 }
 
@@ -3081,14 +3137,41 @@ async fn multi_agent_v2_wait_agent_allows_zero_configured_timeout() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
+    assert_eq!(result, multi_agent_v2_wait_result("/root", true));
     assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_wait_agent_names_pathless_subagent_mailbox() {
+    let (session, mut turn) = make_session_and_context().await;
+    let wait_config = &mut Arc::make_mut(&mut turn.config).multi_agent_v2;
+    wait_config.min_wait_timeout_ms = 0;
+    wait_config.max_wait_timeout_ms = 0;
+    wait_config.default_wait_timeout_ms = 0;
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+    let current_thread_id = session.thread_id.to_string();
+
+    let output = WaitAgentHandlerV2::default()
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "wait_agent",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("wait_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
+        serde_json::from_str(&content).expect("wait_agent result should be json");
+
+    assert_eq!(result.current_agent_name, current_thread_id);
+    assert!(!result.message.contains("as `/root`"));
 }
 
 #[tokio::test]
@@ -3146,13 +3229,7 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_max() 
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait timed out.".to_string(),
-            timed_out: true,
-        }
-    );
+    assert_eq!(result, multi_agent_v2_wait_result("/root", true));
     assert_eq!(success, None);
 }
 
@@ -3408,13 +3485,7 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
     let (content, success) = expect_text_output(wait_output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
+    assert_eq!(result, multi_agent_v2_wait_result("/root", false));
     assert_eq!(success, None);
 }
 
@@ -3492,13 +3563,7 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
+    assert_eq!(result, multi_agent_v2_wait_result("/root", false));
     assert_eq!(success, None);
 }
 
@@ -3586,13 +3651,7 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
+    assert_eq!(result, multi_agent_v2_wait_result("/root", false));
     assert_eq!(success, None);
 }
 
@@ -3677,13 +3736,7 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
     let (content, success) = expect_text_output(output);
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        result,
-        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: "Wait completed.".to_string(),
-            timed_out: false,
-        }
-    );
+    assert_eq!(result, multi_agent_v2_wait_result("/root", false));
     assert!(!content.contains("sensitive child output"));
     assert_eq!(success, None);
 }

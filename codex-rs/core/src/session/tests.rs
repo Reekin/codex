@@ -10390,12 +10390,62 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
             .any(|message| message.as_slice() == ["Subagent guidance."]),
         "expected standalone subagent usage hint developer message, got {developer_messages:?}"
     );
+    let identity = developer_messages
+        .iter()
+        .flatten()
+        .find(|text| text.contains("Your current canonical agent path is `/root/worker`"))
+        .expect("subagent identity developer message should be present");
+    assert!(identity.contains("your parent thread id is"));
+    assert!(
+        !developer_messages
+            .iter()
+            .flatten()
+            .any(|text| text.contains("forked parent conversation history")),
+        "ordinary startup must not use fork-history wording, got {developer_messages:?}"
+    );
     assert!(
         !developer_messages
             .iter()
             .any(|message| message.as_slice() == ["Root guidance."]),
         "did not expect root usage hint for subagent thread, got {developer_messages:?}"
     );
+}
+
+#[tokio::test]
+async fn build_initial_context_marks_pathless_subagent_as_not_root() {
+    let (session, mut turn_context) =
+        make_multi_agent_v2_usage_hint_test_session(/*enable_multi_agent_v2*/ false).await;
+    let parent_thread_id = ThreadId::new();
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 2,
+        agent_path: None,
+        agent_nickname: Some("worker".to_string()),
+        agent_role: Some("researcher".to_string()),
+    });
+    session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .session_source = session_source.clone();
+    Arc::get_mut(&mut turn_context)
+        .expect("thread settings should not be shared")
+        .session_source = session_source;
+
+    let initial_context = build_initial_context(&session, &turn_context).await;
+    let developer_messages = developer_message_texts(&initial_context);
+    let identity = developer_messages
+        .iter()
+        .flatten()
+        .find(|text| text.contains("You do not have a canonical agent path"))
+        .expect("pathless subagent identity should be present");
+
+    assert!(identity.contains("still not the `/root` main agent"));
+    assert!(identity.contains(&parent_thread_id.to_string()));
+    assert!(identity.contains("depth is 2"));
+    assert!(identity.contains("nickname is `worker`"));
+    assert!(identity.contains("configured role is `researcher`"));
 }
 
 #[tokio::test]

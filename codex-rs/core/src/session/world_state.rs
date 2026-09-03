@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use super::session::Session;
 use super::step_context::StepContext;
+use crate::agent::AgentIdentity;
 use crate::connectors;
 use crate::context::ApprovalPromptContext;
 use crate::context::TokenBudgetContext;
@@ -21,6 +22,7 @@ use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::PersonalityState;
 use crate::context::world_state::PluginsInstructionsState;
 use crate::context::world_state::RealtimeState;
+use crate::context::world_state::SubagentIdentityState;
 use crate::context::world_state::ToolsState;
 use crate::context::world_state::WorldState;
 use codex_connectors::AppToolPolicyEvaluator;
@@ -322,6 +324,10 @@ impl Session {
             let usage_hint = MultiAgentUsageHintState::new(usage_hint_text);
             multi_agent_mode = multi_agent_mode.with_usage_hint(&usage_hint);
             world_state.add_section(usage_hint);
+        }
+        let agent_identity = AgentIdentity::from_session_source(&turn_context.session_source);
+        if agent_identity.thread_spawn().is_some() {
+            world_state.add_section(SubagentIdentityState::new(agent_identity));
         }
         world_state.add_section(multi_agent_mode);
         if !crate::guardian::is_basic_session_source(&turn_context.session_source) {
