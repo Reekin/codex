@@ -241,34 +241,12 @@ async fn submit_unified_exec_turn(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exec_argv_preserves_literal_arguments_and_skips_shell_transforms_through_background_completion()
--> Result<()> {
+async fn exec_argv_preserves_literal_arguments_through_background_completion() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::ShellSnapshot)
-            .expect("test config should enable shell snapshots");
-        config
-            .features
-            .enable(Feature::ShellSnapshotV2)
-            .expect("test config should enable in-memory shell snapshots");
-    });
+    let mut builder = test_codex();
     let test = builder.build(&server).await?;
-    #[cfg(unix)]
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let snapshot_dir = test.home.path().join("shell_snapshots");
-        loop {
-            if fs::read_dir(&snapshot_dir).is_ok_and(|mut entries| entries.next().is_some()) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .context("shell snapshot did not become ready before exec_argv")?;
     let marker = test.config.cwd.join("exec-argv-shell-side-effect");
     let _ = fs::remove_file(marker.as_path());
     let literal_args = vec![
@@ -370,6 +348,123 @@ async fn exec_argv_preserves_literal_arguments_and_skips_shell_transforms_throug
     assert!(
         fs::metadata(marker.as_path()).is_err(),
         "shell metacharacters must not create a side-effect file"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_argv_skips_ready_legacy_shell_snapshot_prefix() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let shell =
+        codex_core::shell::get_shell_by_model_provided_path(&std::path::PathBuf::from("/bin/bash"));
+    let mut builder = test_codex().with_user_shell(shell).with_config(|config| {
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should enable legacy shell snapshots");
+        config
+            .features
+            .disable(Feature::ShellSnapshotV2)
+            .expect("test config should disable in-memory shell snapshots");
+    });
+    let test = builder.build(&server).await?;
+    let snapshot_path = tokio::time::timeout(Duration::from_secs(10), async {
+        let snapshot_dir = test.home.path().join("shell_snapshots");
+        loop {
+            if let Ok(entries) = fs::read_dir(&snapshot_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(OsStr::to_str) == Some("sh") {
+                        return path;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("legacy shell snapshot did not become ready")?;
+    let prefix_marker = test.config.cwd.join("exec-argv-snapshot-prefix-ran");
+    let _ = fs::remove_file(prefix_marker.as_path());
+    let quoted_marker = shlex::try_quote(
+        prefix_marker
+            .as_path()
+            .to_str()
+            .context("snapshot prefix marker path is not UTF-8")?,
+    )
+    .context("quote snapshot prefix marker path")?;
+    let mut snapshot = fs::read_to_string(&snapshot_path)?;
+    assert!(
+        snapshot.contains("# Snapshot file"),
+        "expected a real legacy shell snapshot"
+    );
+    snapshot.push_str(&format!("\nprintf snapshot-prefix-ran > {quoted_marker}\n"));
+    fs::write(&snapshot_path, snapshot)?;
+
+    let literal_args = vec![
+        "two words".to_string(),
+        "$HOME".to_string(),
+        "| cat".to_string(),
+        "*.rs".to_string(),
+        "&& exit 99".to_string(),
+    ];
+    let argv = super::exec_argv_test_helper_argv(/*delay_ms*/ 0, literal_args.clone())?;
+    let call_id = "exec-argv-legacy-snapshot-prefix";
+    let args = json!({
+        "argv": argv.clone(),
+        "tty": false,
+        "yield_time_ms": 5_000,
+    });
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-snapshot-argv-1"),
+                ev_function_call(call_id, "exec_argv", &serde_json::to_string(&args)?),
+                ev_completed("resp-snapshot-argv-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-snapshot-argv", "done"),
+                ev_completed("resp-snapshot-argv-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "run exec_argv with a ready legacy shell snapshot",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    let begin = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::ExecCommandBegin(event) if event.call_id == call_id => Some(event.clone()),
+        _ => None,
+    })
+    .await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let outputs = collect_tool_outputs(
+        &request_log
+            .requests()
+            .iter()
+            .map(core_test_support::responses::ResponsesRequest::body_json)
+            .collect::<Vec<_>>(),
+    )?;
+    let output = outputs.get(call_id).context("missing exec_argv output")?;
+    assert_eq!(output.exit_code, Some(0));
+    assert_eq!(output.output.trim(), serde_json::to_string(&literal_args)?);
+    assert_eq!(begin.command, argv);
+    assert!(
+        fs::metadata(prefix_marker.as_path()).is_err(),
+        "argv launch must not execute the ready shell snapshot prefix"
     );
 
     Ok(())
