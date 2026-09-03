@@ -13,6 +13,7 @@ use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
 use crate::context::ContextualUserFragment;
+use crate::context::FinalAnswerRetry;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::drain_async_hook_results;
@@ -39,6 +40,7 @@ use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::skills::emit_explicit_skill_invocations;
+use crate::stream_events_utils::FinalAnswerItem;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::InFlightFuture;
 use crate::stream_events_utils::TurnItemContributorPolicy;
@@ -294,6 +296,7 @@ pub(crate) async fn run_turn(
     track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
 
     let mut last_agent_message: Option<String> = None;
+    let mut final_answer_retries = 0_u8;
     let mut stop_hook_active = false;
     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
     // many turns, from the perspective of the user, it is a single turn.
@@ -407,6 +410,8 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    final_answer_state,
+                    had_output_item,
                 } = sampling_request_output;
                 if model_needs_follow_up {
                     sess.input_queue
@@ -509,6 +514,22 @@ pub(crate) async fn run_turn(
                 }
 
                 if !needs_follow_up {
+                    if turn_context.mode() == ModeKind::Default
+                        && (matches!(final_answer_state, FinalAnswerState::EmptyOnly)
+                            || (matches!(final_answer_state, FinalAnswerState::NotSeen)
+                                && had_output_item))
+                        && final_answer_retries == 0
+                    {
+                        final_answer_retries += 1;
+                        let retry_prompt: ResponseItem =
+                            ContextualUserFragment::into(FinalAnswerRetry);
+                        sess.record_conversation_items(
+                            &turn_context,
+                            std::slice::from_ref(&retry_prompt),
+                        )
+                        .await;
+                        continue;
+                    }
                     last_agent_message = sampling_request_last_agent_message;
                     let stop_outcome = run_turn_stop_hooks(
                         &sess,
@@ -1621,6 +1642,16 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    final_answer_state: FinalAnswerState,
+    had_output_item: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum FinalAnswerState {
+    #[default]
+    NotSeen,
+    EmptyOnly,
+    NonEmptySeen,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2273,6 +2304,8 @@ async fn try_run_sampling_request(
     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
+    let mut final_answer_state = FinalAnswerState::NotSeen;
+    let mut had_output_item = false;
     let mut active_item: Option<TurnItem> = None;
     let mut active_tool_argument_diff_consumer: Option<(
         String,
@@ -2345,6 +2378,7 @@ async fn try_run_sampling_request(
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(mut item) => {
+                had_output_item = true;
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                     let call_id = match &item {
@@ -2446,12 +2480,21 @@ async fn try_run_sampling_request(
                 if let Some(agent_message) = output_result.last_agent_message {
                     last_agent_message = Some(agent_message);
                 }
+                final_answer_state = match (final_answer_state, output_result.final_answer) {
+                    (_, Some(FinalAnswerItem::NonEmpty)) => FinalAnswerState::NonEmptySeen,
+                    (FinalAnswerState::NotSeen, Some(FinalAnswerItem::Empty)) => {
+                        FinalAnswerState::EmptyOnly
+                    }
+                    (state, Some(FinalAnswerItem::Empty) | None) => state,
+                };
                 needs_follow_up |= output_result.needs_follow_up;
                 // todo: remove before stabilizing multi-agent v2
                 if preempt_for_mailbox_mail && sess.input_queue.has_pending_mailbox_items().await {
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        final_answer_state,
+                        had_output_item,
                     });
                 }
             }
@@ -2632,6 +2675,8 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    final_answer_state,
+                    had_output_item,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
