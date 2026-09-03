@@ -639,6 +639,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         max_context_window: None,
         auto_compact_token_limit: None,
         comp_hash: None,
+        supports_remote_compaction: true,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
     };
@@ -921,6 +922,7 @@ async fn remote_models_apply_legacy_instructions() -> Result<()> {
         max_context_window: None,
         auto_compact_token_limit: None,
         comp_hash: None,
+        supports_remote_compaction: true,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
     };
@@ -1495,6 +1497,7 @@ fn test_remote_model_with_policy(
         max_context_window: None,
         auto_compact_token_limit: None,
         comp_hash: None,
+        supports_remote_compaction: true,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
     }
