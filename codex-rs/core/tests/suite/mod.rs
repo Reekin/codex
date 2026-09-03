@@ -11,6 +11,19 @@ use ctor::ctor;
 
 pub(crate) const EXEC_ARGV_TEST_HELPER_ARG: &str = "--exec-argv-test-helper";
 
+pub(crate) fn exec_argv_test_helper_argv(
+    delay_ms: u64,
+    literal_args: impl IntoIterator<Item = String>,
+) -> std::io::Result<Vec<String>> {
+    let mut argv = vec![
+        std::env::current_exe()?.to_string_lossy().into_owned(),
+        EXEC_ARGV_TEST_HELPER_ARG.to_string(),
+        delay_ms.to_string(),
+    ];
+    argv.extend(literal_args);
+    Ok(argv)
+}
+
 fn maybe_run_exec_argv_test_helper() {
     let mut args = std::env::args();
     let _argv0 = args.next();
