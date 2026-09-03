@@ -905,7 +905,11 @@ async fn sandbox_denied_retry_uses_the_action_policy_and_reviewer() {
                 id: call_id.to_string(),
                 environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
                 command: vec!["echo".to_string(), "sandbox-retry".to_string()],
-                hook_command: "echo sandbox-retry".to_string(),
+                permission_request_payload:
+                    crate::tools::sandboxing::PermissionRequestPayload::bash(
+                        "echo sandbox-retry".to_string(),
+                        /*description*/ None,
+                    ),
                 cwd: request.cwd().clone(),
                 sandbox_permissions: SandboxPermissions::UseDefault,
                 additional_permissions: None,

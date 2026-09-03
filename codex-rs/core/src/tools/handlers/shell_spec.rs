@@ -114,6 +114,78 @@ pub(crate) fn create_exec_command_tool_with_environment_id(
     })
 }
 
+pub(crate) fn create_exec_argv_tool_with_environment_id(
+    options: CommandToolOptions,
+    include_environment_id: bool,
+) -> ToolSpec {
+    let yield_time_ms_description = if cfg!(windows) {
+        "Maximum time to wait before returning a session ID for a still-running command. Commands that finish sooner return immediately. For ordinary commands, omit this parameter to use the 10000 ms default. Effective range on Windows is 10000-30000 ms."
+    } else {
+        "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+    };
+    let mut properties = BTreeMap::from([
+        (
+            "argv".to_string(),
+            JsonSchema::array(
+                JsonSchema::string(Some(
+                    "One command argument. The first item is the program to execute.".to_string(),
+                )),
+                Some("Command argv vector to execute without shell interpretation.".to_string()),
+            ),
+        ),
+        (
+            "workdir".to_string(),
+            JsonSchema::string(Some(
+                "Working directory for the command. Defaults to the turn cwd.".to_string(),
+            )),
+        ),
+        (
+            "tty".to_string(),
+            JsonSchema::boolean(Some(
+                "True allocates a PTY for the command; false or omitted uses plain pipes."
+                    .to_string(),
+            )),
+        ),
+        (
+            "yield_time_ms".to_string(),
+            JsonSchema::number(Some(yield_time_ms_description.to_string())),
+        ),
+        (
+            "max_output_tokens".to_string(),
+            JsonSchema::number(Some(
+                "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."
+                    .to_string(),
+            )),
+        ),
+    ]);
+    if include_environment_id {
+        properties.insert(
+            "environment_id".to_string(),
+            JsonSchema::string(Some(
+                "Environment id from <environment_context>. Omit to use the primary environment."
+                    .to_string(),
+            )),
+        );
+    }
+    properties.extend(create_approval_parameters(
+        options.exec_permission_approvals_enabled,
+    ));
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "exec_argv".to_string(),
+        description: "Runs one external program with an argv vector and returns output or a session ID for ongoing interaction. This does not invoke a shell or interpret shell syntax; use exec_command for pipes, redirects, glob expansion, shell variables, shell builtins, or shell control flow."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["argv".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(unified_exec_output_schema()),
+    })
+}
+
 pub fn create_write_stdin_tool() -> ToolSpec {
     let properties = BTreeMap::from([
         (

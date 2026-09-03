@@ -489,7 +489,10 @@ async fn register_call_with_default_shell_trigger(
                 justification: None,
                 tty: None,
             },
-            command: "curl https://example.com".to_string(),
+            permission_request_payload: PermissionRequestPayload::bash(
+                "curl https://example.com".to_string(),
+                /*description*/ None,
+            ),
             environment_id: "local".to_string(),
             permission_profile: PermissionProfile::workspace_write(),
             cancellation_token: cancellation_token.clone(),
@@ -519,7 +522,10 @@ async fn active_call_preserves_triggering_command_context() {
             turn_id: "turn-1".to_string(),
             trigger: expected.clone(),
             tool_name: tool_name.clone(),
-            command: "curl https://example.com".to_string(),
+            permission_request_payload: PermissionRequestPayload::bash(
+                "curl https://example.com".to_string(),
+                /*description*/ None,
+            ),
             environment_id: "remote".to_string(),
             permission_profile: PermissionProfile::workspace_write(),
             cancellation_token: CancellationToken::new(),
@@ -533,7 +539,13 @@ async fn active_call_preserves_triggering_command_context() {
 
     assert_eq!(&call.trigger, &expected);
     assert_eq!(call.tool_name, tool_name);
-    assert_eq!(call.command, "curl https://example.com");
+    assert_eq!(
+        call.permission_request_payload,
+        PermissionRequestPayload::bash(
+            "curl https://example.com".to_string(),
+            /*description*/ None,
+        )
+    );
     assert_eq!(call.environment_id, "remote");
 }
 

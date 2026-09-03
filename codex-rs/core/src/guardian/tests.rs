@@ -2309,7 +2309,7 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
     guardian_nested_tool_names.sort_unstable();
     assert_eq!(
         guardian_nested_tool_names,
-        vec!["exec_command", "view_image", "write_stdin"]
+        vec!["exec_argv", "exec_command", "view_image", "write_stdin"]
     );
     let guardian_user_text = request.message_input_texts("user").join("\n");
     assert!(

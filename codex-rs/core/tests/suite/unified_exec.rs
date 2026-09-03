@@ -240,6 +240,330 @@ async fn submit_unified_exec_turn(
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_argv_preserves_literal_arguments_through_background_completion() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
+    let marker = test.config.cwd.join("exec-argv-shell-side-effect");
+    let _ = fs::remove_file(marker.as_path());
+    let literal_args = vec![
+        "two words".to_string(),
+        "$HOME".to_string(),
+        "| cat".to_string(),
+        "*.rs".to_string(),
+        format!("> {}", marker.as_path().display()),
+        "&& echo injected".to_string(),
+        "; exit 99".to_string(),
+    ];
+    let delay_ms = if cfg!(windows) { 12_000 } else { 750 };
+    let argv = super::exec_argv_test_helper_argv(delay_ms, literal_args.clone())?;
+    let start_call_id = "exec-argv-literal-start";
+    let poll_call_id = "exec-argv-literal-poll";
+    let start_args = json!({
+        "argv": argv.clone(),
+        "tty": false,
+        "yield_time_ms": 250,
+    });
+    let poll_args = json!({
+        "session_id": 1000,
+        "chars": "",
+        "yield_time_ms": 30_000,
+    });
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-1"),
+                ev_function_call(
+                    start_call_id,
+                    "exec_argv",
+                    &serde_json::to_string(&start_args)?,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-2"),
+                ev_function_call(
+                    poll_call_id,
+                    "write_stdin",
+                    &serde_json::to_string(&poll_args)?,
+                ),
+                ev_completed("resp-2"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-1", "done"),
+                ev_completed("resp-3"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "run the argv-native background process",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+
+    let mut begin_command = None;
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| match event {
+            EventMsg::ExecCommandBegin(event) if event.call_id == start_call_id => {
+                begin_command = Some(event.command.clone());
+                false
+            }
+            EventMsg::TurnComplete(_) => true,
+            _ => false,
+        },
+        Duration::from_secs(30),
+    )
+    .await;
+
+    let outputs = collect_tool_outputs(
+        &request_log
+            .requests()
+            .iter()
+            .map(core_test_support::responses::ResponsesRequest::body_json)
+            .collect::<Vec<_>>(),
+    )?;
+    let start_output = outputs
+        .get(start_call_id)
+        .expect("missing initial exec_argv output");
+    assert_eq!(start_output.process_id.as_deref(), Some("1000"));
+    assert_eq!(start_output.exit_code, None);
+    let poll_output = outputs
+        .get(poll_call_id)
+        .expect("missing write_stdin completion output");
+    assert_eq!(poll_output.process_id, None);
+    assert_eq!(poll_output.exit_code, Some(0));
+    assert_eq!(
+        poll_output.output.trim(),
+        serde_json::to_string(&literal_args)?
+    );
+    assert_eq!(begin_command, Some(argv));
+    assert!(
+        fs::metadata(marker.as_path()).is_err(),
+        "shell metacharacters must not create a side-effect file"
+    );
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_argv_skips_ready_legacy_shell_snapshot_prefix() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let shell_path = "/bin/bash".to_string();
+    let shell =
+        codex_core::shell::get_shell_by_model_provided_path(&std::path::PathBuf::from(&shell_path));
+    let mut builder = test_codex().with_user_shell(shell).with_config(|config| {
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should enable legacy shell snapshots");
+        config
+            .features
+            .disable(Feature::ShellSnapshotV2)
+            .expect("test config should disable in-memory shell snapshots");
+    });
+    let test = builder.build(&server).await?;
+    let snapshot_path = tokio::time::timeout(Duration::from_secs(10), async {
+        let snapshot_dir = test.home.path().join("shell_snapshots");
+        loop {
+            if let Ok(entries) = fs::read_dir(&snapshot_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(OsStr::to_str) == Some("sh") {
+                        return path;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .context("legacy shell snapshot did not become ready")?;
+    let expected_marker = test.config.cwd.join("exec-argv-command-ran");
+    let forbidden_marker = test.config.cwd.join("exec-argv-snapshot-prefix-ran");
+    let _ = fs::remove_file(expected_marker.as_path());
+    let _ = fs::remove_file(forbidden_marker.as_path());
+    let quoted_forbidden_marker = shlex::try_quote(
+        forbidden_marker
+            .as_path()
+            .to_str()
+            .context("snapshot prefix marker path is not UTF-8")?,
+    )
+    .context("quote snapshot prefix marker path")?;
+    let mut snapshot = fs::read_to_string(&snapshot_path)?;
+    assert!(
+        snapshot.contains("# Snapshot file"),
+        "expected a real legacy shell snapshot"
+    );
+    snapshot.push_str(&format!(
+        "\nprintf snapshot-prefix-ran > {quoted_forbidden_marker}\n"
+    ));
+    fs::write(&snapshot_path, snapshot)?;
+
+    let quoted_expected_marker = shlex::try_quote(
+        expected_marker
+            .as_path()
+            .to_str()
+            .context("expected marker path is not UTF-8")?,
+    )
+    .context("quote expected marker path")?;
+    let expected_output = "exec-argv-command-output|argc=0|argv=";
+    let command = format!(
+        "printf expected > {quoted_expected_marker}; printf 'exec-argv-command-output|argc=%s|argv=%s' \"$#\" \"$*\""
+    );
+    let argv = vec![shell_path, "-lc".to_string(), command];
+    let call_id = "exec-argv-legacy-snapshot-prefix";
+    let args = json!({
+        "argv": argv.clone(),
+        "tty": false,
+        "yield_time_ms": 5_000,
+    });
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-snapshot-argv-1"),
+                ev_function_call(call_id, "exec_argv", &serde_json::to_string(&args)?),
+                ev_completed("resp-snapshot-argv-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-snapshot-argv", "done"),
+                ev_completed("resp-snapshot-argv-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "run exec_argv with a ready legacy shell snapshot",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    let begin = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::ExecCommandBegin(event) if event.call_id == call_id => Some(event.clone()),
+        _ => None,
+    })
+    .await;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let outputs = collect_tool_outputs(
+        &request_log
+            .requests()
+            .iter()
+            .map(core_test_support::responses::ResponsesRequest::body_json)
+            .collect::<Vec<_>>(),
+    )?;
+    let output = outputs.get(call_id).context("missing exec_argv output")?;
+    assert_eq!(output.exit_code, Some(0));
+    assert_eq!(output.output.trim(), expected_output);
+    assert_eq!(begin.command, argv);
+    assert_eq!(fs::read_to_string(expected_marker.as_path())?, "expected");
+    assert!(
+        fs::metadata(forbidden_marker.as_path()).is_err(),
+        "argv launch must not execute the ready shell snapshot prefix"
+    );
+
+    Ok(())
+}
+
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_argv_reports_pathext_candidate_without_running_cmd_shim() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should enable shell snapshots");
+        config
+            .features
+            .enable(Feature::ShellSnapshotV2)
+            .expect("test config should enable in-memory shell snapshots");
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let shim_base = "exec-argv-pathext-no-shell";
+    let shim_path = test.config.cwd.join(format!("{shim_base}.CMD"));
+    let marker = test.config.cwd.join("exec-argv-pathext-shim-ran");
+    let _ = fs::remove_file(marker.as_path());
+    fs::write(
+        shim_path.as_path(),
+        format!("@echo off\r\necho executed>\"{}\"\r\n", marker.display()),
+    )?;
+
+    let argv0 = format!(".\\{shim_base}");
+    let argv = vec![
+        argv0.clone(),
+        "$HOME | cat > injected && exit 99".to_string(),
+    ];
+    let call_id = "exec-argv-pathext-create-process-failure";
+    let args = json!({
+        "argv": argv,
+        "tty": false,
+        "yield_time_ms": 1_000,
+    });
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-pathext-1"),
+                ev_function_call(call_id, "exec_argv", &serde_json::to_string(&args)?),
+                ev_completed("resp-pathext-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("msg-pathext", "done"),
+                ev_completed("resp-pathext-2"),
+            ]),
+        ],
+    )
+    .await;
+
+    submit_unified_exec_turn(
+        &test,
+        "try the argv-native command shim without a shell",
+        PermissionProfile::Disabled,
+    )
+    .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let mut expected_candidate = test.config.cwd.as_path().join(&argv0);
+    expected_candidate.set_file_name(format!("{shim_base}.CMD"));
+    let output = request_log
+        .requests()
+        .iter()
+        .find_map(|request| request.function_call_output_text(call_id))
+        .context("missing exec_argv create-process failure output")?;
+    assert!(output.contains("does not ask a shell to resolve PATHEXT"));
+    assert!(
+        output.contains(&expected_candidate.display().to_string()),
+        "expected exact PATHEXT candidate {expected_candidate:?}, got {output:?}"
+    );
+    assert!(
+        fs::metadata(marker.as_path()).is_err(),
+        "exec_argv must not execute a discovered .CMD shim"
+    );
+
+    Ok(())
+}
+
 async fn create_workspace_directory(
     test: &TestCodex,
     rel_path: impl AsRef<std::path::Path>,

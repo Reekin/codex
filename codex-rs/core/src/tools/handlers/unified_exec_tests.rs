@@ -402,6 +402,104 @@ async fn exec_command_pre_tool_use_payload_uses_raw_command() {
 }
 
 #[tokio::test]
+async fn exec_argv_pre_tool_use_payload_uses_argv_and_display_command() {
+    let invocation = invocation_for_payload(
+        "exec_argv",
+        "call-argv",
+        ToolPayload::Function {
+            arguments: serde_json::json!({ "argv": ["printf", "%s", "two words"] }).to_string(),
+        },
+    )
+    .await;
+
+    assert_eq!(
+        ExecArgvHandler::default().pre_tool_use_payload(&invocation),
+        Some(crate::tools::registry::PreToolUsePayload {
+            tool_name: HookToolName::new("exec_argv"),
+            tool_input: serde_json::json!({
+                "command": "printf '%s' 'two words'",
+                "argv": ["printf", "%s", "two words"],
+            }),
+        })
+    );
+}
+
+#[tokio::test]
+async fn exec_argv_hook_rewrite_requires_argv_array() {
+    let invocation = invocation_for_payload(
+        "exec_argv",
+        "call-argv-rewrite",
+        ToolPayload::Function {
+            arguments: serde_json::json!({ "argv": ["printf", "one"] }).to_string(),
+        },
+    )
+    .await;
+    let err = match ExecArgvHandler::default()
+        .with_updated_hook_input(invocation, serde_json::json!({ "command": "printf two" }))
+    {
+        Ok(_) => panic!("command-only rewrite must fail"),
+        Err(err) => err,
+    };
+
+    assert!(err.to_string().contains("without array field `argv`"));
+}
+
+#[tokio::test]
+async fn exec_argv_hook_rewrite_updates_only_argv() {
+    let invocation = invocation_for_payload(
+        "exec_argv",
+        "call-argv-rewrite",
+        ToolPayload::Function {
+            arguments: serde_json::json!({
+                "argv": ["printf", "one"],
+                "workdir": "original",
+            })
+            .to_string(),
+        },
+    )
+    .await;
+    let updated = ExecArgvHandler::default()
+        .with_updated_hook_input(
+            invocation,
+            serde_json::json!({
+                "argv": ["printf", "two words"],
+                "workdir": "ignored",
+            }),
+        )
+        .expect("argv rewrite should succeed");
+    let ToolPayload::Function { arguments } = updated.payload else {
+        panic!("expected function payload");
+    };
+    let value: serde_json::Value = serde_json::from_str(&arguments).expect("valid json");
+
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "argv": ["printf", "two words"],
+            "workdir": "original",
+        })
+    );
+}
+
+#[test]
+fn windows_pathext_candidates_find_cmd_shim_without_executing_it() -> anyhow::Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let shim = temp_dir.path().join("npx.CMD");
+    std::fs::write(&shim, "")?;
+
+    assert_eq!(
+        exec_argv::windows_pathext_candidates(
+            "npx",
+            temp_dir.path(),
+            vec![temp_dir.path().to_path_buf()],
+            ".COM;.EXE;.BAT;.CMD",
+        ),
+        vec![shim]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn exec_command_pre_tool_use_payload_skips_write_stdin() {
     let payload = ToolPayload::Function {
         arguments: serde_json::json!({ "chars": "echo hi" }).to_string(),
@@ -442,7 +540,10 @@ async fn exec_command_post_tool_use_payload_uses_output_for_noninteractive_one_s
         exit_code: Some(0),
         original_token_count: None,
         output_omitted_bytes: None,
-        hook_command: Some("echo three".to_string()),
+        hook_metadata: Some(crate::tools::sandboxing::PermissionRequestPayload::bash(
+            "echo three".to_string(),
+            /*description*/ None,
+        )),
     };
     let invocation = invocation_for_payload("exec_command", "call-43", payload).await;
     let handler = ExecCommandHandler::default();
@@ -473,7 +574,10 @@ async fn exec_command_post_tool_use_payload_uses_output_for_interactive_completi
         exit_code: Some(0),
         original_token_count: None,
         output_omitted_bytes: None,
-        hook_command: Some("echo three".to_string()),
+        hook_metadata: Some(crate::tools::sandboxing::PermissionRequestPayload::bash(
+            "echo three".to_string(),
+            /*description*/ None,
+        )),
     };
     let invocation = invocation_for_payload("exec_command", "call-44", payload).await;
     let handler = ExecCommandHandler::default();
@@ -505,7 +609,10 @@ async fn exec_command_post_tool_use_payload_skips_running_sessions() {
         exit_code: None,
         original_token_count: None,
         output_omitted_bytes: None,
-        hook_command: Some("echo three".to_string()),
+        hook_metadata: Some(crate::tools::sandboxing::PermissionRequestPayload::bash(
+            "echo three".to_string(),
+            /*description*/ None,
+        )),
     };
     let invocation = invocation_for_payload("exec_command", "call-45", payload).await;
     let handler = ExecCommandHandler::default();
@@ -532,7 +639,10 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
         exit_code: Some(0),
         original_token_count: None,
         output_omitted_bytes: None,
-        hook_command: Some("sleep 1; echo finished".to_string()),
+        hook_metadata: Some(crate::tools::sandboxing::PermissionRequestPayload::bash(
+            "sleep 1; echo finished".to_string(),
+            /*description*/ None,
+        )),
     };
     let invocation = invocation_for_payload("write_stdin", "write-stdin-call", payload).await;
     let handler = WriteStdinHandler;
@@ -544,6 +654,45 @@ async fn write_stdin_post_tool_use_payload_uses_original_exec_call_id_and_comman
             tool_use_id: "exec-call-45".to_string(),
             tool_input: serde_json::json!({ "command": "sleep 1; echo finished" }),
             tool_response: serde_json::json!("finished\n"),
+        })
+    );
+}
+
+#[tokio::test]
+async fn write_stdin_post_tool_use_payload_preserves_exec_argv_contract_on_completion() {
+    let payload = ToolPayload::Function {
+        arguments: serde_json::json!({ "session_id": 45, "chars": "" }).to_string(),
+    };
+    let output = ExecCommandToolOutput {
+        event_call_id: "exec-argv-call".to_string(),
+        chunk_id: "chunk-argv".to_string(),
+        wall_time: std::time::Duration::from_millis(498),
+        raw_output: b"literal\n".to_vec(),
+        truncation_policy: TEST_TRUNCATION_POLICY,
+        max_output_tokens: None,
+        process_id: None,
+        exit_code: Some(0),
+        original_token_count: None,
+        output_omitted_bytes: None,
+        hook_metadata: Some(
+            crate::tools::sandboxing::PermissionRequestPayload::exec_argv(
+                "printf literal".to_string(),
+                vec!["printf".to_string(), "literal".to_string()],
+            ),
+        ),
+    };
+    let invocation = invocation_for_payload("write_stdin", "write-stdin-call", payload).await;
+
+    assert_eq!(
+        WriteStdinHandler.post_tool_use_payload(&invocation, &output),
+        Some(crate::tools::registry::PostToolUsePayload {
+            tool_name: HookToolName::new("exec_argv"),
+            tool_use_id: "exec-argv-call".to_string(),
+            tool_input: serde_json::json!({
+                "command": "printf literal",
+                "argv": ["printf", "literal"],
+            }),
+            tool_response: serde_json::json!("literal\n"),
         })
     );
 }
@@ -564,7 +713,10 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
         exit_code: Some(0),
         original_token_count: None,
         output_omitted_bytes: None,
-        hook_command: Some("sleep 2; echo alpha".to_string()),
+        hook_metadata: Some(crate::tools::sandboxing::PermissionRequestPayload::bash(
+            "sleep 2; echo alpha".to_string(),
+            /*description*/ None,
+        )),
     };
     let output_b = ExecCommandToolOutput {
         event_call_id: "exec-call-b".to_string(),
@@ -577,7 +729,10 @@ async fn write_stdin_post_tool_use_payload_keeps_parallel_session_metadata_separ
         exit_code: Some(0),
         original_token_count: None,
         output_omitted_bytes: None,
-        hook_command: Some("sleep 1; echo beta".to_string()),
+        hook_metadata: Some(crate::tools::sandboxing::PermissionRequestPayload::bash(
+            "sleep 1; echo beta".to_string(),
+            /*description*/ None,
+        )),
     };
     let invocation_b = invocation_for_payload("write_stdin", "write-call-b", payload.clone()).await;
     let invocation_a = invocation_for_payload("write_stdin", "write-call-a", payload).await;

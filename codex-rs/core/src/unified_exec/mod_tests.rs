@@ -139,7 +139,10 @@ async fn exec_command_with_tty(
             process_id,
             cwd: cwd.clone().into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            hook_command: cmd.to_string(),
+            hook_metadata: crate::tools::sandboxing::PermissionRequestPayload::bash(
+                cmd.to_string(),
+                /*description*/ None,
+            ),
             tty,
             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             permissions: TerminalPermissions::for_launch(
@@ -208,7 +211,10 @@ async fn exec_command_with_tty(
         exit_code,
         original_token_count: Some(original_token_count),
         output_omitted_bytes,
-        hook_command: Some(cmd.to_string()),
+        hook_metadata: Some(crate::tools::sandboxing::PermissionRequestPayload::bash(
+            cmd.to_string(),
+            /*description*/ None,
+        )),
     })
 }
 
@@ -613,7 +619,10 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
             process_id,
             cwd: cwd.into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            hook_command: "sleep 60".to_string(),
+            hook_metadata: crate::tools::sandboxing::PermissionRequestPayload::bash(
+                "sleep 60".to_string(),
+                /*description*/ None,
+            ),
             tty: true,
             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             permissions: TerminalPermissions::for_launch(
@@ -696,7 +705,10 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
             process_id,
             cwd: cwd.into(),
             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            hook_command: "sleep 60".to_string(),
+            hook_metadata: crate::tools::sandboxing::PermissionRequestPayload::bash(
+                "sleep 60".to_string(),
+                /*description*/ None,
+            ),
             tty: true,
             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             permissions: TerminalPermissions::for_launch(
