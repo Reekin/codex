@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::ForkedHistoryBoundary;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
 use codex_history::ResponseItemEnvelope;
@@ -384,12 +385,14 @@ impl Session {
                             .filter(|item| {
                                 matches!(
                                     &item.item,
-                                    ResponseItem::Message { content, .. }
-                                        if content.iter().any(|item| matches!(
-                                            item,
-                                            ContentItem::InputText { text }
-                                                if text.contains("forked parent conversation history begins")
-                                        ))
+                                    ResponseItem::Message {
+                                        internal_chat_message_metadata_passthrough: Some(metadata),
+                                        ..
+                                    } if metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
+                                        kinds.iter().any(
+                                            ForkedHistoryBoundary::matches_content_kind,
+                                        )
+                                    })
                                 )
                             })
                             .cloned()
