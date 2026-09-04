@@ -6,6 +6,9 @@ use super::thread_input::can_accept_direct_input;
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use crate::error_code::method_not_found;
+use codex_app_server_protocol::ChatTreeChange;
+use codex_app_server_protocol::ChatTreeChangeKind;
+use codex_app_server_protocol::ChatTreeUpdatedNotification;
 use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::ThreadRevertParams;
@@ -578,7 +581,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        let (response, thread_id) = self
+        let (response, thread_id, chat_tree_updated) = self
             .thread_revert_response(
                 &request_id,
                 params,
@@ -591,6 +594,9 @@ impl ThreadRequestProcessor {
             .send_server_notification(ServerNotification::ThreadReverted(
                 ThreadRevertedNotification { thread_id },
             ))
+            .await;
+        self.outgoing
+            .send_server_notification(ServerNotification::ChatTreeUpdated(chat_tree_updated))
             .await;
         Ok(None)
     }
@@ -2090,7 +2096,8 @@ impl ThreadRequestProcessor {
         params: ThreadRevertParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
-    ) -> Result<(ThreadRevertResponse, String), JSONRPCErrorError> {
+    ) -> Result<(ThreadRevertResponse, String, ChatTreeUpdatedNotification), JSONRPCErrorError>
+    {
         let _thread_list_state_permit = self.acquire_thread_list_state_permit().await?;
         let ThreadRevertParams {
             thread_id,
@@ -2196,7 +2203,32 @@ impl ThreadRequestProcessor {
             )
             .await?;
         revert_result?;
-        Ok((response, thread_id.to_string()))
+        let chat_tree = self
+            .thread_manager
+            .get_thread(thread_id)
+            .await
+            .map_err(|err| {
+                internal_error(format!(
+                    "thread {thread_id} missing after successful revert reload: {err}"
+                ))
+            })?
+            .chat_tree_projection()
+            .await;
+        let thread_id = thread_id.to_string();
+        Ok((
+            response,
+            thread_id.clone(),
+            ChatTreeUpdatedNotification {
+                thread_id,
+                change: ChatTreeChange {
+                    r#type: ChatTreeChangeKind::TreeRebuilt,
+                    node_id: None,
+                },
+                chat_tree: Box::new(crate::chat_tree_projection::chat_tree_projection_from_core(
+                    chat_tree,
+                )),
+            },
+        ))
     }
 
     async fn reload_paginated_thread(

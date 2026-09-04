@@ -1,11 +1,14 @@
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::TestAppServer;
+use app_test_support::create_escalated_command_execution_sse_response;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
+use codex_app_server_protocol::ChatTreeChangeKind;
 use codex_app_server_protocol::ChatTreeReadResponse;
 use codex_app_server_protocol::ChatTreeSetCurrentResponse;
+use codex_app_server_protocol::ChatTreeUpdatedNotification;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
@@ -22,6 +25,7 @@ use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -111,6 +115,135 @@ async fn chat_tree_read_returns_stable_error_kinds() -> Result<()> {
         &mut app,
         "00000000-0000-4000-8000-000000000000",
         "threadNotMaterialized",
+    )
+    .await?;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn chat_tree_set_current_exposes_public_errors_and_updated_notification() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    let blocked_command = vec![
+        "powershell".to_string(),
+        "-Command".to_string(),
+        "Start-Sleep -Seconds 10".to_string(),
+    ];
+    #[cfg(not(target_os = "windows"))]
+    let blocked_command = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        "import time; time.sleep(10)".to_string(),
+    ];
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response("first answer")?,
+        create_escalated_command_execution_sse_response(
+            blocked_command,
+            /*workdir*/ None,
+            Some(10_000),
+            "blocked-child-task",
+        )?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+    let config_path = codex_home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?
+        .replace(
+            "approval_policy = \"never\"",
+            "approval_policy = \"on-request\"",
+        )
+        .replace(
+            "sandbox_mode = \"danger-full-access\"",
+            "sandbox_mode = \"read-only\"",
+        );
+    std::fs::write(config_path, config)?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let thread_id = start_thread(&mut app).await?;
+    start_completed_turn(&mut app, &thread_id, "first prompt").await?;
+    let first_tree = read_chat_tree(&mut app, &thread_id).await?;
+    let node_id = first_tree
+        .chat_tree
+        .current_node_id
+        .clone()
+        .expect("first turn should create a chat tree node");
+
+    assert_chat_tree_set_current_error_kind(
+        &mut app,
+        &thread_id,
+        "missing-node",
+        Some(first_tree.chat_tree.revision),
+        "unknownNode",
+    )
+    .await?;
+    let stale_revision = first_tree.chat_tree.revision.saturating_sub(1);
+    let conflict = assert_chat_tree_set_current_error_kind(
+        &mut app,
+        &thread_id,
+        &node_id,
+        Some(stale_revision),
+        "revisionConflict",
+    )
+    .await?;
+    assert_eq!(
+        conflict.error.data,
+        Some(json!({
+            "kind": "revisionConflict",
+            "threadId": thread_id,
+            "nodeId": node_id,
+            "expectedRevision": stale_revision,
+            "actualRevision": first_tree.chat_tree.revision,
+        }))
+    );
+
+    let switched = set_current_chat_tree_node(
+        &mut app,
+        &thread_id,
+        &node_id,
+        Some(first_tree.chat_tree.revision),
+    )
+    .await?;
+    let updated = read_chat_tree_updated(&mut app, ChatTreeChangeKind::CurrentNodeChanged).await?;
+    assert_eq!(updated.thread_id, thread_id);
+    assert_eq!(updated.change.node_id.as_deref(), Some(node_id.as_str()));
+    assert_eq!(updated.chat_tree, switched.chat_tree);
+
+    let running: TurnStartResponse = app
+        .request(
+            |request_id| codex_app_server_protocol::ClientRequest::TurnStart {
+                request_id,
+                params: TurnStartParams {
+                    thread_id: thread_id.clone(),
+                    input: vec![UserInput::Text {
+                        text: "block this turn".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    ..Default::default()
+                },
+            },
+        )
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        app.read_stream_until_request_message(),
+    )
+    .await??;
+    let running_tree = read_chat_tree(&mut app, &thread_id).await?;
+    assert_chat_tree_set_current_error_kind(
+        &mut app,
+        &thread_id,
+        &node_id,
+        Some(running_tree.chat_tree.revision),
+        "taskRunning",
+    )
+    .await?;
+    app.interrupt_turn_and_wait_for_aborted(
+        thread_id.clone(),
+        running.turn.id,
+        DEFAULT_READ_TIMEOUT,
     )
     .await?;
 
@@ -271,6 +404,55 @@ async fn assert_chat_tree_read_error_kind(
         }))
     );
     Ok(())
+}
+
+async fn assert_chat_tree_set_current_error_kind(
+    app: &mut TestAppServer,
+    thread_id: &str,
+    node_id: &str,
+    expected_revision: Option<u64>,
+    expected_kind: &str,
+) -> Result<JSONRPCError> {
+    let request_id = app
+        .send_raw_request(
+            "chatTree/setCurrent",
+            Some(json!({
+                "threadId": thread_id,
+                "nodeId": node_id,
+                "expectedRevision": expected_revision,
+            })),
+        )
+        .await?;
+    let error: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        app.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(
+        error
+            .error
+            .data
+            .as_ref()
+            .and_then(|data| data["kind"].as_str()),
+        Some(expected_kind)
+    );
+    Ok(error)
+}
+
+async fn read_chat_tree_updated(
+    app: &mut TestAppServer,
+    expected_kind: ChatTreeChangeKind,
+) -> Result<ChatTreeUpdatedNotification> {
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let notification: ChatTreeUpdatedNotification =
+                app.read_notification("chatTree/updated").await?;
+            if notification.change.r#type == expected_kind {
+                break Ok::<_, anyhow::Error>(notification);
+            }
+        }
+    })
+    .await?
 }
 
 fn turn_ids(turns: &[codex_app_server_protocol::Turn]) -> Vec<String> {

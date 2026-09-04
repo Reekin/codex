@@ -1,6 +1,11 @@
 use super::*;
+use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
+use codex_app_server_protocol::ChatTreeChange;
+use codex_app_server_protocol::ChatTreeChangeKind;
 use codex_app_server_protocol::ChatTreeNode;
 use codex_app_server_protocol::ChatTreeNodeStatus;
+use codex_app_server_protocol::ChatTreeUpdatedNotification;
+use codex_app_server_protocol::ServerNotification;
 use insta::assert_snapshot;
 use tokio::sync::mpsc::unbounded_channel;
 
@@ -95,5 +100,61 @@ fn chat_tree_accept_uses_selected_node_and_projection_revision() {
             node_id,
             expected_revision: Some(8),
         })) if node_id == "node-c"
+    ));
+}
+
+#[tokio::test]
+async fn chat_tree_open_rejects_while_task_is_running() {
+    let (mut chat, _sender, mut events, _operations) = make_chatwidget_manual_with_sender().await;
+    chat.on_task_started();
+
+    chat.open_chat_tree_popup();
+
+    let history = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(
+                cell.display_lines(/*width*/ 100)
+                    .into_iter()
+                    .map(|line| line.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        history.contains("Cannot switch chat tree nodes while a task is running."),
+        "{history}"
+    );
+}
+
+#[tokio::test]
+async fn current_node_update_requests_transcript_refresh() {
+    let (mut chat, _sender, mut events, _operations) = make_chatwidget_manual_with_sender().await;
+    chat.set_chat_tree_projection(projection());
+    let mut updated_projection = projection();
+    updated_projection.revision += 1;
+    updated_projection.current_node_id = Some("node-c".to_string());
+
+    chat.handle_server_notification(
+        ServerNotification::ChatTreeUpdated(ChatTreeUpdatedNotification {
+            thread_id: "00000000-0000-4000-8000-000000000001".to_string(),
+            change: ChatTreeChange {
+                r#type: ChatTreeChangeKind::CurrentNodeChanged,
+                node_id: Some("node-c".to_string()),
+            },
+            chat_tree: Box::new(updated_projection.clone()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(matches!(
+        events.try_recv(),
+        Ok(AppEvent::RefreshChatTreeTranscript {
+            thread_id,
+            chat_tree,
+        }) if thread_id.to_string() == "00000000-0000-4000-8000-000000000001"
+            && chat_tree == updated_projection
     ));
 }

@@ -69,6 +69,7 @@ use codex_thread_store::LocalThreadStoreConfig;
 use codex_thread_store::PersistContext;
 use codex_thread_store::ThreadStore;
 use codex_utils_path_uri::PathUri;
+use core_test_support::responses;
 use core_test_support::responses::strip_response_item_ids;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -722,6 +723,138 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
         history.raw_items(),
         &communication
     ));
+}
+
+#[tokio::test]
+async fn v2_spawn_communication_appends_child_chat_tree_node_across_reload() {
+    let server = responses::start_mock_server().await;
+    let _response_log = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                responses::ev_response_created("parent-response"),
+                responses::ev_assistant_message("parent-answer", "parent complete"),
+                responses::ev_completed("parent-response"),
+            ]),
+            responses::sse(vec![
+                responses::ev_response_created("child-response"),
+                responses::ev_assistant_message("child-answer", "child complete"),
+                responses::ev_completed("child-response"),
+            ]),
+        ],
+    )
+    .await;
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.chat_tree_summaries_enabled = false;
+    config.multi_agent_v2.max_concurrent_threads_per_session = 3;
+    let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+
+    harness
+        .control
+        .send_input(
+            parent_thread_id,
+            text_input("parent task"),
+            Default::default(),
+        )
+        .await
+        .expect("parent turn should start");
+    let parent_projection = timeout(Duration::from_secs(25), async {
+        loop {
+            let projection = parent_thread.chat_tree_projection().await;
+            if projection.nodes.len() == 1
+                && projection.nodes[0].status
+                    == codex_protocol::protocol::ChatTreeNodeStatus::Completed
+            {
+                break projection;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("parent chat tree node should complete");
+    let parent_node_id = parent_projection.nodes[0].node_id.clone();
+    let spawn_source = thread_spawn_source(
+        parent_thread_id,
+        &parent_thread.session_source,
+        /*depth*/ 1,
+        /*agent_role*/ None,
+        Some("worker".to_string()),
+    )
+    .expect("thread spawn source");
+    let recipient = spawn_source.get_agent_path().expect("child agent path");
+    let child = harness
+        .control
+        .spawn_agent_with_communication(
+            config.clone(),
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                recipient,
+                Vec::new(),
+                "child task".to_string(),
+                /*trigger_turn*/ true,
+            ),
+            AgentCommunicationContext::new(AgentCommunicationKind::Spawn, parent_thread_id),
+            Some(spawn_source),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some("spawn-call-chat-tree".to_string()),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                parent_thread_id: Some(parent_thread_id),
+                parent_turn_id: Some(parent_node_id.clone()),
+                root_turn_id: Some(parent_node_id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("V2 child spawn should succeed");
+    let child_thread = harness
+        .manager
+        .get_thread(child.thread_id)
+        .await
+        .expect("child thread should be registered");
+    let live_projection = timeout(Duration::from_secs(25), async {
+        loop {
+            let projection = child_thread.chat_tree_projection().await;
+            if projection.nodes.len() == 2
+                && projection.nodes[1].status
+                    == codex_protocol::protocol::ChatTreeNodeStatus::Completed
+            {
+                break projection;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("child-local chat tree node should complete");
+    assert_eq!(
+        live_projection.nodes[1].parent_node_id.as_deref(),
+        Some(parent_node_id.as_str())
+    );
+
+    child_thread
+        .shutdown_and_wait()
+        .await
+        .expect("child thread should shut down");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&child.thread_id)
+            .await
+            .is_some()
+    );
+    harness
+        .control
+        .ensure_v2_agent_loaded(config, child.thread_id, /*parent*/ None)
+        .await
+        .expect("child should reload from durable history");
+    let reloaded_child = harness
+        .manager
+        .get_thread(child.thread_id)
+        .await
+        .expect("reloaded child should be registered");
+    assert_eq!(reloaded_child.chat_tree_projection().await, live_projection);
 }
 
 #[tokio::test]

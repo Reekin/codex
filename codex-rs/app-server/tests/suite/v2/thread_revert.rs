@@ -6,6 +6,8 @@ use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_request_user_input_sse_response;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::ChatTreeChangeKind;
+use codex_app_server_protocol::ChatTreeUpdatedNotification;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::InitializeCapabilities;
@@ -271,6 +273,19 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
     )
     .await??;
     assert_eq!(reverted.thread_id, thread.id);
+    let rebuilt: ChatTreeUpdatedNotification = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let notification: ChatTreeUpdatedNotification =
+                mcp.read_notification("chatTree/updated").await?;
+            if notification.change.r#type == ChatTreeChangeKind::TreeRebuilt {
+                break Ok::<_, anyhow::Error>(notification);
+            }
+        }
+    })
+    .await??;
+    assert_eq!(rebuilt.thread_id, thread.id);
+    assert_eq!(rebuilt.change.node_id, None);
+    assert_eq!(rebuilt.chat_tree.visible_turn_ids.first(), turn_ids.first());
 
     assert_eq!(reverted_thread.id, thread.id);
     assert!(reverted_thread.turns.is_empty());
