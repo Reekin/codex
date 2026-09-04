@@ -4660,10 +4660,12 @@ async fn auto_compact_counts_encrypted_reasoning_before_last_user() {
 
     let first_turn = sse(vec![
         ev_reasoning_item("pre-reasoning", &["pre"], &[&pre_last_reasoning_content]),
+        ev_assistant_message("m1", "FIRST_FINAL"),
         ev_completed_with_tokens("r1", /*total_tokens*/ 10),
     ]);
     let second_turn = sse(vec![
         ev_reasoning_item("post-reasoning", &["post"], &[&post_last_reasoning_content]),
+        ev_assistant_message("m2", "SECOND_FINAL"),
         ev_completed_with_tokens("r2", /*total_tokens*/ 80),
     ]);
     let third_turn = sse(vec![
