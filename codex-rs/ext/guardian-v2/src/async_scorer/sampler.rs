@@ -388,7 +388,8 @@ impl LunaSampler {
                 TransportError::RetryLimit
                 | TransportError::Timeout
                 | TransportError::Connection(_)
-                | TransportError::Network(_),
+                | TransportError::Network(_)
+                | TransportError::SlowUpload { .. },
             )) => true,
             LunaSamplerError::Api(ApiError::Transport(TransportError::Http { status, .. }))
             | LunaSamplerError::Api(ApiError::Api { status, .. }) => {
