@@ -366,6 +366,12 @@ impl TestCodexBuilder {
         })
     }
 
+    pub fn with_chat_tree_summaries(self) -> Self {
+        self.with_config(|config| {
+            config.chat_tree_summaries_enabled = true;
+        })
+    }
+
     pub fn with_history_mode(mut self, history_mode: ThreadHistoryMode) -> Self {
         self.history_mode = Some(history_mode);
         self
@@ -1346,6 +1352,7 @@ pub fn test_codex() -> TestCodexBuilder {
                 .features
                 .disable(Feature::ShellSnapshot)
                 .expect("test config should allow ShellSnapshot override");
+            config.chat_tree_summaries_enabled = false;
         })],
         auth: CodexAuth::from_api_key("dummy"),
         pre_build_hooks: vec![],

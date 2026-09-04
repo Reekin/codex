@@ -1,0 +1,160 @@
+use super::*;
+use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
+use codex_app_server_protocol::ChatTreeChange;
+use codex_app_server_protocol::ChatTreeChangeKind;
+use codex_app_server_protocol::ChatTreeNode;
+use codex_app_server_protocol::ChatTreeNodeStatus;
+use codex_app_server_protocol::ChatTreeUpdatedNotification;
+use codex_app_server_protocol::ServerNotification;
+use insta::assert_snapshot;
+use tokio::sync::mpsc::unbounded_channel;
+
+fn projection() -> ChatTreeProjection {
+    ChatTreeProjection {
+        version: 1,
+        revision: 8,
+        current_node_id: Some("node-d".to_string()),
+        visible_node_ids: vec!["node-a".to_string(), "node-d".to_string()],
+        visible_turn_ids: vec!["turn-a".to_string(), "turn-d".to_string()],
+        nodes: vec![
+            ChatTreeNode {
+                node_id: "node-a".to_string(),
+                parent_node_id: None,
+                turn_id: Some("turn-a".to_string()),
+                order: 0,
+                status: ChatTreeNodeStatus::Completed,
+                summary: Some("Inspect the project and identify the migration surface".to_string()),
+            },
+            ChatTreeNode {
+                node_id: "node-b".to_string(),
+                parent_node_id: Some("node-a".to_string()),
+                turn_id: Some("turn-b".to_string()),
+                order: 1,
+                status: ChatTreeNodeStatus::Completed,
+                summary: Some("Implement protocol and core adapters".to_string()),
+            },
+            ChatTreeNode {
+                node_id: "node-c".to_string(),
+                parent_node_id: Some("node-b".to_string()),
+                turn_id: Some("turn-c".to_string()),
+                order: 2,
+                status: ChatTreeNodeStatus::Interrupted,
+                summary: Some("Turn 3 · interrupted".to_string()),
+            },
+            ChatTreeNode {
+                node_id: "node-d".to_string(),
+                parent_node_id: Some("node-a".to_string()),
+                turn_id: Some("turn-d".to_string()),
+                order: 3,
+                status: ChatTreeNodeStatus::Completed,
+                summary: Some("Add app-server RPC and TUI validation".to_string()),
+            },
+        ],
+    }
+}
+
+fn render_view(width: u16) -> Buffer {
+    let (tx, _rx) = unbounded_channel::<AppEvent>();
+    let state = ChatTreeUiState {
+        projection: projection(),
+    };
+    let view = state
+        .view(AppEventSender::new(tx))
+        .expect("projection should create a chat tree view");
+    let area = Rect::new(0, 0, width, view.desired_height(width));
+    let mut buffer = Buffer::empty(area);
+    view.render(area, &mut buffer);
+    buffer
+}
+
+#[test]
+fn chat_tree_overlay_renders_branches_and_current_marker() {
+    assert_snapshot!(
+        "chat_tree_overlay_branched",
+        format!("{:?}", render_view(72))
+    );
+}
+
+#[test]
+fn chat_tree_overlay_wraps_long_summaries() {
+    assert_snapshot!("chat_tree_overlay_narrow", format!("{:?}", render_view(36)));
+}
+
+#[test]
+fn chat_tree_accept_uses_selected_node_and_projection_revision() {
+    let (tx, mut rx) = unbounded_channel::<AppEvent>();
+    let state = ChatTreeUiState {
+        projection: projection(),
+    };
+    let mut view = state
+        .view(AppEventSender::new(tx))
+        .expect("projection should create a chat tree view");
+
+    view.handle_key_event(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+    view.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_eq!(view.completion(), Some(ViewCompletion::Accepted));
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::CodexOp(AppCommand::SetCurrentChatTreeNode {
+            node_id,
+            expected_revision: Some(8),
+        })) if node_id == "node-c"
+    ));
+}
+
+#[tokio::test]
+async fn chat_tree_open_rejects_while_task_is_running() {
+    let (mut chat, _sender, mut events, _operations) = make_chatwidget_manual_with_sender().await;
+    chat.on_task_started();
+
+    chat.open_chat_tree_popup();
+
+    let history = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(
+                cell.display_lines(/*width*/ 100)
+                    .into_iter()
+                    .map(|line| line.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        history.contains("Cannot switch chat tree nodes while a task is running."),
+        "{history}"
+    );
+}
+
+#[tokio::test]
+async fn current_node_update_requests_transcript_refresh() {
+    let (mut chat, _sender, mut events, _operations) = make_chatwidget_manual_with_sender().await;
+    chat.set_chat_tree_projection(projection());
+    let mut updated_projection = projection();
+    updated_projection.revision += 1;
+    updated_projection.current_node_id = Some("node-c".to_string());
+
+    chat.handle_server_notification(
+        ServerNotification::ChatTreeUpdated(ChatTreeUpdatedNotification {
+            thread_id: "00000000-0000-4000-8000-000000000001".to_string(),
+            change: ChatTreeChange {
+                r#type: ChatTreeChangeKind::CurrentNodeChanged,
+                node_id: Some("node-c".to_string()),
+            },
+            chat_tree: Box::new(updated_projection.clone()),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(matches!(
+        events.try_recv(),
+        Ok(AppEvent::RefreshChatTreeTranscript {
+            thread_id,
+            chat_tree,
+        }) if thread_id.to_string() == "00000000-0000-4000-8000-000000000001"
+            && chat_tree == updated_projection
+    ));
+}

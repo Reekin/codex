@@ -169,6 +169,7 @@ pub struct TestAppServer {
 pub const DEFAULT_CLIENT_NAME: &str = "codex-app-server-tests";
 pub const DISABLE_PLUGIN_STARTUP_TASKS_ARG: &str = "--disable-plugin-startup-tasks-for-tests";
 const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
+const DISABLE_CHAT_TREE_SUMMARIES_ENV_VAR: &str = "CODEX_CHAT_TREE_SUMMARIES_DISABLED_FOR_TESTS";
 #[cfg(windows)]
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 #[cfg(not(windows))]
@@ -182,7 +183,10 @@ impl TestAppServer {
             codex_home: None,
             environment: TestAppServerEnvironment::Auto,
             program: None,
-            env_overrides: Vec::new(),
+            env_overrides: vec![(
+                DISABLE_CHAT_TREE_SUMMARIES_ENV_VAR.to_string(),
+                Some("1".to_string()),
+            )],
             args: vec![DISABLE_PLUGIN_STARTUP_TASKS_ARG.to_string()],
             exec_server_delay: None,
         }
@@ -1880,6 +1884,15 @@ impl TestAppServerBuilder {
     pub fn with_plugin_startup_tasks(mut self) -> Self {
         self.args
             .retain(|argument| argument != DISABLE_PLUGIN_STARTUP_TASKS_ARG);
+        self
+    }
+
+    /// Enables Chat Tree summary requests for tests that exercise the summary contract.
+    pub fn with_chat_tree_summaries(mut self) -> Self {
+        self.env_overrides
+            .retain(|(key, _)| key != DISABLE_CHAT_TREE_SUMMARIES_ENV_VAR);
+        self.env_overrides
+            .push((DISABLE_CHAT_TREE_SUMMARIES_ENV_VAR.to_string(), None));
         self
     }
 

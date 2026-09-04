@@ -96,6 +96,7 @@ mod app_server_tracing;
 mod attestation;
 mod auth_mode;
 mod bespoke_event_handling;
+mod chat_tree_projection;
 mod code_mode_host;
 mod codex_home_metrics;
 mod command_exec;

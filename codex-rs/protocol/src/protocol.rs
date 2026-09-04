@@ -735,6 +735,12 @@ pub enum Op {
     /// model.
     SetThreadMemoryMode { mode: ThreadMemoryMode },
 
+    /// Set the current chat-tree node for future turns.
+    SetCurrentChatTreeNode {
+        node_id: String,
+        expected_revision: Option<u64>,
+    },
+
     /// Request Codex to drop the last N user turns from in-memory context.
     ///
     /// This does not attempt to revert local filesystem changes. Clients are
@@ -954,6 +960,7 @@ impl Op {
             Self::ReloadUserConfig => "reload_user_config",
             Self::Compact => "compact",
             Self::SetThreadMemoryMode { .. } => "set_thread_memory_mode",
+            Self::SetCurrentChatTreeNode { .. } => "set_current_chat_tree_node",
             Self::ThreadRollback { .. } => "thread_rollback",
             Self::Review { .. } => "review",
             Self::ApproveGuardianDeniedAction { .. } => "approve_guardian_denied_action",
@@ -1404,6 +1411,18 @@ pub enum EventMsg {
     /// v1 wire format uses `task_started`; accept `turn_started` for v2 interop.
     #[serde(rename = "task_started", alias = "turn_started")]
     TurnStarted(TurnStartedEvent),
+
+    /// Chat tree node was created for a user turn.
+    ChatTreeNodeStarted(Box<ChatTreeNodeStartedEvent>),
+
+    /// Chat tree node reached a terminal status.
+    ChatTreeNodeFinalized(Box<ChatTreeNodeFinalizedEvent>),
+
+    /// Chat tree node summary changed.
+    ChatTreeNodeSummaryUpdated(Box<ChatTreeNodeSummaryUpdatedEvent>),
+
+    /// Chat tree current node changed.
+    ChatTreeCurrentNodeChanged(Box<ChatTreeCurrentNodeChangedEvent>),
 
     /// Persistent thread-settings overrides from the correlated submission have
     /// been applied to the session configuration.
@@ -2180,6 +2199,79 @@ pub struct TurnStartedEvent {
     pub collaboration_mode_kind: ModeKind,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum ChatTreeNodeStatus {
+    Pending,
+    Completed,
+    Interrupted,
+    Replaced,
+    ReviewEnded,
+}
+
+impl ChatTreeNodeStatus {
+    pub fn default_summary(self) -> &'static str {
+        match self {
+            ChatTreeNodeStatus::Pending => "turn pending",
+            ChatTreeNodeStatus::Completed => "turn completed",
+            ChatTreeNodeStatus::Interrupted => "turn interrupted",
+            ChatTreeNodeStatus::Replaced => "turn replaced",
+            ChatTreeNodeStatus::ReviewEnded => "turn review ended",
+        }
+    }
+
+    pub fn summary_label(self) -> &'static str {
+        match self {
+            ChatTreeNodeStatus::Pending => "pending",
+            ChatTreeNodeStatus::Completed => "completed",
+            ChatTreeNodeStatus::Interrupted => "interrupted",
+            ChatTreeNodeStatus::Replaced => "replaced",
+            ChatTreeNodeStatus::ReviewEnded => "review ended",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+pub enum ChatTreeChangeKind {
+    NodeStarted,
+    NodeFinalized,
+    NodeSummaryUpdated,
+    CurrentNodeChanged,
+    TreeRebuilt,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ChatTreeNodeStartedEvent {
+    pub revision: u64,
+    pub node_id: String,
+    pub parent_node_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub order: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ChatTreeNodeFinalizedEvent {
+    pub revision: u64,
+    pub node_id: String,
+    pub status: ChatTreeNodeStatus,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ChatTreeNodeSummaryUpdatedEvent {
+    pub revision: u64,
+    pub node_id: String,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct ChatTreeCurrentNodeChangedEvent {
+    pub revision: u64,
+    pub node_id: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ThreadSettingsAppliedEvent {
     /// Logical task that owns this snapshot, independent of the physical rollout file.
@@ -2878,6 +2970,14 @@ impl SessionSource {
             self,
             SessionSource::Internal(_) | SessionSource::SubAgent(_)
         )
+    }
+
+    pub fn participates_in_chat_tree(&self) -> bool {
+        !self.is_non_root_agent()
+            || matches!(
+                self,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+            )
     }
 
     pub fn get_nickname(&self) -> Option<String> {

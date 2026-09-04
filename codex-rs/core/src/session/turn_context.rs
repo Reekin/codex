@@ -243,6 +243,7 @@ pub struct TurnContext {
     pub(crate) model_verification_emitted: AtomicBool,
     /// Effective cyber treatment for this turn, including any child-agent inheritance.
     pub(crate) cyber_access_program: Option<CyberAccessProgram>,
+    pub(crate) chat_tree_summary_user_message: std::sync::Mutex<Option<String>>,
 }
 
 enum TurnMultiAgentRuntime {
@@ -289,6 +290,22 @@ impl TurnContext {
             .selected_collaboration_mode()
             .settings
             .developer_instructions
+    }
+
+    pub(crate) fn capture_chat_tree_summary_user_message(&self, input: &[UserInput]) {
+        let message = chat_tree_summary_user_message(input);
+        let mut guard = self
+            .chat_tree_summary_user_message
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *guard = message;
+    }
+
+    pub(crate) fn chat_tree_summary_user_message(&self) -> Option<String> {
+        self.chat_tree_summary_user_message
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) fn skills_snapshot(&self) -> Arc<HostSkillsSnapshot> {
@@ -550,6 +567,9 @@ impl TurnContext {
                 self.model_verification_emitted.load(Ordering::Relaxed),
             ),
             cyber_access_program: self.cyber_access_program,
+            chat_tree_summary_user_message: std::sync::Mutex::new(
+                self.chat_tree_summary_user_message(),
+            ),
         }
     }
 
@@ -818,6 +838,7 @@ impl Session {
             server_model_warning_emitted: AtomicBool::new(false),
             model_verification_emitted: AtomicBool::new(false),
             cyber_access_program: None,
+            chat_tree_summary_user_message: std::sync::Mutex::new(None),
         }
     }
 
@@ -1110,4 +1131,21 @@ impl Session {
         let state = self.state.lock().await;
         state.session_configuration.clone()
     }
+}
+
+fn chat_tree_summary_user_message(input: &[UserInput]) -> Option<String> {
+    let message = input
+        .iter()
+        .map(|item| match item {
+            UserInput::Text { text, .. } => text.clone(),
+            UserInput::Image { .. } => "[image]".to_string(),
+            UserInput::LocalImage { path, .. } => format!("[local image: {}]", path.display()),
+            UserInput::Skill { name, .. } => format!("[skill: {name}]"),
+            UserInput::Mention { name, .. } => format!("[mention: {name}]"),
+            _ => "[input]".to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let message = message.trim();
+    (!message.is_empty()).then(|| message.to_string())
 }

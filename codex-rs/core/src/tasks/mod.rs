@@ -73,6 +73,11 @@ static ACTIVE_TURNS: Gauge = Gauge::new("core.turns.active");
 
 pub(crate) type SessionTaskResult = CodexResult<Option<String>>;
 
+pub(crate) enum SessionTaskInput {
+    Direct(Vec<TurnInput>),
+    Pending(Vec<TurnInput>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InterruptedTurnHistoryMarker {
     Disabled,
@@ -276,13 +281,14 @@ impl Session {
     ) {
         self.abort_all_tasks(TurnAbortReason::Replaced).await;
         self.clear_connector_selection().await;
-        self.start_task(turn_context, input, task).await;
+        self.start_task(turn_context, SessionTaskInput::Direct(input), task)
+            .await;
     }
 
     pub(crate) async fn start_task<T: SessionTask>(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
-        input: Vec<TurnInput>,
+        input: SessionTaskInput,
         task: T,
     ) {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
@@ -297,7 +303,6 @@ impl Session {
             .turn_metadata_state
             .set_turn_started_at_unix_ms(turn_started_at_unix_ms);
         let token_usage_at_turn_start = self.total_token_usage().await.unwrap_or_default();
-
         let cancellation_token = CancellationToken::new();
         let done = Arc::new(Notify::new());
 
@@ -315,6 +320,20 @@ impl Session {
                 .turn_metadata_state
                 .set_root_turn_id(root_turn_id);
         }
+        let (task_input, mut queued_input) = match input {
+            SessionTaskInput::Direct(input) => {
+                self.start_chat_tree_node_for_turn(turn_context.as_ref(), &input)
+                    .await;
+                (input, Vec::new())
+            }
+            SessionTaskInput::Pending(input) => {
+                self.start_chat_tree_node_for_turn(turn_context.as_ref(), &input)
+                    .await;
+                // Keep mailbox work pending so task completion records it even if sampling never
+                // starts, while still exposing it to turn lifecycle at task admission.
+                (Vec::new(), input)
+            }
+        };
         let turn_state = {
             let mut active = self.active_turn.lock().await;
             let turn = active.get_or_insert_with(ActiveTurn::default);
@@ -322,8 +341,9 @@ impl Session {
             Arc::clone(&turn.turn_state)
         };
         turn_state.lock().await.token_usage_at_turn_start = token_usage_at_turn_start.clone();
+        queued_input.extend(pending_items);
         self.input_queue
-            .extend_pending_input_for_turn_state(turn_state.as_ref(), pending_items)
+            .extend_pending_input_for_turn_state(turn_state.as_ref(), queued_input)
             .await;
         self.emit_turn_start_lifecycle(turn_context.as_ref(), &token_usage_at_turn_start)
             .await;
@@ -339,7 +359,6 @@ impl Session {
         let session = Arc::clone(self);
         let ctx = Arc::clone(&turn_context);
         let task_for_run = Arc::clone(&task);
-        let task_input = input;
         let task_cancellation_token = cancellation_token.child_token();
         // Task-owned turn spans keep a core-owned span open for the
         // full task lifecycle after the submission dispatch span ends.
@@ -451,14 +470,13 @@ impl Session {
             return;
         }
 
-        let turn_state = {
+        {
             let mut active_turn = self.active_turn.lock().await;
             if active_turn.is_some() {
                 return;
             }
-            let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
-            Arc::clone(&active_turn.turn_state)
-        };
+            active_turn.get_or_insert_with(ActiveTurn::default);
+        }
 
         let (input, mut start_options) =
             self.input_queue.get_pending_input(&self.active_turn).await;
@@ -500,12 +518,12 @@ impl Session {
         }
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
-        // Task completion must still save this mail if pre-turn compaction fails.
-        self.input_queue
-            .extend_pending_input_for_turn_state(turn_state.as_ref(), input)
-            .await;
-        self.start_task(turn_context, Vec::new(), RegularTask::new())
-            .await;
+        self.start_task(
+            turn_context,
+            SessionTaskInput::Pending(input),
+            RegularTask::new(),
+        )
+        .await;
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
@@ -804,6 +822,20 @@ impl Session {
         } else {
             ThreadIdleCause::Completed
         };
+        let summary_job = if let Some(reason) = abort_reason.as_ref() {
+            self.abort_chat_tree_node(turn_context.as_ref(), reason)
+                .await;
+            None
+        } else {
+            Some(
+                self.complete_chat_tree_node_before_turn_complete(
+                    turn_context.as_ref(),
+                    last_agent_message.clone(),
+                )
+                .await,
+            )
+            .flatten()
+        };
         let event = if let Some(reason) = abort_reason {
             if reason == TurnAbortReason::Interrupted {
                 run_turn_interrupt_hooks(self, &turn_context, &turn_state).await;
@@ -836,6 +868,8 @@ impl Session {
             })
         };
         self.send_event(turn_context.as_ref(), event).await;
+        self.spawn_chat_tree_summary_after_turn_complete(Arc::clone(&turn_context), summary_job)
+            .await;
         self.services
             .guardian_rejection_circuit_breaker
             .lock()
@@ -983,6 +1017,8 @@ impl Session {
                 turn_id: task.turn_context.sub_id.clone(),
                 profile,
             });
+        self.abort_chat_tree_node(task.turn_context.as_ref(), &reason)
+            .await;
         let event = EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some(task.turn_context.sub_id.clone()),
             reason,

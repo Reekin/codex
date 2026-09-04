@@ -167,6 +167,50 @@ mod thread_processor_behavior_tests {
     }
 
     #[test]
+    fn chat_tree_set_current_error_maps_revision_conflict_kind() {
+        let error = chat_tree_set_current_error(
+            "thread-1",
+            "node-a",
+            ChatTreeError::RevisionConflict {
+                expected: 7,
+                actual: 9,
+            },
+        );
+
+        assert_eq!(error.code, -32600);
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "kind": "revisionConflict",
+                "threadId": "thread-1",
+                "nodeId": "node-a",
+                "expectedRevision": 7,
+                "actualRevision": 9,
+            }))
+        );
+    }
+
+    #[test]
+    fn chat_tree_error_with_kind_includes_stable_context() {
+        let error = chat_tree_error_with_kind(
+            "thread not loaded: thread-1",
+            "threadNotLoaded",
+            "thread-1",
+            Some("node-a"),
+        );
+
+        assert_eq!(error.code, -32600);
+        assert_eq!(
+            error.data,
+            Some(json!({
+                "kind": "threadNotLoaded",
+                "threadId": "thread-1",
+                "nodeId": "node-a",
+            }))
+        );
+    }
+
+    #[test]
     fn validate_dynamic_tools_rejects_unsupported_input_schema() {
         let tools = vec![dynamic_tool(
             /*namespace*/ None,

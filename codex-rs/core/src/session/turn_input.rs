@@ -18,6 +18,7 @@ use super::turn_context::TurnContext;
 use crate::state::ActiveTurn;
 use crate::state::TurnState;
 use crate::tasks::RegularTask;
+use crate::tasks::SessionTaskInput;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -441,7 +442,11 @@ async fn start_if_idle(
         }
     }
     session
-        .start_task(turn_context, task_input, RegularTask::new())
+        .start_task(
+            turn_context,
+            SessionTaskInput::Direct(task_input),
+            RegularTask::new(),
+        )
         .await;
     Ok(TurnInputSubmission::Started {
         turn_id: submission_id,

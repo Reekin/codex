@@ -205,6 +205,7 @@ impl ChatWidget {
             thread_name: None,
             pending_automatic_thread_names: HashSet::new(),
             thread_rename_block_message: None,
+            chat_tree: ChatTreeUiState::default(),
             active_side_conversation: false,
             blocks_direct_input: false,
             misalignment_policy_violation: false,

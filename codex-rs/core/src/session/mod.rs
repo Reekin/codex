@@ -217,6 +217,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+mod chat_tree_lifecycle;
 mod code_mode_warning;
 pub(crate) mod context_window;
 mod environment;
@@ -1542,17 +1543,28 @@ impl Session {
     ) -> Option<PreviousTurnSettings> {
         let rollout_reconstruction::RolloutReconstruction {
             mut history,
-            guardian_history,
+            mut guardian_history,
             previous_turn_settings,
-            reference_context_item,
+            mut reference_context_item,
             world_state_baseline,
             window_number,
             first_window_id,
             previous_window_id,
             window_id,
+            chat_tree,
         } = self
             .reconstruct_history_from_rollout(turn_context, rollout_items)
             .await;
+        if let Some(current_history) = chat_tree
+            .as_ref()
+            .and_then(|chat_tree| chat_tree.current_history.as_ref())
+        {
+            history = current_history.annotated_items().to_vec();
+            guardian_history = current_history.guardian_history_checkpoint();
+            reference_context_item = chat_tree
+                .as_ref()
+                .and_then(|chat_tree| chat_tree.current_reference_context_item.clone());
+        }
         // Keep the recorded rollout unchanged. Prepare its reconstructed history before
         // installing it, so legacy media is processed once for this resume or fork and
         // will be processed again if the rollout is reconstructed in a future session.
@@ -1602,6 +1614,11 @@ impl Session {
                 },
             );
             state.set_previous_turn_settings(previous_turn_settings.clone());
+            if let Some(chat_tree) = chat_tree {
+                state
+                    .chat_tree
+                    .replace_from_replay(chat_tree.domain, chat_tree.history_snapshots);
+            }
         }
         let prefix_tokens = if matches!(
             turn_context.config.model_auto_compact_token_limit_scope,
@@ -3792,6 +3809,10 @@ impl Session {
                 world_state_item = Some(WorldStateItem::full(snapshot.clone().into_object()));
                 state.history.set_world_state_baseline(snapshot);
             }
+            let history_snapshot = state.clone_history();
+            state
+                .chat_tree
+                .update_current_history_snapshot(history_snapshot);
         }
 
         let mut rollout_items = vec![RolloutItem::Compacted(compacted_item)];
