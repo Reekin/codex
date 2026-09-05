@@ -41,6 +41,10 @@ branches.
 - **REQ-10 Public API**: When app-server exists, preserve `chatTree/read`,
   `chatTree/setCurrent`, and `chatTree/updated`, plus selected-branch behavior in existing thread
   transcript APIs.
+- **REQ-11 Archive**: Archive each target thread's currently selected rollout, preserving its
+  complete chat tree. Resolve that rollout directly; do not build a global rollout reference index
+  or collect superseded rollouts for upstream revert history. Preserve writer ownership, spawned
+  descendant handling, and restoration of the moved file if the metadata update fails.
 
 ## Durable And Wire Data
 
