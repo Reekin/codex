@@ -109,7 +109,6 @@ pub(crate) struct LiveAgent {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
-    pub(crate) is_current_agent: bool,
     pub(crate) agent_status: AgentStatus,
 }
 
@@ -548,7 +547,6 @@ impl AgentControl {
 
     pub(crate) async fn list_agents(
         &self,
-        current_thread_id: ThreadId,
         current_session_source: &SessionSource,
         path_prefix: Option<&str>,
     ) -> CodexResult<Vec<ListedAgent>> {
@@ -587,7 +585,6 @@ impl AgentControl {
         {
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
-                is_current_agent: root_thread_id == current_thread_id,
                 agent_status: root_thread.agent_status().await,
             });
         }
@@ -613,7 +610,6 @@ impl AgentControl {
                 .unwrap_or_else(|| thread_id.to_string());
             agents.push(ListedAgent {
                 agent_name,
-                is_current_agent: thread_id == current_thread_id,
                 agent_status: thread.agent_status().await,
             });
         }
