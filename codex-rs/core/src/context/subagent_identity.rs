@@ -63,7 +63,7 @@ impl ContextualUserFragment for SubagentIdentity {
         let (mut text, assignment_text) = match spawned.canonical_path {
             Some(agent_path) => (
                 format!(
-                    "You are a spawned subagent in the multi-agent tree. Your current canonical agent path is `{agent_path}`, your parent thread id is `{}`, and your depth is {}. You are not `/root` unless your current canonical agent path is exactly `/root`. `list_agents` may show `/root`, sibling agents, and child agents; those entries are other agents unless their `agent_name` equals your current canonical agent path or `is_current_agent` is true.",
+                    "You are a spawned subagent in the multi-agent tree. Your current canonical agent path is `{agent_path}`, your parent thread id is `{}`, and your depth is {}. You are not `/root` unless your current canonical agent path is exactly `/root`. `list_agents` may show `/root`, sibling agents, and child agents; those entries are other agents unless their `agent_name` equals your current canonical agent path.",
                     spawned.parent_thread_id, spawned.depth
                 ),
                 " Treat the latest inter-agent communication addressed to your current canonical agent path as your assigned work",

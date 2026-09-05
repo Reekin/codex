@@ -50,8 +50,6 @@ pub struct JsonSchema {
     pub items: Option<Box<JsonSchema>>,
     #[serde(rename = "minItems", skip_serializing_if = "Option::is_none")]
     pub min_items: Option<usize>,
-    #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
-    pub max_length: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<BTreeMap<String, JsonSchema>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -117,11 +115,6 @@ impl JsonSchema {
 
     pub fn with_encrypted(mut self) -> Self {
         self.encrypted = Some(true);
-        self
-    }
-
-    pub fn with_max_length(mut self, max_length: usize) -> Self {
-        self.max_length = Some(max_length);
         self
     }
 

@@ -25,16 +25,18 @@ with its own identity.
   current assignment.
 - **REQ-5 Ordinary startup**: Non-fork subagent startup does not claim that preceding messages are
   inherited parent history.
-- **REQ-6 List**: `list_agents` exposes the current agent name/path and marks the current entry.
-- **REQ-7 Wait**: `wait_agent` names the current agent mailbox being observed.
+- **REQ-6 List**: Identity context lets the subagent compare its canonical path with the upstream
+  `agent_name` entries returned by `list_agents`. Do not add identity fields to tool output.
+- **REQ-7 Wait**: V2 `wait_agent` names the current agent mailbox in its existing `message` field.
 - **REQ-8 Self-wait**: Reject waiting on the current agent whenever that call would otherwise be
   confused with waiting for descendants.
-- **REQ-9 Protocol parity**: Preserve equivalent semantics in every supported multi-agent tool
-  version.
+- **REQ-9 Protocol compatibility**: Preserve upstream tool definitions, input schemas, and output
+  schemas in every supported multi-agent version. Keep identity guidance in bounded context and
+  existing textual result fields; keep name/path length validation inside the runtime.
 
 ## Portability Constraints
 
-- **MUST** derive model context, list output, and wait output from one authoritative set of identity
+- **MUST** derive model context and wait identity guidance from one authoritative set of identity
   facts. Do not independently infer names from transcript order, thread ID, and registry metadata.
 - **MUST** keep rendering separate from identity facts so wording can change without changing
   identity semantics.
@@ -73,13 +75,14 @@ by the new assignment. Prove an ordinary non-fork startup has no fork-history bo
 
 ### List And Wait
 
-From a real spawned subagent, call list and wait. Prove list exposes and marks the current agent,
-wait names the caller's mailbox, and self-wait is rejected.
+From a real spawned subagent, compare its contextual identity with list entries. Prove V2 wait
+names the caller's mailbox through its existing message field, and V1 self-wait is rejected.
 
 ### Protocol Parity
 
-Exercise every supported multi-agent tool version and verify schema and output semantics remain
-equivalent.
+Exercise every supported multi-agent tool version and verify tool definitions and output shapes
+match upstream. Verify identity context and full-history boundaries remain available in both
+versions without requiring identical list/wait APIs.
 
 ## Integration Contract
 
