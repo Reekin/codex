@@ -108,10 +108,13 @@ async fn revert_keeps_thread_id_and_hides_suffix_across_repeated_reverts() {
         .await
         .expect("archive reverted thread");
     assert!(
-        rollout_paths_for_thread(home.path(), thread_id)
+        state_db
+            .get_thread(thread_id)
             .await
-            .iter()
-            .all(|path| path.starts_with(home.path().join("archived_sessions")))
+            .expect("read archived metadata")
+            .expect("archived thread metadata")
+            .rollout_path
+            .starts_with(home.path().join("archived_sessions"))
     );
     store
         .unarchive_thread(ArchiveThreadParams { thread_id })
