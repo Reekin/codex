@@ -139,7 +139,6 @@ struct WaitArgs {
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct WaitAgentResult {
-    pub(crate) current_agent_name: String,
     pub(crate) message: String,
     pub(crate) timed_out: bool,
 }
@@ -171,7 +170,6 @@ impl WaitAgentResult {
             Some(_) | None => message,
         };
         Self {
-            current_agent_name,
             message,
             timed_out: outcome == WaitOutcome::TimedOut,
         }

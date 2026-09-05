@@ -202,14 +202,12 @@ where
 
 #[derive(Debug, Deserialize)]
 struct ListAgentsResult {
-    current_agent_name: String,
     agents: Vec<ListedAgentResult>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ListedAgentResult {
     agent_name: String,
-    is_current_agent: bool,
     agent_status: serde_json::Value,
 }
 
@@ -226,11 +224,7 @@ fn multi_agent_v2_wait_result(
             "Wait completed for your mailbox as `{current_agent_name}`. This wait only observed an update delivered to your own mailbox; it did not wait for another agent's mailbox."
         )
     };
-    crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-        current_agent_name: current_agent_name.to_string(),
-        message,
-        timed_out,
-    }
+    crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult { message, timed_out }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1418,7 +1412,6 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
-    assert_eq!(result.current_agent_name, "/root/worker");
     let agent_names = result
         .agents
         .iter()
@@ -1430,15 +1423,6 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .iter()
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
-    assert!(worker.is_current_agent);
-    assert!(
-        !result
-            .agents
-            .iter()
-            .find(|agent| agent.agent_name == "/root")
-            .expect("root agent should be listed")
-            .is_current_agent
-    );
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
     assert_eq!(success, Some(true));
 
@@ -1540,10 +1524,8 @@ async fn multi_agent_v2_list_agents_filters_by_relative_path_prefix() {
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
-    assert_eq!(result.current_agent_name, "/root/researcher");
     assert_eq!(result.agents.len(), 1);
     assert_eq!(result.agents[0].agent_name, worker_path.as_str());
-    assert!(!result.agents[0].is_current_agent);
 }
 
 #[tokio::test]
@@ -3051,7 +3033,6 @@ async fn multi_agent_v2_wait_agent_clamps_timeout_below_configured_min() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            current_agent_name: "/root".to_string(),
             message: "Wait timed out for your mailbox as `/root`. This wait only observes updates delivered to your own mailbox; it does not wait for `/root`'s child tasks unless you are `/root`.\n\nRequested timeout of 1ms was clamped to the minimum of 50ms.".to_string(),
             timed_out: true,
         }
@@ -3200,7 +3181,11 @@ async fn multi_agent_v2_wait_agent_names_pathless_subagent_mailbox() {
     let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
         serde_json::from_str(&content).expect("wait_agent result should be json");
 
-    assert_eq!(result.current_agent_name, current_thread_id);
+    assert!(
+        result
+            .message
+            .contains(&format!("as `{current_thread_id}`"))
+    );
     assert!(!result.message.contains("as `/root`"));
 }
 
