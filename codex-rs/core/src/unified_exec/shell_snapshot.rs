@@ -17,6 +17,7 @@ use uuid::Uuid;
 
 use super::ExecCommandRequest;
 use super::UnifiedExecContext;
+use super::UnifiedExecLaunchMode;
 use super::process_manager::apply_unified_exec_env;
 use super::process_manager::exec_env_policy_from_shell_policy;
 use crate::config::NetworkProxySpec;
@@ -182,8 +183,8 @@ pub(super) fn shell_snapshot_request(
         || request.turn_environment.selection.cwd != *cwd
         || !matches!(request.shell_mode, UnifiedExecShellMode::Direct)
         || !matches!(
-            request.shell_type,
-            ShellType::Bash | ShellType::Zsh | ShellType::Sh
+            request.launch_mode,
+            UnifiedExecLaunchMode::Shell(ShellType::Bash | ShellType::Zsh | ShellType::Sh)
         )
         || request.command.get(1).is_none_or(|flag| flag != "-lc")
     {
@@ -197,7 +198,7 @@ pub(super) fn shell_snapshot_request(
             request.turn_environment.selection.environment_id
         ),
         shell: ShellInfo {
-            name: request.shell_type.name().to_string(),
+            name: request.launch_mode.shell_type()?.name().to_string(),
             path: request.command.first()?.clone(),
         },
     })

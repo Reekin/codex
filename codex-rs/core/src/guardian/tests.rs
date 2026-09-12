@@ -1562,7 +1562,10 @@ fn guardian_exec_command_uses_executor_cwd_convention(
         id: "command-1".to_string(),
         environment_id: codex_exec_server::REMOTE_ENVIRONMENT_ID.to_string(),
         command: vec!["git".to_string(), "status".to_string()],
-        hook_command: "git status".to_string(),
+        permission_request_payload: crate::tools::sandboxing::PermissionRequestPayload::bash(
+            "git status".to_string(),
+            /*description*/ None,
+        ),
         cwd,
         sandbox_permissions: SandboxPermissions::UseDefault,
         additional_permissions: None,
@@ -2321,7 +2324,7 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
     guardian_nested_tool_names.sort_unstable();
     assert_eq!(
         guardian_nested_tool_names,
-        vec!["exec_command", "view_image", "write_stdin"]
+        vec!["exec_argv", "exec_command", "view_image", "write_stdin"]
     );
     let guardian_user_text = request.message_input_texts("user").join("\n");
     assert!(

@@ -324,7 +324,7 @@ impl ExecPolicyManager {
         .await
     }
 
-    async fn create_exec_approval_requirement_for_command_platform(
+    pub(crate) async fn create_exec_approval_requirement_for_command_platform(
         &self,
         req: ExecApprovalRequest<'_>,
         command_platform: DangerousCommandPlatform,

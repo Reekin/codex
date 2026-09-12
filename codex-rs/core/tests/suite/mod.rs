@@ -9,12 +9,49 @@ use codex_test_binary_support::TestBinaryDispatchMode;
 use codex_test_binary_support::configure_test_binary_dispatch;
 use ctor::ctor;
 
+pub(crate) const EXEC_ARGV_TEST_HELPER_ARG: &str = "--exec-argv-test-helper";
+
+pub(crate) fn exec_argv_test_helper_argv(
+    delay_ms: u64,
+    literal_args: impl IntoIterator<Item = String>,
+) -> std::io::Result<Vec<String>> {
+    let mut argv = vec![
+        std::env::current_exe()?.to_string_lossy().into_owned(),
+        EXEC_ARGV_TEST_HELPER_ARG.to_string(),
+        delay_ms.to_string(),
+    ];
+    argv.extend(literal_args);
+    Ok(argv)
+}
+
+fn maybe_run_exec_argv_test_helper() {
+    let mut args = std::env::args();
+    let _argv0 = args.next();
+    if args.next().as_deref() != Some(EXEC_ARGV_TEST_HELPER_ARG) {
+        return;
+    }
+
+    let delay_ms = args
+        .next()
+        .expect("exec_argv test helper delay")
+        .parse::<u64>()
+        .expect("exec_argv test helper delay should be an integer");
+    let literal_args = args.collect::<Vec<_>>();
+    std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+    println!(
+        "{}",
+        serde_json::to_string(&literal_args).expect("serialize exec_argv test helper arguments")
+    );
+    std::process::exit(0);
+}
+
 // This code runs before any other tests are run.
 // It allows the test binary to behave like codex and dispatch to apply_patch and codex-linux-sandbox
 // based on the arg0.
 // NOTE: this doesn't work on ARM
 #[ctor]
 pub static CODEX_ALIASES_TEMP_DIR: Option<TestBinaryDispatchGuard> = {
+    maybe_run_exec_argv_test_helper();
     configure_test_binary_dispatch("codex-core-tests", |exe_name, argv1| {
         if argv1 == Some(CODEX_CORE_APPLY_PATCH_ARG1) {
             return TestBinaryDispatchMode::DispatchArg0Only;

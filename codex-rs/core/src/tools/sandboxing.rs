@@ -145,6 +145,29 @@ impl PermissionRequestPayload {
             tool_input: serde_json::Value::Object(tool_input),
         }
     }
+
+    pub(crate) fn exec_argv(command: String, argv: Vec<String>) -> Self {
+        Self {
+            tool_name: HookToolName::new("exec_argv"),
+            tool_input: serde_json::json!({
+                "command": command,
+                "argv": argv,
+            }),
+        }
+    }
+
+    pub(crate) fn command(&self) -> Option<&str> {
+        self.tool_input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+    }
+
+    pub(crate) fn with_description(mut self, description: String) -> Self {
+        if let Some(tool_input) = self.tool_input.as_object_mut() {
+            tool_input.insert("description".to_string(), description.into());
+        }
+        self
+    }
 }
 
 // Specifies what tool orchestrator should do with a given tool call.

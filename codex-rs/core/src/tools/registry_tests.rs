@@ -313,7 +313,7 @@ fn reserved_command_tools_reject_external_runtimes_without_a_builtin() {
     let handler = |tool_name| Arc::new(TestHandler { tool_name }) as Arc<dyn CoreToolRuntime>;
     let mut registry = ToolRegistry::default();
 
-    for reserved_name in ["exec_command", "shell_command"] {
+    for reserved_name in ["exec_argv", "exec_command", "shell_command"] {
         let tool_name = codex_tools::ToolName::plain(reserved_name);
         let namespaced_tool_name = codex_tools::ToolName::namespaced("client", reserved_name);
 
