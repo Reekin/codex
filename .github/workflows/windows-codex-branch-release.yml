@@ -1,0 +1,153 @@
+name: windows-codex-branch-release
+
+on:
+  push:
+    branches:
+      - "integration-*"
+  workflow_dispatch:
+
+concurrency:
+  group: windows-codex-branch-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    if: github.repository == 'Reekin/codex' && startsWith(github.ref_name, 'integration-')
+    name: Build Windows Codex package and publish latest release
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      CARGO_PROFILE_RELEASE_LTO: thin
+      TARGET: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ env.TARGET }}
+
+      - name: Configure LLVM linker
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ env.TARGET }}
+
+      - name: Define release metadata
+        id: meta
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          branch="${GITHUB_REF_NAME}"
+          short_sha="${GITHUB_SHA::12}"
+          release_tag="codex-${short_sha}"
+
+          {
+            echo "branch=${branch}"
+            echo "short_sha=${short_sha}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build canonical portable package
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CARGO_PROFILE_RELEASE_LTO=${CARGO_PROFILE_RELEASE_LTO}"
+          export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          workspace="${GITHUB_WORKSPACE}"
+          if command -v cygpath >/dev/null 2>&1; then
+            workspace="$(cygpath -u "$workspace")"
+          fi
+          dist="${workspace}/dist"
+          package_dir="${RUNNER_TEMP}/codex-package-${TARGET}"
+          mkdir -p "$dist"
+
+          python "${workspace}/scripts/build_codex_package.py" \
+            --target "${TARGET}" \
+            --variant codex \
+            --cargo-profile release \
+            --package-dir "$package_dir" \
+            --archive-output "$dist/codex-portable.zip" \
+            --force
+
+          (cd "$dist" && sha256sum codex-portable.zip > SHA256SUMS.txt)
+          ls -lh "$dist"
+
+      - name: Verify portable package layout
+        shell: powershell
+        working-directory: .
+        run: |
+          $archive = Join-Path $env:GITHUB_WORKSPACE "dist\codex-portable.zip"
+          $verifyDir = Join-Path $env:RUNNER_TEMP "codex-portable-verify"
+          Expand-Archive -LiteralPath $archive -DestinationPath $verifyDir -Force
+
+          $requiredFiles = @(
+            "codex-package.json",
+            "bin\codex.exe",
+            "bin\codex-code-mode-host.exe",
+            "codex-resources\codex-command-runner.exe",
+            "codex-resources\codex-windows-sandbox-setup.exe",
+            "codex-path\rg.exe"
+          )
+          foreach ($relativePath in $requiredFiles) {
+            $path = Join-Path $verifyDir $relativePath
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Portable package is missing $relativePath"
+            }
+          }
+
+      - name: Publish GitHub latest release
+        shell: bash
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          release_tag="${{ steps.meta.outputs.release_tag }}"
+          release_name="Codex Windows ${{ steps.meta.outputs.short_sha }}"
+          notes_path="${RUNNER_TEMP}/codex-dev-release-notes.md"
+
+          cat > "$notes_path" <<EOF
+          Automated Windows dev build for branch \`${{ steps.meta.outputs.branch }}\`.
+
+          - Commit: \`${GITHUB_SHA}\`
+          - Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          - Target: \`${TARGET}\`
+          - Package: unsigned portable branch build
+          - LTO: \`${CARGO_PROFILE_RELEASE_LTO}\`
+
+          This release is generated automatically from the downstream integration branch push and is marked as the repository latest release. Download and extract \`codex-portable.zip\`, then run \`bin/codex.exe\`. Keep the complete package directory together so the code-mode host and runtime resources remain available.
+          EOF
+
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release edit "$release_tag" \
+              --title "$release_name" \
+              --notes-file "$notes_path" \
+              --latest
+          else
+            gh release create "$release_tag" \
+              --target "$GITHUB_SHA" \
+              --title "$release_name" \
+              --notes-file "$notes_path" \
+              --latest
+          fi
+
+          gh release upload "$release_tag" dist/* --clobber
