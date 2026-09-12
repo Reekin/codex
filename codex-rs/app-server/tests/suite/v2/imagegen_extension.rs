@@ -37,6 +37,9 @@ use wiremock::matchers::path;
 use super::analytics::mount_analytics_capture;
 use super::analytics::wait_for_analytics_event;
 
+#[path = "imagegen_auth_independent_tests.rs"]
+mod auth_independent_tests;
+
 const RESULT: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 const TINY_PNG_BYTES: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,

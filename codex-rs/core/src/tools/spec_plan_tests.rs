@@ -3179,7 +3179,9 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
 
     let extension_disabled = probe_with(
         |turn| {
-            use_chatgpt_auth(turn);
+            turn.auth_manager = Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+                "image-tool-test-key",
+            )));
             set_feature(turn, Feature::ImageGeneration, /*enabled*/ false);
             update_turn_settings_for_test(turn, |settings| {
                 Arc::make_mut(&mut settings.model_info).input_modalities =
@@ -3196,7 +3198,9 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
 
     let text_only_model = probe_with(
         |turn| {
-            use_chatgpt_auth(turn);
+            turn.auth_manager = Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+                "image-tool-test-key",
+            )));
             update_turn_settings_for_test(turn, |settings| {
                 Arc::make_mut(&mut settings.model_info).input_modalities = vec![];
             });
