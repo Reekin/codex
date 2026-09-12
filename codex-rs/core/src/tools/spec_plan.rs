@@ -716,11 +716,6 @@ fn image_generation_available(turn_context: &TurnContext, model_info: &ModelInfo
         return false;
     }
 
-    let capabilities = turn_context.provider.capabilities();
-    if !capabilities.image_generation || !capabilities.namespace_tools {
-        return false;
-    }
-
     if !model_info.input_modalities.contains(&InputModality::Image) {
         return false;
     }

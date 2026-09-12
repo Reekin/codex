@@ -3197,7 +3197,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     .await;
     text_only_model.assert_visible_lacks(&["image_gen"]);
 
-    let unsupported_provider = probe_with(
+    let bedrock_provider = probe_with(
         |turn| {
             use_bedrock_provider(turn);
             update_turn_settings_for_test(turn, |settings| {
@@ -3211,7 +3211,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         },
     )
     .await;
-    unsupported_provider.assert_visible_lacks(&["image_gen"]);
+    bedrock_provider.assert_visible_contains(&["image_gen"]);
 
     let live_web_search = probe(|turn| {
         set_web_search_mode(turn, WebSearchMode::Live);

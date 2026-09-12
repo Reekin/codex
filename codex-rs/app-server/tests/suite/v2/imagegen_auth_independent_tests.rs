@@ -2,10 +2,11 @@ use super::*;
 use test_case::test_case;
 
 #[test_case("api"; "API key exposes installed image tool")]
+#[test_case("custom-api"; "custom Responses provider exposes installed image tool")]
 #[test_case("plus"; "ChatGPT retains installed image tool")]
 #[test_case("free"; "free plan retains entitlement restriction")]
 #[tokio::test]
-async fn installed_image_generation_exposure_follows_capabilities_and_entitlement(
+async fn installed_image_generation_exposure_preserves_entitlement_across_providers(
     auth: &str,
 ) -> Result<()> {
     let server = responses::start_mock_server().await;
@@ -18,8 +19,18 @@ async fn installed_image_generation_exposure_follows_capabilities_and_entitlemen
     )
     .await;
     let codex_home = TempDir::new()?;
-    create_config_toml(codex_home.path(), &server.uri(), ImagegenTestMode::Direct)?;
-    let api_key = if auth == "api" {
+    if auth == "custom-api" {
+        MockResponsesConfig::new(&server.uri())
+            .with_model_provider("custom-images")
+            .with_provider_name("Custom Responses")
+            .with_provider_config(
+                "supports_websockets = false\nrequires_openai_auth = false\nenv_key = \"IMAGEGEN_TEST_API_KEY\"",
+            )
+            .write(codex_home.path())?;
+    } else {
+        create_config_toml(codex_home.path(), &server.uri(), ImagegenTestMode::Direct)?;
+    }
+    let api_key = if matches!(auth, "api" | "custom-api") {
         Some("image-tool-test-key")
     } else {
         write_chatgpt_auth(
@@ -31,7 +42,10 @@ async fn installed_image_generation_exposure_follows_capabilities_and_entitlemen
     };
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .with_env_overrides(&[("OPENAI_API_KEY", api_key)])
+        .with_env_overrides(&[
+            ("OPENAI_API_KEY", if auth == "api" { api_key } else { None }),
+            ("IMAGEGEN_TEST_API_KEY", api_key),
+        ])
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
     start_image_generation_turn(&mut mcp, ThreadStartParams::default()).await?;

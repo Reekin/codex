@@ -13,11 +13,11 @@ Codex service session, including history notes, retain their service eligibility
 
 ## Stable Contract
 
-- **REQ-1**: An installed image-generation tool is exposed with API-key authentication when
-  its feature is enabled and the provider and model support it. Login method alone must not
-  suppress its model-visible specification.
-- **REQ-2**: Feature disablement, provider image/namespace capability limits, model image modality
-  requirements, and free-plan entitlement restrictions continue to control exposure.
+- **REQ-1**: An installed image-generation tool is exposed with any provider, including custom
+  Responses providers and API-key authentication. Provider identity, OpenAI authentication
+  requirements, and provider image-generation capabilities must not suppress its specification.
+- **REQ-2**: Feature disablement, model image modality requirements, and free-plan entitlement
+  restrictions continue to control exposure.
 - **REQ-3**: Requests preserve the user's actual credentials and identity. Tool execution uses
   the existing service authentication and authorization path and preserves service failures.
 
@@ -25,7 +25,8 @@ Codex service session, including history notes, retain their service eligibility
 
 - MUST separate model-visible tool eligibility from credential selection and service execution.
 - MUST use installed production tool contributors; do not synthesize a replacement tool.
-- MUST retain capability and entitlement checks independent of the removed login-method check.
+- MUST retain feature, model modality, and entitlement checks independently of provider identity
+  and login method.
 
 ## Adapter Seams
 
@@ -38,8 +39,10 @@ Codex service session, including history notes, retain their service eligibility
 - **API exposure (REQ-1, REQ-3)**: Start a supported thread with API-key authentication and the
   installed image-generation extension; submit a turn. Capture the production model request
   and verify the image-generation namespace and function are advertised and the API key is used.
+  Include a custom Responses provider with a non-OpenAI name and no OpenAI auth requirement,
+  and planner coverage for a provider without native image-generation capability.
 - **Eligibility (REQ-2)**: Exercise the tool planner with the feature disabled, a text-only model,
-  an unsupported provider, and a free-plan account. Each must omit image generation; a supported
+  and a free-plan account. Each must omit image generation; a supported
   ChatGPT account must retain it. Require executable planner or model-request evidence.
 - **Service boundary (REQ-3)**: Execute the installed tool through its normal RPC/model path
   against a deterministic service denial. Verify the failure remains observable. Credential
