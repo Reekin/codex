@@ -11,6 +11,7 @@ use codex_config::test_support::CloudConfigBundleFixture;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::X_CODEX_ROUTING_HINT_HEADER;
+use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::compact::SUMMARY_PREFIX;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
@@ -186,6 +187,8 @@ const PRETURN_CONTEXT_DIFF_CWD: &str = "/tmp/PRETURN_CONTEXT_DIFF_CWD";
 const DUMMY_FUNCTION_NAME: &str = "test_tool";
 const TURN_STATE_HEADER: &str = "x-codex-turn-state";
 const REMOTE_COMPACT_TURN_COMPLETE_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCAL_ROLLOUT_RECOVERY_INTRO: &str =
+    "The complete pre-compaction conversation remains available in the rollout at:";
 const TEST_AGENT_IDENTITY_PRIVATE_KEY: &str =
     "MC4CAQAwBQYDK2VwBCIEIJ7kFBaOujmoz1gvBNEC+BeM2IX87FFB0xmISOZ/XO0c";
 
@@ -991,6 +994,11 @@ async fn remote_compact_replaces_history_for_followups() -> Result<()> {
         compact_body_text.contains("FIRST_REMOTE_REPLY"),
         "expected compact request to include assistant history"
     );
+    assert!(
+        !compact_body_text.contains(SUMMARIZATION_PROMPT)
+            && !compact_body_text.contains(LOCAL_ROLLOUT_RECOVERY_INTRO),
+        "remote compact request should not inherit local handoff instructions"
+    );
 
     let response_requests = responses_mock.requests();
     let follow_up_request = response_requests.last().expect("follow-up request missing");
@@ -1041,6 +1049,11 @@ async fn remote_compact_replaces_history_for_followups() -> Result<()> {
     assert!(
         !follow_up_body.contains("hello remote compact"),
         "expected follow-up request to drop compacted-away user turns when remote output omits them"
+    );
+    assert!(
+        !follow_up_body.contains(SUMMARIZATION_PROMPT)
+            && !follow_up_body.contains(LOCAL_ROLLOUT_RECOVERY_INTRO),
+        "remote replacement history should not inherit local handoff text"
     );
 
     insta::assert_snapshot!(

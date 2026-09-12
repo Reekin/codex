@@ -1,4 +1,5 @@
 use crate::context::GuardianContextMode;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -57,10 +58,13 @@ use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
 use futures::prelude::*;
 use tracing::error;
+use tracing::warn;
 
 pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+const ROLLOUT_RECOVERY_INTRO: &str =
+    "The complete pre-compaction conversation remains available in the rollout at:";
 
 /// Controls whether compaction replacement history must include initial context.
 ///
@@ -356,7 +360,14 @@ async fn run_compact_task_inner_impl(
     let history_items = history_snapshot.annotated_items();
     let summary_suffix =
         get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default();
-    let summary_text = format!("{SUMMARY_PREFIX}\n{summary_suffix}");
+    let rollout_path = match sess.current_rollout_path().await {
+        Ok(path) => path,
+        Err(err) => {
+            warn!("failed to resolve local compaction rollout recovery path: {err}");
+            None
+        }
+    };
+    let summary_text = build_local_compaction_summary(&summary_suffix, rollout_path.as_deref());
     let identity = if sess.guardian_context_mode == GuardianContextMode::ThreadOwned {
         CompactedMessageIdentity::Preserve
     } else {
@@ -406,6 +417,19 @@ async fn run_compact_task_inner_impl(
     });
     sess.send_event(&turn_context, warning).await;
     Ok(summary_suffix)
+}
+
+fn build_local_compaction_summary(summary: &str, rollout_path: Option<&Path>) -> String {
+    let summary = format!("{SUMMARY_PREFIX}\n{summary}");
+    let Some(path) = rollout_path else {
+        return summary;
+    };
+    format!(
+        "{summary}\n\n{ROLLOUT_RECOVERY_INTRO}\n`{}`\n\
+         If exact code, tool output, errors, or decisions are needed, read that rollout instead of \
+         guessing.",
+        path.display()
+    )
 }
 
 pub(crate) struct CompactionAnalyticsAttempt {
