@@ -1,11 +1,13 @@
 use super::residency::is_v2_resident_session_source;
 use super::*;
+use crate::agent::AgentIdentity;
 use crate::agent::role::apply_role_to_config;
 use crate::codex_thread::CodexThread;
 use crate::config::PermissionProfileSnapshot;
 use crate::context::ContextualUserFragment;
 use crate::context::CurrentTimeReminder;
 use crate::context::DeveloperInstructions;
+use crate::context::ForkedHistoryBoundary;
 use crate::context::GuardianContextMode;
 use crate::context::ManagedDeveloperInstructions;
 use crate::context::MultiAgentModeInstructions;
@@ -1064,6 +1066,51 @@ impl AgentControl {
                 | RolloutItem::SecurityRiskScore(_) => false,
             }
         });
+        if matches!(fork_mode, SpawnAgentForkMode::FullHistory) {
+            let identity = AgentIdentity::from_session_source(&session_source);
+            let mut opening_boundary = Some(ForkedHistoryBoundary::start(identity.clone()));
+            if preserve_reference_context_item {
+                for item in forked_rollout_items.iter_mut().rev() {
+                    let RolloutItem::Compacted(compacted) = item else {
+                        continue;
+                    };
+                    if let Some(replacement_history) = compacted.replacement_history.as_mut() {
+                        if let Some(opening_boundary) = opening_boundary.take() {
+                            replacement_history
+                                .insert(0, ContextualUserFragment::into(opening_boundary).into());
+                        }
+                        break;
+                    }
+                }
+            } else if let Some(insertion_index) =
+                forked_rollout_items.iter().rposition(
+                    |item| matches!(item, RolloutItem::Compacted(compacted) if compacted.replacement_history.is_none()),
+                )
+                && let Some(opening_boundary) = opening_boundary.take()
+            {
+                forked_rollout_items.insert(
+                    insertion_index,
+                    RolloutItem::ResponseItem(
+                        ContextualUserFragment::into(opening_boundary).into(),
+                    ),
+                );
+            }
+            if let Some(opening_boundary) = opening_boundary {
+                let insertion_index = forked_rollout_items
+                    .iter()
+                    .position(|item| matches!(item, RolloutItem::ResponseItem(_)))
+                    .unwrap_or(forked_rollout_items.len());
+                forked_rollout_items.insert(
+                    insertion_index,
+                    RolloutItem::ResponseItem(
+                        ContextualUserFragment::into(opening_boundary).into(),
+                    ),
+                );
+            }
+            let closing_boundary =
+                ContextualUserFragment::into(ForkedHistoryBoundary::end(identity));
+            forked_rollout_items.push(RolloutItem::ResponseItem(closing_boundary.into()));
+        }
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
         // context omitted the parent's developer fragment, append the child's override so its
         // instructions still reach the model exactly once.

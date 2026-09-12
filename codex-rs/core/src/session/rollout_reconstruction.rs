@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::ForkedHistoryBoundary;
 use crate::context::GuardianContextMode;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
@@ -390,6 +391,25 @@ impl Session {
                         // prompt shape.
                         // TODO(ccunningham): if we drop support for None replacement_history compaction items,
                         // we can get rid of this second loop entirely and just build `history` directly in the first loop.
+                        let initial_context = history
+                            .annotated_items()
+                            .last()
+                            .filter(|item| {
+                                matches!(
+                                    &item.item,
+                                    ResponseItem::Message {
+                                        internal_chat_message_metadata_passthrough: Some(metadata),
+                                        ..
+                                    } if metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
+                                        kinds.iter().any(
+                                            ForkedHistoryBoundary::matches_content_kind,
+                                        )
+                                    })
+                                )
+                            })
+                            .cloned()
+                            .into_iter()
+                            .collect();
                         let identity =
                             if self.guardian_context_mode == GuardianContextMode::ThreadOwned {
                                 compact::CompactedMessageIdentity::Preserve
@@ -401,7 +421,7 @@ impl Session {
                             identity,
                         );
                         let rebuilt = compact::build_compacted_history(
-                            Vec::new(),
+                            initial_context,
                             &user_messages,
                             &compacted.message,
                         );

@@ -63,6 +63,10 @@ const SPAWN_FRESH_PARENT_PROMPT: &str = "spawn a child with fresh context";
 const SPAWN_PARENT_PROMPT: &str = "spawn a child with the parent context";
 const SPAWN_SEED_PROMPT: &str = "seed parent history";
 
+fn input_text(item: &serde_json::Value) -> Option<&str> {
+    item["content"][0]["text"].as_str()
+}
+
 async fn agents_instructions(mut builder: TestCodexBuilder) -> Result<String> {
     let server = start_mock_server().await;
     let resp_mock = mount_sse_once(
@@ -1560,6 +1564,14 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
     assert_single_instruction_fragment(&seed_request, &expected_fragment);
     assert_single_instruction_fragment(&spawn_request, &expected_fragment);
     assert_single_instruction_fragment(&child_request, &expected_fragment);
+    assert!(
+        child_request.body_contains_text("You do not have a canonical agent path in this session"),
+        "v1 child startup should state that its canonical path is absent"
+    );
+    assert!(
+        child_request.body_contains_text("you are still not the `/root` main agent"),
+        "pathless child startup should not identify itself as root"
+    );
     assert_eq!(
         test.codex.instruction_sources().await,
         vec![PathUri::from_abs_path(&source)],
@@ -1573,12 +1585,37 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
     if fork_context {
         let seed_input = seed_request.input();
         let child_input = child_request.input();
+        let inherited_history_start = child_input
+            .iter()
+            .position(|item| {
+                input_text(item)
+                    .is_some_and(|text| text.contains("forked parent conversation history begins"))
+            })
+            .expect("forked child input should include the opening history boundary");
         assert_eq!(
-            child_input.get(..seed_input.len()),
+            child_input
+                .get(inherited_history_start + 1..inherited_history_start + 1 + seed_input.len()),
             Some(seed_input.as_slice()),
             "forked subagent should replay the parent's original structured input prefix"
         );
+        let inherited_history_end = child_input
+            .iter()
+            .position(|item| {
+                input_text(item)
+                    .is_some_and(|text| text.contains("forked parent conversation history ends"))
+            })
+            .expect("forked child input should include the closing history boundary");
+        let direct_task = child_input
+            .iter()
+            .position(|item| input_text(item) == Some(SPAWN_CHILD_PROMPT))
+            .expect("forked child input should include its direct task");
+        assert!(inherited_history_start < inherited_history_end);
+        assert!(inherited_history_end < direct_task);
     } else {
+        assert!(
+            !child_request.body_contains_text("forked parent conversation history"),
+            "ordinary child startup must not use fork-history boundary wording"
+        );
         let child_user_texts = child_request.message_input_texts("user");
         assert_eq!(
             child_user_texts
