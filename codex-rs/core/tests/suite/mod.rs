@@ -105,6 +105,7 @@ mod mcp_tool_cache;
 mod mcp_tool_exposure;
 mod mcp_turn_metadata;
 mod mcp_user_verification;
+mod model_aware_compaction;
 mod model_overrides;
 mod model_runtime_selectors;
 mod model_switching;

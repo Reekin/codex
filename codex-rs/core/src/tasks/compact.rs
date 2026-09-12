@@ -38,7 +38,10 @@ impl SessionTask for CompactTask {
             return Ok(None);
         }
 
-        let result = match ctx.provider.capabilities().remote_compaction {
+        let result = match crate::compaction_policy::remote_compaction_support(
+            ctx.provider.capabilities().remote_compaction,
+            ctx.model_info(),
+        ) {
             RemoteCompactionSupport::V2
                 if ctx.config.features.enabled(Feature::RemoteCompactionV2) =>
             {
