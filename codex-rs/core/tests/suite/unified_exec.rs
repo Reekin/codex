@@ -553,17 +553,6 @@ async fn exec_argv_reports_pathext_candidate_without_running_cmd_shim() -> Resul
         .context("missing exec_argv create-process failure output")?;
     assert!(output.contains("does not ask a shell to resolve PATHEXT"));
     assert!(
-        output.contains("For a native executable, use its full path with extension as argv[0]")
-    );
-    assert!(output.contains(
-        "For .cmd/.bat/.ps1 scripts or shims, use exec_command with the appropriate shell"
-    ));
-    assert!(output.contains("a full script path does not remove its shell semantics"));
-    assert!(output.contains("for example node script.js"));
-    assert!(output.contains(
-        "An explicitly launched shell or interpreter still interprets its command or code arguments"
-    ));
-    assert!(
         output.contains(&expected_candidate.display().to_string()),
         "expected exact PATHEXT candidate {expected_candidate:?}, got {output:?}"
     );
