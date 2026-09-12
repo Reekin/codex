@@ -36,6 +36,7 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
                 _ => "http_other",
             },
             ApiError::Transport(TransportError::Timeout) => "transport_timeout",
+            ApiError::Transport(TransportError::SlowUpload { .. }) => "slow_upload",
             ApiError::Transport(TransportError::Connection(_)) => "connection_error",
             ApiError::Transport(TransportError::Network(_)) => "network_error",
             ApiError::Transport(TransportError::RetryLimit) => "retry_limit",
