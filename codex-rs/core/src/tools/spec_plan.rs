@@ -998,6 +998,10 @@ fn add_core_tool_sources(context: &CoreToolPlanContext<'_>, registry: &mut ToolR
                 && !matches!(context.model_info.shell_type, ConfigShellToolType::Disabled)
             {
                 registry.add(ExecArgvHandler::new(ExecArgvHandlerOptions {
+                    allow_tty: turn_context
+                        .config
+                        .features
+                        .enabled(Feature::UnifiedExecTty),
                     exec_permission_approvals_enabled: false,
                     include_environment_id,
                 }));
@@ -1109,6 +1113,7 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
     };
     if features.enabled(Feature::UnifiedExec) {
         registry.add(ExecArgvHandler::new(ExecArgvHandlerOptions {
+            allow_tty: features.enabled(Feature::UnifiedExecTty),
             exec_permission_approvals_enabled,
             include_environment_id,
         }));

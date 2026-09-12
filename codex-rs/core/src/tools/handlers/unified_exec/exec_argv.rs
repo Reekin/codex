@@ -53,6 +53,7 @@ use super::shell_mode_for_environment;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecArgvHandlerOptions {
+    pub(crate) allow_tty: bool,
     pub(crate) exec_permission_approvals_enabled: bool,
     pub(crate) include_environment_id: bool,
 }
@@ -65,6 +66,7 @@ impl Default for ExecArgvHandler {
     fn default() -> Self {
         Self {
             options: ExecArgvHandlerOptions {
+                allow_tty: true,
                 exec_permission_approvals_enabled: false,
                 include_environment_id: false,
             },
@@ -150,6 +152,11 @@ impl ExecArgvHandler {
             Some(native_cwd) => parse_arguments_with_base_path(&arguments, native_cwd)?,
             None => parse_arguments(&arguments)?,
         };
+        if args.tty && !session.features().enabled(Feature::UnifiedExecTty) {
+            return Err(FunctionCallError::RespondToModel(
+                "TTY execution is disabled by config; omit `tty` or set it to false.".to_string(),
+            ));
+        }
         let command = validate_argv(args.argv)?;
         let hook_command = codex_shell_command::parse_command::shlex_join(&command);
         let hook_metadata =
@@ -337,13 +344,22 @@ impl ToolExecutor<ToolInvocation> for ExecArgvHandler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_exec_argv_tool_with_environment_id(
+        let mut spec = create_exec_argv_tool_with_environment_id(
             CommandToolOptions {
                 allow_login_shell: false,
                 exec_permission_approvals_enabled: self.options.exec_permission_approvals_enabled,
             },
             self.options.include_environment_id,
-        )
+        );
+        if !self.options.allow_tty
+            && let ToolSpec::Function(spec) = &mut spec
+        {
+            spec.parameters
+                .properties
+                .get_or_insert_default()
+                .remove("tty");
+        }
+        spec
     }
 
     fn supports_parallel_tool_calls(&self) -> bool {

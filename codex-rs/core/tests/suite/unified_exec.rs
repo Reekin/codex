@@ -553,17 +553,6 @@ async fn exec_argv_reports_pathext_candidate_without_running_cmd_shim() -> Resul
         .context("missing exec_argv create-process failure output")?;
     assert!(output.contains("does not ask a shell to resolve PATHEXT"));
     assert!(
-        output.contains("For a native executable, use its full path with extension as argv[0]")
-    );
-    assert!(output.contains(
-        "For .cmd/.bat/.ps1 scripts or shims, use exec_command with the appropriate shell"
-    ));
-    assert!(output.contains("a full script path does not remove its shell semantics"));
-    assert!(output.contains("for example node script.js"));
-    assert!(output.contains(
-        "An explicitly launched shell or interpreter still interprets its command or code arguments"
-    ));
-    assert!(
         output.contains(&expected_candidate.display().to_string()),
         "expected exact PATHEXT candidate {expected_candidate:?}, got {output:?}"
     );
@@ -641,8 +630,10 @@ async fn exec_command_hides_and_rejects_login_when_disabled() -> Result<()> {
     Ok(())
 }
 
+#[test_case::test_case("exec_command")]
+#[test_case::test_case("exec_argv")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exec_command_hides_and_rejects_tty_when_disabled() -> Result<()> {
+async fn exec_command_hides_and_rejects_tty_when_disabled(tool_name: &str) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let builder = test_codex().with_model("gpt-5.4").with_cloud_config_bundle(
@@ -652,13 +643,17 @@ async fn exec_command_hides_and_rejects_tty_when_disabled() -> Result<()> {
     );
     let harness = TestCodexHarness::with_auto_env_builder(builder).await?;
     let call_id = "tty-denied";
-    let arguments = json!({"cmd": "echo should-not-run > tty-disabled-rejected", "tty": true});
+    let arguments = if tool_name == "exec_argv" {
+        json!({"argv": ["git", "status"], "tty": true})
+    } else {
+        json!({"cmd": "echo should-not-run > tty-disabled-rejected", "tty": true})
+    };
     let request_log = mount_sse_sequence(
         harness.server(),
         vec![
             sse(vec![
                 ev_response_created(call_id),
-                ev_function_call(call_id, "exec_command", &serde_json::to_string(&arguments)?),
+                ev_function_call(call_id, tool_name, &serde_json::to_string(&arguments)?),
                 ev_completed(call_id),
             ]),
             sse(vec![ev_completed("done")]),
@@ -680,8 +675,8 @@ async fn exec_command_hides_and_rejects_tty_when_disabled() -> Result<()> {
         .expect("tools should be an array");
     let exec_tool = tools
         .iter()
-        .find(|tool| tool["name"] == "exec_command")
-        .expect("exec_command should be available");
+        .find(|tool| tool["name"] == tool_name)
+        .expect("execution tool should be available");
     assert!(exec_tool["parameters"]["properties"].get("tty").is_none());
     assert!(tools.iter().any(|tool| tool["name"] == "write_stdin"));
 

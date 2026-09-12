@@ -1562,7 +1562,10 @@ fn guardian_exec_command_uses_executor_cwd_convention(
         id: "command-1".to_string(),
         environment_id: codex_exec_server::REMOTE_ENVIRONMENT_ID.to_string(),
         command: vec!["git".to_string(), "status".to_string()],
-        hook_command: "git status".to_string(),
+        permission_request_payload: crate::tools::sandboxing::PermissionRequestPayload::bash(
+            "git status".to_string(),
+            /*description*/ None,
+        ),
         cwd,
         sandbox_permissions: SandboxPermissions::UseDefault,
         additional_permissions: None,

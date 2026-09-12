@@ -136,7 +136,10 @@ async fn non_utf8_cwd_preserves_approval_routing(
         id: context.call_id.clone(),
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         command: vec!["npm".to_string(), "install".to_string()],
-        hook_command: "npm install".to_string(),
+        permission_request_payload: PermissionRequestPayload::bash(
+            "npm install".to_string(),
+            /*description*/ None,
+        ),
         cwd: cwd.clone(),
         sandbox_permissions: if reviewer == ApprovalsReviewer::User {
             SandboxPermissions::RequireEscalated
