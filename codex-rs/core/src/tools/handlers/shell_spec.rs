@@ -128,9 +128,9 @@ pub(crate) fn create_exec_argv_tool_with_environment_id(
             "argv".to_string(),
             JsonSchema::array(
                 JsonSchema::string(Some(
-                    "One command argument. The first item is the program to execute.".to_string(),
+                    "One command argument. The first item names the native executable to launch.".to_string(),
                 )),
-                Some("Command argv vector to execute without shell interpretation.".to_string()),
+                Some("Program and arguments passed directly to process creation; the launched program may interpret its own arguments.".to_string()),
             ),
         ),
         (
@@ -173,7 +173,7 @@ pub(crate) fn create_exec_argv_tool_with_environment_id(
 
     ToolSpec::Function(ResponsesApiTool {
         name: "exec_argv".to_string(),
-        description: "Runs one external program with an argv vector and returns output or a session ID for ongoing interaction. This does not invoke a shell or interpret shell syntax; use exec_command for pipes, redirects, glob expansion, shell variables, shell builtins, or shell control flow."
+        description: "Runs one external native executable with an argv vector and returns output or a session ID for ongoing interaction. Use for direct program calls such as git status or node script.js. Use exec_command with the appropriate shell for pipelines, redirects, glob expansion, shell variables, builtins, control flow, shell initialization, and Windows .cmd/.bat/.ps1 scripts or shims. A full executable path can fix program lookup; a full script path does not remove its shell semantics. This tool adds no shell interpretation, but an explicitly launched shell or interpreter still interprets its command or code arguments; argv does not make those arguments literal data."
             .to_string(),
         strict: false,
         defer_loading: None,
