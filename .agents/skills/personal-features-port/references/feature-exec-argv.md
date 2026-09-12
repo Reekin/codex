@@ -2,8 +2,8 @@
 
 ## Goal
 
-Expose `exec_argv` for launching one external program from a literal argv vector without shell
-interpretation, while preserving its structured identity through hooks, approvals, background
+Expose `exec_argv` for launching one external native executable from an argv vector without adding
+shell interpretation, while preserving its structured identity through hooks, approvals, background
 sessions, and outputs.
 
 ## Non-Goals
@@ -19,8 +19,10 @@ sessions, and outputs.
 
 - **REQ-1 Input**: `argv` is a non-empty array of strings and `argv[0]` is a non-empty program
   name. Reject values that cannot be passed safely to process creation.
-- **REQ-2 Execution**: Pass argv literally to one process. Shell metacharacters remain ordinary
-  argument bytes.
+- **REQ-2 Execution**: Pass argv directly to one process without adding shell interpretation.
+  Shell metacharacters remain ordinary arguments to native programs. An explicitly launched shell
+  or interpreter still interprets its command or code arguments; argv is not a guarantee that those
+  arguments are treated as literal data.
 - **REQ-3 Separation**: A rendered command string is for logs, audit, hooks, and UI only. It is
   never execution truth.
 - **REQ-4 Tool identity**: PreToolUse, PermissionRequest, managed-network approval, PostToolUse,
@@ -34,7 +36,13 @@ sessions, and outputs.
   environment-backed execution tools are unavailable.
 - **REQ-8 Windows diagnostics**: If direct process creation fails for a bare program name,
   diagnostics may report exact `PATHEXT` candidates. Diagnostics must not change or retry the
-  executed argv.
+  executed argv. A full native executable path can fix lookup; a full script path does not remove
+  shell semantics. Direct `.cmd`, `.bat`, and `.ps1` scripts or shims to `exec_command` with the
+  appropriate shell, or suggest the underlying native executable such as `node script.js`.
+- **REQ-9 Tool guidance**: Recommend `exec_argv` for external native programs, including
+  `node script.js`. Recommend `exec_command` for pipelines, redirects, globbing, variables,
+  builtins, control flow, shell initialization, and Windows shell scripts or shims. Explain that
+  explicitly invoking a shell or interpreter retains its command or code interpretation.
 
 ## Portability Constraints
 
@@ -94,7 +102,8 @@ output and PostToolUse path retain the originating call ID, tool identity, and a
 ### Platform Behavior
 
 Prove argv-native requests skip shell-derived transforms. On Windows, prove missing bare commands
-suggest discovered executable/shim paths without executing them automatically.
+report discovered executable/shim paths without executing them automatically, and distinguish
+native executable lookup from script shell semantics in both tool guidance and diagnostics.
 
 ## Integration Contract
 

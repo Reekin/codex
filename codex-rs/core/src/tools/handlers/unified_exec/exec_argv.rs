@@ -489,9 +489,8 @@ fn windows_pathext_resolution_hint(program: &str, cwd: &Path) -> Option<String> 
         .map(|path| format!("`{}`", path.display()))
         .collect::<Vec<_>>()
         .join(", ");
-    let first = candidates[0].display();
     Some(format!(
-        "Windows note: `exec_argv` does not ask a shell to resolve PATHEXT entries for argv[0]. Found candidate command shim(s): {formatted_candidates}. Try using the full path with its extension, for example `{first}` as argv[0]."
+        "Windows note: `exec_argv` does not ask a shell to resolve PATHEXT entries for argv[0]. Found candidate path(s): {formatted_candidates}. For a native executable, use its full path with extension as argv[0] to fix program lookup. For .cmd/.bat/.ps1 scripts or shims, use exec_command with the appropriate shell; a full script path does not remove its shell semantics. Alternatively, launch the underlying native executable directly, for example node script.js. An explicitly launched shell or interpreter still interprets its command or code arguments."
     ))
 }
 
