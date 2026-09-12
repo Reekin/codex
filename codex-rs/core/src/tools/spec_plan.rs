@@ -805,15 +805,7 @@ fn image_generation_available(turn_context: &TurnContext, model_info: &ModelInfo
         return false;
     }
 
-    if !turn_context.provider.capabilities().image_generation {
-        return false;
-    }
-
-    if !model_info.input_modalities.contains(&InputModality::Image) {
-        return false;
-    }
-
-    true
+    model_info.input_modalities.contains(&InputModality::Image)
 }
 
 fn wait_agent_timeout_options(turn_context: &TurnContext) -> WaitAgentTimeoutOptions {
