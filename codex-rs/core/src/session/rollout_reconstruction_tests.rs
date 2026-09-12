@@ -1550,6 +1550,7 @@ async fn reconstruct_history_legacy_compaction_uses_typed_fork_boundary_not_word
         RolloutItem::Compacted(CompactedItem {
             message: "legacy summary".to_string(),
             replacement_history: None,
+            retained_context: None,
             guardian_history: None,
             mcp_resource_origins: None,
             window_number: None,
