@@ -12,6 +12,8 @@
 - large-request-upload-resilience：检测未完成的大请求上传异常，取消该次上传并通过新连接补试一次。
 - auth-independent-tools：已安装的生图工具满足功能开关、模型要求和套餐条件时，任何 provider 均可向模型暴露该工具，不按 provider 类型、声明的生图能力或登录方式隐藏；实际服务请求沿用原有凭据和授权流程。[用户：确保任何provider都能看到生图]
 
+integration 分支每次推送后自动发布 Windows x64 和 macOS Apple Silicon 便携包，作为仓库的 latest release。macOS 包只有 ad-hoc 签名、未经 Apple 公证：用 `gh release download` 或 `curl` 下载的包解压后可直接运行，浏览器下载的包首次运行前需要清除隔离属性。
+
 ## 明确不做什么
 
 个人功能集合及新版本迁移 skill 不包含 chattree。[用户：在新版本上移除skill里chattree的部分，只迁移其他几个ft。]
