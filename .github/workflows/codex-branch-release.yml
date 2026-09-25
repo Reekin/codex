@@ -1,0 +1,183 @@
+name: codex-branch-release
+
+on:
+  push:
+    branches:
+      - "integration-*"
+  workflow_dispatch:
+
+concurrency:
+  group: codex-branch-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository == 'Reekin/codex' && startsWith(github.ref_name, 'integration-')
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            package: codex-windows-x64.zip
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            package: codex-macos-arm64.tar.gz
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      CARGO_PROFILE_RELEASE_LTO: thin
+      TARGET: ${{ matrix.target }}
+      PACKAGE: ${{ matrix.package }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Configure LLVM linker
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Show runner resources
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "Logical CPUs: $(sysctl -n hw.logicalcpu)"
+          echo "RAM: $(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 )) GiB"
+          df -h .
+
+      - name: Build portable package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          fi
+          workspace="${GITHUB_WORKSPACE}"
+          if command -v cygpath >/dev/null 2>&1; then
+            workspace="$(cygpath -u "$workspace")"
+          fi
+          mkdir -p "${workspace}/dist"
+
+          python3 "${workspace}/scripts/build_codex_package.py" \
+            --target "$TARGET" \
+            --variant codex \
+            --cargo-profile release \
+            --package-dir "${RUNNER_TEMP}/codex-package-${TARGET}" \
+            --archive-output "${workspace}/dist/${PACKAGE}" \
+            --force
+          ls -lh "${workspace}/dist"
+
+      - name: Smoke-test extracted package
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          mkdir -p package-verify
+          case "$PACKAGE" in
+            *.zip) python3 -m zipfile -e "dist/${PACKAGE}" package-verify ;;
+            *.tar.gz) tar -xzf "dist/${PACKAGE}" -C package-verify ;;
+          esac
+          cd package-verify
+          cat codex-package.json
+
+          exe=""
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            exe=".exe"
+          fi
+          "bin/codex${exe}" --version
+          "bin/codex-code-mode-host${exe}" --help >/dev/null
+          "codex-path/rg${exe}" --version
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            codex-resources/zsh/bin/zsh --version
+            file bin/* codex-path/* codex-resources/zsh/bin/zsh
+          fi
+
+      - name: Upload package
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-package-${{ matrix.target }}
+          path: dist/${{ matrix.package }}
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: build
+    name: Publish latest release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: codex-package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          short_sha="${GITHUB_SHA::12}"
+          release_tag="codex-${short_sha}"
+          notes_path="${RUNNER_TEMP}/codex-release-notes.md"
+
+          (cd dist && sha256sum -- * > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+          cat > "$notes_path" <<'EOF'
+          Automated dev build of branch `${{ github.ref_name }}`.
+
+          - Commit: `${{ github.sha }}`
+          - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Packages:
+
+          - `codex-windows-x64.zip`: Windows x64. Extract it and run `bin\codex.exe`.
+          - `codex-macos-arm64.tar.gz`: macOS on Apple Silicon. The archive has no top-level folder, so extract it into a new directory: `mkdir codex && tar -xzf codex-macos-arm64.tar.gz -C codex`, then run `codex/bin/codex`.
+
+          Keep each extracted package directory intact: `codex` loads the code-mode host and bundled tools from it.
+
+          The macOS binaries are ad-hoc signed and not notarized. Archives fetched with `gh release download` or `curl` run as is. After a browser download, run `xattr -dr com.apple.quarantine <extracted-dir>` once before the first launch.
+          EOF
+
+          if gh release view "$release_tag" >/dev/null 2>&1; then
+            gh release edit "$release_tag" \
+              --title "Codex ${short_sha}" \
+              --notes-file "$notes_path" \
+              --latest
+          else
+            gh release create "$release_tag" \
+              --target "$GITHUB_SHA" \
+              --title "Codex ${short_sha}" \
+              --notes-file "$notes_path" \
+              --latest
+          fi
+
+          gh release upload "$release_tag" dist/* --clobber
