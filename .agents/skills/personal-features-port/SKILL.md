@@ -48,6 +48,7 @@ Read only the target feature reference unless integration work needs more.
 | Local compaction handoff | `ft/local-compaction-handoff-<upstream-version>` | lifecycle policy | `references/feature-local-compaction-handoff.md` |
 | Large request upload resilience | `ft/large-request-upload-resilience-<upstream-version>` | lifecycle policy | `references/feature-large-request-upload-resilience.md` |
 | Auth-independent tool exposure | `ft/auth-independent-tools-<upstream-version>` | typed projection | `references/feature-auth-independent-tools.md` |
+| Image-generation options | `ft/imagegen-options-<upstream-version>` | typed projection | `references/feature-imagegen-options.md` |
 
 For integration packaging and release work, also read
 `references/integration-release-automation.md`.

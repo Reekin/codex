@@ -43,12 +43,14 @@ pub enum ImageBackground {
     Auto,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ImageQuality {
     Low,
     Medium,
     High,
+    Xhigh,
+    Max,
     Auto,
 }
 

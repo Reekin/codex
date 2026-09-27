@@ -88,6 +88,12 @@ impl ImageGenerationTool {
 #[serde(deny_unknown_fields)]
 struct ImagegenArgs {
     prompt: String,
+    /// Image model identifier; defaults to gpt-image-2. Forwarded unchanged to the provider.
+    model: Option<String>,
+    /// Output size as WIDTHxHEIGHT or auto (default). Supported sizes depend on the provider.
+    size: Option<String>,
+    /// Image quality; defaults to auto. Supported quality levels depend on the image model.
+    quality: Option<ImageQuality>,
     #[schemars(length(max = 5))]
     referenced_image_paths: Option<Vec<AbsolutePathBuf>>,
     #[schemars(range(min = 1, max = 5))]
@@ -422,10 +428,13 @@ async fn request_for_call_args(
             return Ok(ImageRequest::Generate(ImageGenerationRequest {
                 prompt: args.prompt.clone(),
                 background: Some(ImageBackground::Auto),
-                model: IMAGE_MODEL.to_string(),
+                model: args
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| IMAGE_MODEL.to_string()),
                 n: None,
-                quality: Some(ImageQuality::Auto),
-                size: Some("auto".to_string()),
+                quality: Some(args.quality.unwrap_or(ImageQuality::Auto)),
+                size: Some(args.size.clone().unwrap_or_else(|| "auto".to_string())),
             }));
         }
         (false, None) => {
@@ -470,10 +479,13 @@ async fn request_for_call_args(
         images,
         prompt: args.prompt.clone(),
         background: Some(ImageBackground::Auto),
-        model: IMAGE_MODEL.to_string(),
+        model: args
+            .model
+            .clone()
+            .unwrap_or_else(|| IMAGE_MODEL.to_string()),
         n: None,
-        quality: Some(ImageQuality::Auto),
-        size: Some("auto".to_string()),
+        quality: Some(args.quality.unwrap_or(ImageQuality::Auto)),
+        size: Some(args.size.clone().unwrap_or_else(|| "auto".to_string())),
     }))
 }
 

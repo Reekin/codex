@@ -40,6 +40,9 @@ use super::analytics::wait_for_analytics_event;
 #[path = "imagegen_auth_independent_tests.rs"]
 mod auth_independent_tests;
 
+#[path = "imagegen_options_tests.rs"]
+mod options_tests;
+
 const RESULT: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 const TINY_PNG_BYTES: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
@@ -716,6 +719,9 @@ async fn standalone_image_generation_is_callable_from_code_mode_only() -> Result
                     r#"
 const result = await tools.image_gen__imagegen({
   prompt: "paint a blue whale",
+  model: "provider-image-model",
+  size: "1536x864",
+  quality: "xhigh",
 });
 generatedImage(result);
 "#,
@@ -757,6 +763,24 @@ generatedImage(result);
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
     assert!(requests[0].body_contains_text("image_gen__imagegen"));
+    let image_requests = server
+        .received_requests()
+        .await
+        .context("received requests")?;
+    let image_request = image_requests
+        .iter()
+        .find(|request| request.url.path() == "/api/codex/images/generations")
+        .context("image generation request")?;
+    assert_eq!(
+        image_request.body_json::<serde_json::Value>()?,
+        json!({
+            "prompt": "paint a blue whale",
+            "model": "provider-image-model",
+            "size": "1536x864",
+            "quality": "xhigh",
+            "background": "auto",
+        })
+    );
     let output = requests[1].custom_tool_call_output(call_id);
     assert_eq!(
         output["output"][1],
