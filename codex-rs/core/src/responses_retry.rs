@@ -16,6 +16,7 @@ use tracing::warn;
 
 const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
+const STREAM_IDLE_TIMEOUT_INCREMENT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -24,6 +25,7 @@ pub(crate) enum ResponsesStreamRequest {
 }
 
 pub(crate) struct ResponsesStreamRetryState {
+    failed_attempts: u32,
     retries: u64,
     connection_retries: u64,
     connection_retry_delay: Duration,
@@ -32,10 +34,18 @@ pub(crate) struct ResponsesStreamRetryState {
 impl Default for ResponsesStreamRetryState {
     fn default() -> Self {
         Self {
+            failed_attempts: 0,
             retries: 0,
             connection_retries: 0,
             connection_retry_delay: INITIAL_CONNECTION_RETRY_DELAY,
         }
+    }
+}
+
+impl ResponsesStreamRetryState {
+    pub(crate) fn stream_idle_timeout(&self, initial_timeout: Duration) -> Duration {
+        initial_timeout
+            .saturating_add(STREAM_IDLE_TIMEOUT_INCREMENT.saturating_mul(self.failed_attempts))
     }
 }
 
@@ -50,6 +60,9 @@ pub(crate) async fn handle_retryable_response_stream_error(
     turn_context: &TurnContext,
     request: ResponsesStreamRequest,
 ) -> Result<(), CodexErr> {
+    // Keep timeout growth across reconnects and WebSocket-to-HTTP fallback, even when the
+    // transport-specific retry budget resets.
+    retry_state.failed_attempts = retry_state.failed_attempts.saturating_add(1);
     let operation = match request {
         ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
         ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,
