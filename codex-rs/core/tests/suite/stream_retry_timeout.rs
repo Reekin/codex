@@ -8,41 +8,45 @@ use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
-use std::time::Duration;
 use tokio::sync::oneshot;
 
+#[rstest::rstest]
+#[case::original_finishes_first("primary")]
+#[case::backup_finishes_first("backup")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn retry_waits_longer_and_tool_continuation_resets_idle_timeout() -> anyhow::Result<()> {
+async fn only_the_winning_request_executes_its_tool(#[case] winner: &str) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let tool_response = responses::sse(vec![
-        responses::ev_function_call(
-            "plan-call",
-            "update_plan",
-            r#"{"plan":[{"step":"Check stream retry","status":"completed"}]}"#,
-        ),
-        responses::ev_completed("tool-response"),
-    ]);
-    let final_response = responses::sse(vec![
-        responses::ev_assistant_message("final", "done"),
-        responses::ev_completed("final-response"),
-    ]);
     let mut gates = Vec::new();
     let mut streams = Vec::new();
-    for body in [String::new(), tool_response, String::new(), final_response] {
+    for id in ["primary", "backup"] {
         let (tx, rx) = oneshot::channel();
         gates.push(tx);
         streams.push(vec![
             StreamingSseChunk {
                 gate: None,
-                body: responses::sse(vec![responses::ev_response_created("response")]),
+                body: responses::sse(vec![responses::ev_response_created(id)]),
             },
             StreamingSseChunk {
                 gate: Some(rx),
-                body,
+                body: responses::sse(vec![
+                    responses::ev_function_call(
+                        id,
+                        "update_plan",
+                        r#"{"plan":[{"step":"Check stream retry","status":"completed"}]}"#,
+                    ),
+                    responses::ev_completed(id),
+                ]),
             },
         ]);
     }
+    streams.push(vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse(vec![
+            responses::ev_assistant_message("final", "done"),
+            responses::ev_completed("final-response"),
+        ]),
+    }]);
     let (server, _) = start_streaming_sse_server(streams).await;
     let test = test_codex()
         .with_config(|config| {
@@ -60,23 +64,11 @@ async fn retry_waits_longer_and_tool_continuation_resets_idle_timeout() -> anyho
         }]))
         .await?;
 
-    let mut gates = gates.into_iter();
-    for expected_requests in [2, 4] {
-        let EventMsg::StreamError(error) = wait_for_event(&test.codex, |event| {
-            matches!(event, EventMsg::StreamError(_))
-        })
-        .await
-        else {
-            unreachable!("predicate guarantees a stream error");
-        };
-        assert_eq!(error.message, "Reconnecting... 1/1");
-        // Close the timed-out stream, then hold the retry longer than the initial timeout.
-        drop(gates.next().unwrap());
-        server.wait_for_request_count(expected_requests).await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        gates.next().unwrap().send(()).unwrap();
-    }
-
+    server.wait_for_request_count(2).await;
+    gates
+        .remove(usize::from(winner == "backup"))
+        .send(())
+        .unwrap();
     let EventMsg::TurnComplete(completed) = wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
@@ -85,7 +77,18 @@ async fn retry_waits_longer_and_tool_continuation_resets_idle_timeout() -> anyho
         unreachable!("predicate guarantees turn completion");
     };
     assert_eq!(completed.error, None);
-    assert_eq!(server.requests().await.len(), 4);
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 3);
+    let continuation: serde_json::Value = serde_json::from_slice(&requests[2])?;
+    let calls: Vec<_> = continuation["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "function_call")
+        .map(|item| item["call_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(calls, vec![winner]);
+    drop(gates);
     server.shutdown().await;
     Ok(())
 }

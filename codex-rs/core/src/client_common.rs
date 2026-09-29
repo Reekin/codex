@@ -7,6 +7,7 @@ use codex_protocol::models::ResponseItem;
 use codex_tools::ToolSpec;
 use futures::Stream;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -107,6 +108,7 @@ fn strip_image_details(items: &mut [ResponseItem]) {
 }
 
 pub struct ResponseStream {
+    pub(crate) buffered: VecDeque<ResponseEvent>,
     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
     /// Signals the mapper task that the consumer stopped polling before the
     /// provider stream reached its own terminal event.
@@ -117,6 +119,9 @@ impl Stream for ResponseStream {
     type Item = Result<ResponseEvent>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(event) = self.buffered.pop_front() {
+            return Poll::Ready(Some(Ok(event)));
+        }
         self.rx_event.poll_recv(cx)
     }
 }

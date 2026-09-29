@@ -383,8 +383,9 @@ async fn run_remote_compaction_request_v2(
         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
     let mut retry_state = ResponsesStreamRetryState::default();
     loop {
-        client_session.set_stream_idle_timeout(
+        client_session.set_stream_retry_options(
             retry_state.stream_idle_timeout(turn_context.provider.info().stream_idle_timeout()),
+            retry_state.remaining_retries(max_retries),
         );
         let result = match client_session
             .stream(
@@ -815,6 +816,7 @@ mod tests {
         }
         drop(tx_event);
         ResponseStream {
+            buffered: Default::default(),
             rx_event,
             consumer_dropped: CancellationToken::new(),
         }
