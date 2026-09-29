@@ -16,7 +16,7 @@ use tracing::warn;
 
 const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
-const STREAM_IDLE_TIMEOUT_INCREMENT: Duration = Duration::from_secs(5 * 60);
+pub(crate) const STREAM_IDLE_TIMEOUT_INCREMENT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -43,6 +43,10 @@ impl Default for ResponsesStreamRetryState {
 }
 
 impl ResponsesStreamRetryState {
+    pub(crate) fn remaining_retries(&self, max_retries: u64) -> u64 {
+        max_retries.saturating_sub(self.retries)
+    }
+
     pub(crate) fn stream_idle_timeout(&self, initial_timeout: Duration) -> Duration {
         initial_timeout
             .saturating_add(STREAM_IDLE_TIMEOUT_INCREMENT.saturating_mul(self.failed_attempts))
@@ -62,7 +66,11 @@ pub(crate) async fn handle_retryable_response_stream_error(
 ) -> Result<(), CodexErr> {
     // Keep timeout growth across reconnects and WebSocket-to-HTTP fallback, even when the
     // transport-specific retry budget resets.
-    retry_state.failed_attempts = retry_state.failed_attempts.saturating_add(1);
+    let hedged_retry = client_session.take_hedged_retry();
+    retry_state.retries = retry_state.retries.saturating_add(hedged_retry);
+    retry_state.failed_attempts = retry_state
+        .failed_attempts
+        .saturating_add(1 + hedged_retry as u32);
     let operation = match request {
         ResponsesStreamRequest::Sampling => RetryOperation::Sampling,
         ResponsesStreamRequest::RemoteCompactionV2 => RetryOperation::RemoteCompactionV2,

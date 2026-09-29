@@ -280,6 +280,9 @@ pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
     stream_idle_timeout: Duration,
+    hedge_allowed: bool,
+    hedge_started: bool,
+    cache_websocket_on_drop: bool,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -525,6 +528,9 @@ impl ModelClient {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
             stream_idle_timeout: self.state.provider.info().stream_idle_timeout(),
+            hedge_allowed: self.state.provider.info().stream_max_retries() > 0,
+            hedge_started: false,
+            cache_websocket_on_drop: true,
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -1273,15 +1279,24 @@ impl ModelClient {
 
 impl Drop for ModelClientSession {
     fn drop(&mut self) {
-        let websocket_session = std::mem::take(&mut self.websocket_session);
-        self.client
-            .store_cached_websocket_session(websocket_session);
+        if self.cache_websocket_on_drop {
+            let websocket_session = std::mem::take(&mut self.websocket_session);
+            self.client
+                .store_cached_websocket_session(websocket_session);
+        }
     }
 }
 
+mod hedged_stream;
+
 impl ModelClientSession {
-    pub(crate) fn set_stream_idle_timeout(&mut self, timeout: Duration) {
+    pub(crate) fn set_stream_retry_options(&mut self, timeout: Duration, remaining_retries: u64) {
         self.stream_idle_timeout = timeout;
+        self.hedge_allowed = remaining_retries > 0;
+    }
+
+    pub(crate) fn take_hedged_retry(&mut self) -> u64 {
+        u64::from(std::mem::take(&mut self.hedge_started))
     }
 
     pub(crate) fn turn_state(&self) -> Arc<OnceLock<String>> {
@@ -1529,15 +1544,12 @@ impl ModelClientSession {
                 .set_connection_reused(/*connection_reused*/ true);
         }
 
-        let connection = self
-            .websocket_session
+        self.websocket_session
             .connection
-            .as_mut()
+            .as_ref()
             .ok_or(ApiError::Stream(
                 "websocket connection is unavailable".to_string(),
-            ))?;
-        connection.set_idle_timeout(self.stream_idle_timeout);
-        Ok(connection)
+            ))
     }
 
     fn responses_request_compression(&self, auth: Option<&CodexAuth>) -> Compression {
@@ -1578,6 +1590,7 @@ impl ModelClientSession {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
+        idle_timeout: Duration,
     ) -> Result<ResponseStream> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
@@ -1587,7 +1600,7 @@ impl ModelClientSession {
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
             let mut client_setup = self.client.current_client_setup().await?;
-            client_setup.api_provider.stream_idle_timeout = self.stream_idle_timeout;
+            client_setup.api_provider.stream_idle_timeout = idle_timeout;
             let endpoint = self
                 .client
                 .responses_endpoint(client_setup.auth.as_ref(), &model_info.slug);
@@ -1744,6 +1757,7 @@ impl ModelClientSession {
         warmup: bool,
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
+        idle_timeout: Duration,
     ) -> Result<WebsocketStreamOutcome> {
         let provider = Arc::clone(&self.client.state.provider);
         let auth_manager = provider.auth_manager();
@@ -1896,16 +1910,18 @@ impl ModelClientSession {
                 inference_trace_attempt.record_started(&ws_request);
             }
 
+            let connection_reused = self.websocket_session.connection_reused();
             let websocket_connection =
-                self.websocket_session.connection.as_ref().ok_or_else(|| {
+                self.websocket_session.connection.as_mut().ok_or_else(|| {
                     self.client.state.provider.map_api_error(ApiError::Stream(
                         "websocket connection is unavailable".to_string(),
                     ))
                 })?;
+            websocket_connection.set_idle_timeout(idle_timeout);
             let stream_result = websocket_connection
                 .stream_request(
                     ws_request,
-                    self.websocket_session.connection_reused(),
+                    connection_reused,
                     Some(Arc::clone(&self.turn_state)),
                 )
                 .await;
@@ -2003,6 +2019,7 @@ impl ModelClientSession {
                 /*warmup*/ true,
                 current_span_w3c_trace_context(),
                 &disabled_trace,
+                self.stream_idle_timeout,
             )
             .await
         {
@@ -2034,7 +2051,7 @@ impl ModelClientSession {
     /// fall back to the HTTP Responses API transport otherwise. The trace context may be enabled or
     /// disabled, but is always explicit so transport paths do not need separate trace/no-trace
     /// branches.
-    pub async fn stream(
+    async fn stream_once(
         &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
@@ -2044,6 +2061,7 @@ impl ModelClientSession {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
+        idle_timeout: Duration,
     ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
@@ -2062,6 +2080,7 @@ impl ModelClientSession {
                             /*warmup*/ false,
                             request_trace,
                             inference_trace,
+                            idle_timeout,
                         )
                         .await?
                     {
@@ -2081,6 +2100,7 @@ impl ModelClientSession {
                     service_tier,
                     responses_metadata,
                     inference_trace,
+                    idle_timeout,
                 )
                 .await
             }
@@ -2325,6 +2345,7 @@ where
 
     (
         ResponseStream {
+            buffered: Default::default(),
             rx_event,
             consumer_dropped: consumer_dropped_for_stream,
         },
