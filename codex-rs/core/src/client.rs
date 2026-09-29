@@ -279,6 +279,7 @@ pub struct ModelClient {
 pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
+    stream_idle_timeout: Duration,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -523,6 +524,7 @@ impl ModelClient {
         ModelClientSession {
             client: self.clone(),
             websocket_session: self.take_cached_websocket_session(),
+            stream_idle_timeout: self.state.provider.info().stream_idle_timeout(),
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -1278,6 +1280,10 @@ impl Drop for ModelClientSession {
 }
 
 impl ModelClientSession {
+    pub(crate) fn set_stream_idle_timeout(&mut self, timeout: Duration) {
+        self.stream_idle_timeout = timeout;
+    }
+
     pub(crate) fn turn_state(&self) -> Arc<OnceLock<String>> {
         Arc::clone(&self.turn_state)
     }
@@ -1523,12 +1529,15 @@ impl ModelClientSession {
                 .set_connection_reused(/*connection_reused*/ true);
         }
 
-        self.websocket_session
+        let connection = self
+            .websocket_session
             .connection
-            .as_ref()
+            .as_mut()
             .ok_or(ApiError::Stream(
                 "websocket connection is unavailable".to_string(),
-            ))
+            ))?;
+        connection.set_idle_timeout(self.stream_idle_timeout);
+        Ok(connection)
     }
 
     fn responses_request_compression(&self, auth: Option<&CodexAuth>) -> Compression {
@@ -1577,7 +1586,8 @@ impl ModelClientSession {
         let mut provider_auth_recovery_attempted = false;
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
-            let client_setup = self.client.current_client_setup().await?;
+            let mut client_setup = self.client.current_client_setup().await?;
+            client_setup.api_provider.stream_idle_timeout = self.stream_idle_timeout;
             let endpoint = self
                 .client
                 .responses_endpoint(client_setup.auth.as_ref(), &model_info.slug);

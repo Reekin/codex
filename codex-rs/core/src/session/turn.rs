@@ -1469,6 +1469,9 @@ async fn run_sampling_request(
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
+        client_session.set_stream_idle_timeout(
+            retry_state.stream_idle_timeout(turn_context.provider.info().stream_idle_timeout()),
+        );
         // A retry must not attribute the next tool call to the previous response.
         turn_context
             .extension_data

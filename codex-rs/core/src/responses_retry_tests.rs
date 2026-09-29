@@ -1,9 +1,36 @@
 use super::ResponsesStreamRequest;
+use super::ResponsesStreamRetryState;
 use super::log_retry;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::error::CodexErr;
+use pretty_assertions::assert_eq;
 use std::time::Duration;
 use tracing_test::internal::MockWriter;
+
+#[test]
+fn idle_timeout_tracks_failures_independently_of_transport_retry_budget() {
+    let mut state = ResponsesStreamRetryState {
+        failed_attempts: 2,
+        retries: 2,
+        ..Default::default()
+    };
+    let configured_timeout = Duration::from_secs(90);
+    let timeout = state.stream_idle_timeout(configured_timeout);
+    assert_eq!(timeout, Duration::from_secs(690));
+
+    state.retries = 0;
+    assert_eq!(state.stream_idle_timeout(configured_timeout), timeout);
+    state.failed_attempts += 1;
+    assert_eq!(
+        state.stream_idle_timeout(configured_timeout),
+        Duration::from_secs(990)
+    );
+    assert_eq!(state.stream_idle_timeout(Duration::MAX), Duration::MAX);
+    assert_eq!(
+        ResponsesStreamRetryState::default().stream_idle_timeout(configured_timeout),
+        configured_timeout
+    );
+}
 
 #[tokio::test]
 async fn sampling_retry_logs_stream_error_context() {
