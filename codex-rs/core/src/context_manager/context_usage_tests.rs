@@ -96,7 +96,8 @@ fn breakdown_classifies_history_and_sums_to_active_tokens() {
             output: FunctionCallOutputPayload::from_text(long.clone()),
             internal_chat_message_metadata_passthrough: None,
         },
-        plain_message("assistant", &long),
+        // Recorded model output carries an `unknown` classification.
+        classified_message("assistant", &[("unknown", &long)]),
     ];
     let overhead = RequestOverhead::new(&long, /*tools_tokens*/ 1_000);
 
