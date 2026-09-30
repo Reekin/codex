@@ -851,9 +851,8 @@ async fn drain_to_completed(
                 sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
                     .await;
             }
-            Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
-                sess.set_server_reasoning_included(included).await;
-            }
+            // Provider usage totals already cover retained reasoning.
+            Ok(ResponseEvent::ServerReasoningIncluded(_)) => {}
             Ok(ResponseEvent::RateLimits(snapshot)) => {
                 sess.update_rate_limits(turn_context, snapshot).await;
             }

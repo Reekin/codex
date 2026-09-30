@@ -3410,6 +3410,7 @@ mod tests {
                     },
                     last_token_usage: codex_protocol::protocol::TokenUsage::default(),
                     model_context_window: None,
+                    context_usage: None,
                 }),
                 rate_limits: None,
             },

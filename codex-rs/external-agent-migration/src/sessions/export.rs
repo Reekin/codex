@@ -194,6 +194,7 @@ fn token_count_item(last_model_visible_tokens: i64) -> RolloutItem {
             total_token_usage: usage.clone(),
             last_token_usage: usage,
             model_context_window: None,
+            context_usage: None,
         }),
         rate_limits: None,
     }))

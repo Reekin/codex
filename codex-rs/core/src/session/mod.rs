@@ -219,6 +219,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::exec_output::StreamOutput;
 
 mod code_mode_warning;
+mod context_usage;
 pub(crate) mod context_window;
 mod environment;
 pub(crate) mod extension_metrics;
@@ -1304,7 +1305,7 @@ impl Session {
 
     pub(crate) async fn get_total_token_usage(&self) -> i64 {
         let state = self.state.lock().await;
-        state.get_total_token_usage(state.server_reasoning_included())
+        state.get_total_token_usage()
     }
 
     pub(crate) async fn auto_compact_window_snapshot(&self) -> AutoCompactWindowSnapshot {
@@ -4458,6 +4459,7 @@ impl Session {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
                 model_context_window: None,
+                context_usage: None,
             });
 
             info.last_token_usage = TokenUsage {
@@ -4513,12 +4515,8 @@ impl Session {
         state.record_mcp_dependency_prompted(names);
     }
 
-    pub(crate) async fn set_server_reasoning_included(&self, included: bool) {
-        let mut state = self.state.lock().await;
-        state.set_server_reasoning_included(included);
-    }
-
     pub(crate) async fn send_token_count_event(&self, turn_context: &TurnContext) {
+        self.refresh_context_usage(turn_context).await;
         let (info, rate_limits) = {
             let state = self.state.lock().await;
             state.token_info_and_rate_limits()

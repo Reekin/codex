@@ -3868,6 +3868,7 @@ mod tests {
                 codex_rollout_budget_units: None,
             },
             model_context_window: Some(4096),
+            context_usage: None,
         };
         let rate_limits = RateLimitSnapshot {
             limit_id: Some("codex".to_string()),

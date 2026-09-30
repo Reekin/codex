@@ -56,7 +56,6 @@ impl SessionTask for RegularTask {
                 collaboration_mode_kind: ctx.mode(),
             });
             sess.send_event(ctx.as_ref(), event).await;
-            sess.set_server_reasoning_included(/*included*/ false).await;
             sess.consume_startup_prewarm_for_regular_turn(&cancellation_token)
                 .await
         }

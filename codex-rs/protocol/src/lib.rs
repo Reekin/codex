@@ -21,6 +21,7 @@ pub use tool_name::ToolName;
 pub mod approvals;
 pub mod capabilities;
 pub mod config_types;
+pub mod context_usage;
 pub mod dynamic_tools;
 mod environment;
 pub mod error;
