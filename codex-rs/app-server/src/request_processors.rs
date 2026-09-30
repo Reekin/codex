@@ -564,6 +564,7 @@ mod thread_input;
 mod thread_processor;
 mod thread_queue_processor;
 mod thread_sections;
+mod thread_token_usage_read;
 mod token_usage_replay;
 mod turn_processor;
 mod windows_sandbox_processor;

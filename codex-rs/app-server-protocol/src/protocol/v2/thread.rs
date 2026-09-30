@@ -1888,6 +1888,9 @@ pub struct ThreadTokenUsage {
     // TODO(aibrahim): make this not optional
     #[ts(type = "number | null")]
     pub model_context_window: Option<i64>,
+    /// Active context usage; absent for snapshots recorded without it.
+    #[serde(default)]
+    pub context_usage: Option<super::ThreadContextUsage>,
 }
 
 impl From<CoreTokenUsageInfo> for ThreadTokenUsage {
@@ -1896,6 +1899,7 @@ impl From<CoreTokenUsageInfo> for ThreadTokenUsage {
             total: value.total_token_usage.into(),
             last: value.last_token_usage.into(),
             model_context_window: value.model_context_window,
+            context_usage: value.context_usage.map(Into::into),
         }
     }
 }

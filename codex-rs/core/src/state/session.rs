@@ -37,7 +37,8 @@ pub(crate) struct SessionState {
     pub(crate) history: ContextManager,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
-    pub(crate) server_reasoning_included: bool,
+    /// Estimated tool-definition tokens of the latest sampling request.
+    pub(crate) request_tools_tokens: i64,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
     pub(crate) additional_context: AdditionalContextStore,
     /// Settings used by the latest regular user turn, used for turn-to-turn
@@ -79,7 +80,7 @@ impl SessionState {
             history,
             latest_rate_limits: None,
             latest_token_usage_record: None,
-            server_reasoning_included: false,
+            request_tools_tokens: 0,
             mcp_dependency_prompted: HashSet::new(),
             additional_context: AdditionalContextStore::default(),
             previous_turn_settings: None,
@@ -292,17 +293,8 @@ impl SessionState {
         self.history.set_token_usage_full(context_window);
     }
 
-    pub(crate) fn get_total_token_usage(&self, server_reasoning_included: bool) -> i64 {
-        self.history
-            .get_total_token_usage(server_reasoning_included)
-    }
-
-    pub(crate) fn set_server_reasoning_included(&mut self, included: bool) {
-        self.server_reasoning_included = included;
-    }
-
-    pub(crate) fn server_reasoning_included(&self) -> bool {
-        self.server_reasoning_included
+    pub(crate) fn get_total_token_usage(&self) -> i64 {
+        self.history.get_total_token_usage()
     }
 
     pub(crate) fn record_mcp_dependency_prompted<I>(&mut self, names: I)

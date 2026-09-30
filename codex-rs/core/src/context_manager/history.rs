@@ -633,32 +633,6 @@ impl ContextManager {
         );
     }
 
-    fn get_non_last_reasoning_items_tokens(&self) -> i64 {
-        // Get reasoning items excluding all the ones after the last instruction boundary.
-        let Some(last_user_index) = self
-            .items
-            .iter()
-            .rposition(|envelope| is_user_turn_boundary(&envelope.item))
-        else {
-            return 0;
-        };
-
-        self.items
-            .iter()
-            .take(last_user_index)
-            .filter(|envelope| {
-                matches!(
-                    &envelope.item,
-                    ResponseItem::Reasoning {
-                        encrypted_content: Some(_),
-                        ..
-                    }
-                )
-            })
-            .map(|envelope| estimate_item_token_count(&envelope.item))
-            .fold(0i64, i64::saturating_add)
-    }
-
     // These are local items added after the most recent model-emitted item.
     // They are not reflected in `last_token_usage.total_tokens`.
     fn items_after_last_model_generated_item(
@@ -672,25 +646,15 @@ impl ContextManager {
         self.items[start..].iter().map(|envelope| &envelope.item)
     }
 
-    /// When true, the server already accounted for past reasoning tokens and
-    /// the client should not re-estimate them.
-    pub(crate) fn get_total_token_usage(&self, server_reasoning_included: bool) -> i64 {
+    /// Active context usage: the provider-reported total of the latest response plus local
+    /// items appended after it. Provider totals already account for retained reasoning.
+    pub(crate) fn get_total_token_usage(&self) -> i64 {
         let last_tokens = self
             .token_info
             .as_ref()
             .map(|info| info.last_token_usage.total_tokens)
             .unwrap_or(0);
-        let items_after_last_model_generated_tokens = self
-            .items_after_last_model_generated_item()
-            .map(estimate_item_token_count)
-            .fold(0i64, i64::saturating_add);
-        if server_reasoning_included {
-            last_tokens.saturating_add(items_after_last_model_generated_tokens)
-        } else {
-            last_tokens
-                .saturating_add(self.get_non_last_reasoning_items_tokens())
-                .saturating_add(items_after_last_model_generated_tokens)
-        }
+        last_tokens.saturating_add(self.estimated_tokens_after_last_model_generated_item())
     }
 
     pub(crate) fn estimated_tokens_after_last_model_generated_item(&self) -> i64 {

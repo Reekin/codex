@@ -540,29 +540,6 @@ fn drop_last_n_user_turns_removes_post_input_configuration_update_with_its_turn(
 }
 
 #[test]
-fn non_last_reasoning_tokens_return_zero_when_no_user_messages() {
-    let history =
-        create_history_with_items(vec![reasoning_with_encrypted_content(/*len*/ 800)]);
-
-    assert_eq!(history.get_non_last_reasoning_items_tokens(), 0);
-}
-
-#[test]
-fn non_last_reasoning_tokens_ignore_entries_after_last_user() {
-    let history = create_history_with_items(vec![
-        reasoning_with_encrypted_content(/*len*/ 900),
-        user_msg("first"),
-        reasoning_with_encrypted_content(/*len*/ 1_000),
-        user_msg("second"),
-        reasoning_with_encrypted_content(/*len*/ 2_000),
-    ]);
-    // first: (900 * 0.75 - 650) / 4 = 6.25 tokens
-    // second: (1000 * 0.75 - 650) / 4 = 25 tokens
-    // first + second = 62.5
-    assert_eq!(history.get_non_last_reasoning_items_tokens(), 32);
-}
-
-#[test]
 fn items_after_last_model_generated_tokens_include_user_and_tool_output() {
     let history = create_history_with_items(vec![
         assistant_msg("already counted by API"),
@@ -762,7 +739,12 @@ fn legacy_inter_agent_assistant_messages_are_not_turn_boundaries() {
 
 #[test]
 fn total_token_usage_includes_all_items_after_last_model_generated_item() {
-    let mut history = create_history_with_items(vec![assistant_msg("already counted by API")]);
+    // Reasoning retained from an earlier turn is already part of the provider total.
+    let mut history = create_history_with_items(vec![
+        user_msg("first"),
+        reasoning_with_encrypted_content(/*len*/ 4_000),
+        assistant_msg("already counted by API"),
+    ]);
     history.update_token_info(
         &TokenUsage {
             total_tokens: 100,
@@ -778,7 +760,7 @@ fn total_token_usage_includes_all_items_after_last_model_generated_item() {
     );
 
     assert_eq!(
-        history.get_total_token_usage(/*server_reasoning_included*/ true),
+        history.get_total_token_usage(),
         100 + estimate_item_token_count(&added_user)
             + estimate_item_token_count(&added_tool_output)
     );

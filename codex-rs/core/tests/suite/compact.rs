@@ -4810,64 +4810,28 @@ async fn auto_compact_body_after_prefix_still_caps_at_context_window() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_compact_counts_encrypted_reasoning_before_last_user() {
+async fn auto_compact_uses_provider_usage_without_reasoning_surcharge() {
     skip_if_no_network!();
 
     let server = start_mock_server().await;
 
-    let first_user = "COUNT_PRE_LAST_REASONING";
-    let second_user = "TRIGGER_COMPACT_AT_LIMIT";
-    let third_user = "AFTER_REMOTE_COMPACT";
-
-    let pre_last_reasoning_content = "a".repeat(2_400);
-    let post_last_reasoning_content = "b".repeat(4_000);
-
+    // Retained reasoning from earlier turns is already part of the provider-reported total.
     let first_turn = sse(vec![
-        ev_reasoning_item("pre-reasoning", &["pre"], &[&pre_last_reasoning_content]),
+        ev_reasoning_item("pre-reasoning", &["pre"], &[&"a".repeat(2_400)]),
         ev_assistant_message("m1", "FIRST_FINAL"),
         ev_completed_with_tokens("r1", /*total_tokens*/ 10),
     ]);
     let second_turn = sse(vec![
-        ev_reasoning_item("post-reasoning", &["post"], &[&post_last_reasoning_content]),
+        ev_reasoning_item("post-reasoning", &["post"], &[&"b".repeat(4_000)]),
         ev_assistant_message("m2", "SECOND_FINAL"),
         ev_completed_with_tokens("r2", /*total_tokens*/ 80),
     ]);
     let third_turn = sse(vec![
-        ev_assistant_message("m4", FINAL_REPLY),
-        ev_completed_with_tokens("r4", /*total_tokens*/ 1),
+        ev_assistant_message("m3", FINAL_REPLY),
+        ev_completed_with_tokens("r3", /*total_tokens*/ 90),
     ]);
-
-    let request_log = mount_sse_sequence(
-        &server,
-        vec![
-            // Turn 1: reasoning before last user (should count).
-            first_turn,
-            // Turn 2: reasoning after last user (should be ignored for compaction).
-            second_turn,
-            // Turn 3: next user turn after remote compaction.
-            third_turn,
-        ],
-    )
-    .await;
-
-    let compacted_history = vec![
-        codex_protocol::models::ResponseItem::Message {
-            id: None,
-            role: "assistant".to_string(),
-            content: vec![codex_protocol::models::ContentItem::OutputText {
-                text: "REMOTE_COMPACT_SUMMARY".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        codex_protocol::models::ResponseItem::Compaction {
-            id: None,
-            encrypted_content: "ENCRYPTED_COMPACTION_SUMMARY".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ];
-    let compact_mock =
-        mount_compact_json_once(&server, serde_json::json!({ "output": compacted_history })).await;
+    let request_log = mount_sse_sequence(&server, vec![first_turn, second_turn, third_turn]).await;
+    let compact_mock = mount_compact_json_once(&server, serde_json::json!({ "output": [] })).await;
     let chatgpt_base_url = format!("{}/backend-api", server.uri());
 
     let codex = test_codex()
@@ -4883,127 +4847,7 @@ async fn auto_compact_counts_encrypted_reasoning_before_last_user() {
         .expect("build codex")
         .codex;
 
-    for (idx, user) in [first_user, second_user, third_user]
-        .into_iter()
-        .enumerate()
-    {
-        codex
-            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: user.into(),
-                text_elements: Vec::new(),
-            }]))
-            .await
-            .unwrap();
-        wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-
-        if idx < 2 {
-            assert!(
-                compact_mock.requests().is_empty(),
-                "remote compaction should not run before the next user turn"
-            );
-        }
-    }
-
-    let compact_requests = compact_mock.requests();
-    assert_eq!(
-        compact_requests.len(),
-        1,
-        "remote compaction should run once after the second turn"
-    );
-    assert_eq!(
-        compact_requests[0].path(),
-        "/v1/responses/compact",
-        "remote compaction should hit the compact endpoint"
-    );
-
-    let requests = request_log.requests();
-    assert_eq!(
-        requests.len(),
-        3,
-        "conversation should include three user turns"
-    );
-    let second_request_body = requests[1].body_json().to_string();
-    assert!(
-        !second_request_body.contains("REMOTE_COMPACT_SUMMARY"),
-        "second turn should not include compacted history"
-    );
-    let third_request_body = requests[2].body_json().to_string();
-    assert!(
-        third_request_body.contains("REMOTE_COMPACT_SUMMARY")
-            || third_request_body.contains(FINAL_REPLY),
-        "third turn should include compacted history"
-    );
-    assert!(
-        third_request_body.contains("ENCRYPTED_COMPACTION_SUMMARY"),
-        "third turn should include compaction summary item"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn auto_compact_runs_when_reasoning_header_clears_between_turns() {
-    skip_if_no_network!();
-
-    let server = start_mock_server().await;
-
-    let first_user = "SERVER_INCLUDED_FIRST";
-    let second_user = "SERVER_INCLUDED_SECOND";
-    let third_user = "SERVER_INCLUDED_THIRD";
-
-    let pre_last_reasoning_content = "a".repeat(2_400);
-    let post_last_reasoning_content = "b".repeat(4_000);
-
-    let first_turn = sse(vec![
-        ev_reasoning_item("pre-reasoning", &["pre"], &[&pre_last_reasoning_content]),
-        ev_completed_with_tokens("r1", /*total_tokens*/ 10),
-    ]);
-    let second_turn = sse(vec![
-        ev_reasoning_item("post-reasoning", &["post"], &[&post_last_reasoning_content]),
-        ev_completed_with_tokens("r2", /*total_tokens*/ 80),
-    ]);
-    let third_turn = sse(vec![
-        ev_assistant_message("m4", FINAL_REPLY),
-        ev_completed_with_tokens("r4", /*total_tokens*/ 1),
-    ]);
-
-    let responses = vec![
-        sse_response(first_turn).insert_header("X-Reasoning-Included", "true"),
-        sse_response(second_turn),
-        sse_response(third_turn),
-    ];
-    mount_response_sequence(&server, responses).await;
-
-    let compacted_history = vec![
-        codex_protocol::models::ResponseItem::Message {
-            id: None,
-            role: "assistant".to_string(),
-            content: vec![codex_protocol::models::ContentItem::OutputText {
-                text: "REMOTE_COMPACT_SUMMARY".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        codex_protocol::models::ResponseItem::Compaction {
-            id: None,
-            encrypted_content: "ENCRYPTED_COMPACTION_SUMMARY".to_string(),
-            internal_chat_message_metadata_passthrough: None,
-        },
-    ];
-    let compact_mock =
-        mount_compact_json_once(&server, serde_json::json!({ "output": compacted_history })).await;
-
-    let codex = test_codex()
-        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
-        .with_config(|config| {
-            set_test_compact_prompt(config);
-            config.model_auto_compact_token_limit = Some(300);
-            let _ = config.features.disable(Feature::RemoteCompactionV2);
-        })
-        .build(&server)
-        .await
-        .expect("build codex")
-        .codex;
-
-    for user in [first_user, second_user, third_user] {
+    for user in ["FIRST_USER", "SECOND_USER", "THIRD_USER"] {
         codex
             .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
                 text: user.into(),
@@ -5014,12 +4858,11 @@ async fn auto_compact_runs_when_reasoning_header_clears_between_turns() {
         wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
     }
 
-    let compact_requests = compact_mock.requests();
-    assert_eq!(
-        compact_requests.len(),
-        1,
-        "remote compaction should run once after the reasoning header clears"
+    assert!(
+        compact_mock.requests().is_empty(),
+        "provider usage stays below the limit, so compaction must not run"
     );
+    assert_eq!(request_log.requests().len(), 3);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

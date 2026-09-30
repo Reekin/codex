@@ -3593,6 +3593,7 @@ async fn cold_paginated_resume_restores_usage_without_loading_turns() -> Result<
                     ..Default::default()
                 },
                 model_context_window: Some(200_000),
+                context_usage: None,
             }),
             rate_limits: None,
         })),
@@ -3670,6 +3671,7 @@ async fn cold_paginated_resume_omits_usage_when_its_turn_is_ambiguous() -> Resul
                     ..Default::default()
                 },
                 model_context_window: Some(200_000),
+                context_usage: None,
             }),
             rate_limits: None,
         })),
@@ -3953,6 +3955,7 @@ async fn thread_resume_token_usage_replay_can_belong_to_interrupted_turn() -> Re
                         codex_rollout_budget_units: None,
                     },
                     model_context_window: Some(200_000),
+                    context_usage: None,
                 }),
                 rate_limits: None,
             }))?,

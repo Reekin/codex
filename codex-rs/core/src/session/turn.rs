@@ -1496,6 +1496,10 @@ async fn run_sampling_request(
             step_context.as_ref(),
             base_instructions.clone(),
         );
+        sess.record_request_tools_tokens(
+            crate::context_manager::context_usage::estimate_tools_tokens(&prompt.tools),
+        )
+        .await;
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
@@ -2678,9 +2682,8 @@ async fn try_run_sampling_request(
                 )
                 .await;
             }
-            ResponseEvent::ServerReasoningIncluded(included) => {
-                sess.set_server_reasoning_included(included).await;
-            }
+            // Provider usage totals already cover retained reasoning.
+            ResponseEvent::ServerReasoningIncluded(_) => {}
             ResponseEvent::RateLimits(snapshot) => {
                 // Update internal state with latest rate limits, but defer sending until
                 // token usage is available to avoid duplicate TokenCount events.

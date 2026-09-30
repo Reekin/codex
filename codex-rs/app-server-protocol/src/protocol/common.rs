@@ -838,6 +838,13 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadItemsListResponse,
     },
+    /// Read the last token usage recorded in each turn of a thread.
+    ThreadTokenUsageRead => "thread/tokenUsage/read" {
+        params: v2::ThreadTokenUsageReadParams,
+        // Explicitly concurrent: this reads append-only rollout storage.
+        serialization: None,
+        response: v2::ThreadTokenUsageReadResponse,
+    },
     /// Append raw Responses API items to the thread history without starting a user turn.
     ThreadInjectItems => "thread/inject_items" {
         params: v2::ThreadInjectItemsParams,
