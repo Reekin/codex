@@ -167,6 +167,22 @@ implementation helpers are not sufficient by themselves.
 Follow the current repository `AGENTS.md` for formatting, tests, schema generation, snapshots, and
 full-suite approval. Do not copy version-sensitive commands into this skill.
 
+### Static-Only Local Validation
+
+Do not compile, build, or run Rust tests locally; this overrides the repository `AGENTS.md` test
+and fix steps. Local builds are slow on this machine and the branch-release workflow already
+compiles and packages every integration push, so a local build only duplicates that gate.
+
+Validate locally with static checks only: formatting, `git diff --check`, reading every call site
+of changed types and signatures, and an independent static review. Add or update tests and
+fixtures in the diff even though they are not executed locally. When a change would normally
+regenerate schema fixtures or snapshots through a workspace binary, record that the fixtures were
+not regenerated in the commit message instead of building to produce them.
+
+After static validation passes, merge into the integration branch and push it; the remote build is
+the compile gate. Real-path P0 acceptance then runs against the packaged binary from that build.
+Return compile failures reported by the remote build to the owning feature branch.
+
 After implementation and real-path acceptance, use a fresh independent reviewer. Give it the
 feature contract, direct previous ref, migration diff, port brief, and evidence. Ask only for
 requirement drift, adapter-boundary violations, and credible migration regressions. Do not start an

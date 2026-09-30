@@ -30,8 +30,8 @@ When creating the target integration knowledge baseline:
 
 Before push, verify:
 
-- every included feature passed its P0 acceptance;
-- integration smoke paths passed;
+- every included feature passed static validation (see `SKILL.md`); real-path P0 acceptance and
+  integration smoke paths run against the packaged binary after the remote build;
 - all required binaries and runtime assets are staged;
 - workflow syntax and shell continuations are valid;
 - artifact names remain clearly downstream and portable;
