@@ -76,10 +76,15 @@ fn add_item_estimate(breakdown: &mut ContextUsageBreakdown, item: &ResponseItem)
                 .and_then(|metadata| metadata.content_item_kinds.as_ref())
                 .filter(|kinds| kinds.len() == content.len() && !kinds.is_empty());
             if let Some(kinds) = kinds {
-                let parts = content
-                    .iter()
-                    .zip(kinds)
-                    .map(|(content, kind)| (category_for_kind(&kind.0), content_weight(content)));
+                let parts = content.iter().zip(kinds).map(|(content, kind)| {
+                    // Model output is recorded with an `unknown` classification.
+                    let category = if kind.0 == "unknown" {
+                        category_for_role(role)
+                    } else {
+                        category_for_kind(&kind.0)
+                    };
+                    (category, content_weight(content))
+                });
                 distribute(breakdown, tokens, parts.collect());
                 return;
             }
