@@ -161,6 +161,7 @@ fn test_model_info(
         auto_compact_token_limit: None,
         comp_hash: None,
         supports_remote_compaction: true,
+        retains_prior_reasoning: true,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
     }
@@ -1441,6 +1442,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         auto_compact_token_limit: None,
         comp_hash: None,
         supports_remote_compaction: true,
+        retains_prior_reasoning: true,
         effective_context_window_percent,
         experimental_supported_tools: Vec::new(),
     };

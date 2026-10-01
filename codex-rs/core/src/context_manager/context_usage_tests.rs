@@ -48,6 +48,29 @@ fn nonzero_categories(breakdown: &ContextUsageBreakdown) -> Vec<ContextUsageCate
         .collect()
 }
 
+fn usage_of(items: &[ResponseItem], prior_reasoning: PriorReasoning) -> ContextUsage {
+    let items: Vec<&ResponseItem> = items.iter().collect();
+    context_usage(
+        &items,
+        RequestOverhead::default(),
+        prior_reasoning,
+        /*tokens*/ 1_000,
+        None,
+    )
+}
+
+fn reasoning(len: usize) -> ResponseItem {
+    ResponseItem::Reasoning {
+        id: None,
+        summary: vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "summary".to_string(),
+        }],
+        content: None,
+        encrypted_content: Some("a".repeat(len)),
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 #[test]
 fn breakdown_classifies_history_and_sums_to_active_tokens() {
     let long = "x".repeat(4_000);
@@ -70,15 +93,7 @@ fn breakdown_classifies_history_and_sums_to_active_tokens() {
         classified_message("user", &[("user.text", &long)]),
         // Role switches injected by clients carry no classification.
         plain_message("developer", &long),
-        ResponseItem::Reasoning {
-            id: None,
-            summary: vec![ReasoningItemReasoningSummary::SummaryText {
-                text: "summary".to_string(),
-            }],
-            content: None,
-            encrypted_content: Some("a".repeat(8_000)),
-            internal_chat_message_metadata_passthrough: None,
-        },
+        reasoning(/*len*/ 8_000),
         ResponseItem::FunctionCall {
             id: None,
             name: "shell".to_string(),
@@ -101,7 +116,14 @@ fn breakdown_classifies_history_and_sums_to_active_tokens() {
     ];
     let overhead = RequestOverhead::new(&long, /*tools_tokens*/ 1_000);
 
-    let usage = context_usage(&items, overhead, /*tokens*/ 50_000, Some(90_000));
+    let items: Vec<&ResponseItem> = items.iter().collect();
+    let usage = context_usage(
+        &items,
+        overhead,
+        PriorReasoning::Retained,
+        /*tokens*/ 50_000,
+        Some(90_000),
+    );
 
     let sum: i64 = ContextUsageCategory::ALL
         .into_iter()
@@ -137,7 +159,14 @@ fn unknown_classifications_fall_into_other() {
         &[("future_feature.instructions", "some text")],
     )];
 
-    let usage = context_usage(&items, RequestOverhead::default(), /*tokens*/ 7, None);
+    let items: Vec<&ResponseItem> = items.iter().collect();
+    let usage = context_usage(
+        &items,
+        RequestOverhead::default(),
+        PriorReasoning::Retained,
+        /*tokens*/ 7,
+        None,
+    );
 
     assert_eq!(
         usage.breakdown,
@@ -151,8 +180,9 @@ fn unknown_classifications_fall_into_other() {
 #[test]
 fn empty_estimate_assigns_active_tokens_to_other() {
     let usage = context_usage(
-        Vec::<ResponseItem>::new().iter(),
+        &[],
         RequestOverhead::default(),
+        PriorReasoning::Retained,
         /*tokens*/ 42,
         None,
     );
@@ -164,4 +194,30 @@ fn empty_estimate_assigns_active_tokens_to_other() {
             ..Default::default()
         }
     );
+}
+
+#[test]
+fn dropped_prior_reasoning_counts_only_the_current_turn() {
+    let items = vec![
+        classified_message("user", &[("user.text", "first")]),
+        reasoning(/*len*/ 40_000),
+        plain_message("assistant", "first answer"),
+        classified_message("user", &[("user.text", "second")]),
+        reasoning(/*len*/ 4_000),
+    ];
+
+    let retained = usage_of(&items, PriorReasoning::Retained);
+    let dropped = usage_of(&items, PriorReasoning::Dropped);
+    let current_turn_only = usage_of(
+        &[
+            items[0].clone(),
+            items[2].clone(),
+            items[3].clone(),
+            items[4].clone(),
+        ],
+        PriorReasoning::Retained,
+    );
+
+    assert_eq!(dropped, current_turn_only);
+    assert!(retained.breakdown.reasoning > dropped.breakdown.reasoning);
 }
