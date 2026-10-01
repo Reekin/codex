@@ -12,7 +12,7 @@ Generates or edits images for the current project (for example website assets, g
 This skill has exactly two top-level modes:
 
 - **Default built-in tool mode (preferred):** built-in `image_gen` tool for image generation, editing, and transparent-image requests. Does not require `OPENAI_API_KEY`.
-- **Fallback CLI mode:** `scripts/image_gen.py` CLI. Use when the user explicitly asks for or confirms the CLI/API/model path. Requires `OPENAI_API_KEY`.
+- **Fallback CLI mode:** `scripts/image_gen.py` CLI. Use when the user explicitly asks for or confirms the separate CLI/API path. Requires `OPENAI_API_KEY`. Naming an image model or requesting a size or quality does not select this mode.
 
 Within CLI fallback, the CLI exposes three subcommands:
 
@@ -22,10 +22,10 @@ Within CLI fallback, the CLI exposes three subcommands:
 
 Rules:
 - Use the built-in `image_gen` tool by default for normal image generation and editing requests.
-- Do not switch to CLI fallback for ordinary quality, size, or file-path control.
+- Set model, quality, and size through the built-in tool arguments. For an output destination, generate first and then copy or move the saved artifact as described below.
 - For transparent images, ask built-in `image_gen` for a transparent background and preserve the generated alpha.
 - Never silently switch from built-in `image_gen` or CLI `gpt-image-2` to CLI `gpt-image-1.5`; ask the user first unless they explicitly requested `gpt-image-1.5`.
-- The word `batch` by itself does not mean CLI fallback. If the user asks for many assets or says to batch-generate assets without explicitly asking for CLI/API/model controls, stay on the built-in path and issue one built-in call per requested asset or variant.
+- The word `batch` by itself does not mean CLI fallback. If the user asks for many assets without explicitly choosing the separate CLI/API path, stay on the built-in path and issue one built-in call per requested asset or variant.
 - If the built-in tool fails or is unavailable, tell the user the CLI fallback exists and that it requires `OPENAI_API_KEY`. Proceed only if the user explicitly asks for that fallback.
 - If the user explicitly asks for CLI mode, use the bundled `scripts/image_gen.py` workflow. Do not create one-off SDK runners.
 - Never modify `scripts/image_gen.py`. If something is missing, ask the user before doing anything else.
@@ -42,6 +42,32 @@ Built-in save-path policy:
 - Do not overwrite an existing asset unless the user explicitly asked for replacement; otherwise create a sibling versioned filename such as `hero-v2.png` or `item-icon-edited.png`.
 
 Shared prompt guidance for both modes lives in `references/prompting.md` and `references/sample-prompts.md`.
+
+## Built-in model, size, and quality
+
+The built-in `image_gen.imagegen` tool accepts `model`, `size`, and `quality` for both generation
+and editing. Use its model-selection guidance: start with `gpt-image-2.5-flare` at `medium` for
+everyday new images, UI visual exploration, and quick assets; start with
+`gpt-image-2.5-sunburst` at `high` for precise edits, identity-sensitive work, and demanding
+material detail. Honor each explicitly requested parameter and choose only the unspecified ones.
+These recommendations do not imply that Sunburst always produces better images or that Flare
+is faster for every editing task.
+
+- `model`: pass the full provider model ID, including the IDs above. When asked which image
+  models can be selected, explain these choices directly; do not require the user to supply an ID
+  before offering guidance. They share one built-in tool, rather than separate tool entrypoints.
+- `size`: pass `auto` or `WIDTHxHEIGHT`, for example `1536x864`. For GPT Image 2.5, dimensions must
+  be multiples of 16, each edge at most 3840 pixels, aspect ratio between 1:3 and 3:1, and total
+  pixels between 655,360 and 8,294,400. Sizes above 2560x1440 are experimental. Other providers
+  may have different limits; preserve a user-requested size and report backend rejection.
+- `quality`: `low`, `medium`, `high`, `xhigh`, `max`, or `auto`. GPT Image 2.5 supports all these
+  levels; earlier models or custom providers may not.
+
+Omitting or passing null for these arguments uses `gpt-image-2`, `auto` size, and `auto` quality.
+Pass the selected model and quality explicitly to use the recommendations above. Model
+availability depends on the configured provider. Report unsupported settings without silently
+substituting a model or lowering quality; do not submit a paid probe solely to answer a capability
+question. Tool parameter availability and confirmed backend model availability are separate facts.
 
 Fallback-only docs/resources for CLI mode:
 - `references/cli.md`
@@ -74,10 +100,10 @@ Intent:
 - If the user provides no images, treat the request as **generate**.
 
 Built-in edit semantics:
-- Built-in edit mode is for images already visible in the conversation context, such as attached images or images generated earlier in the thread.
+- Built-in edit mode accepts local image paths or recent conversation images. Use the tool's reference-selection guidance to choose one mechanism.
 - If the user wants to edit a local image file with the built-in tool, first load it with built-in `view_image` tool so the image is visible in the conversation context, then proceed with the built-in edit flow.
-- Do not promise arbitrary filesystem-path editing through the built-in tool.
-- If a local file still needs direct file-path control, masks, or other explicit CLI-only parameters, use the explicit CLI fallback only when the user asks for it.
+- For inspected local files, pass `referenced_image_paths`; for pathless conversation images, use `num_last_images_to_include`. Do not combine them.
+- For masks or other parameters absent from the built-in schema, use the explicit CLI fallback only when the user asks for it.
 - For edits, preserve invariants aggressively and save non-destructively by default.
 
 Execution strategy:
@@ -109,7 +135,7 @@ Assume the user wants a new image unless they clearly ask to change an existing 
 14. For preview-only work, render the image inline; the underlying file may remain at the default `$CODEX_HOME/generated_images/...` path.
 15. For project-bound work, move or copy the selected artifact into the workspace and update any consuming code or references. Never leave a project-referenced asset only at the default `$CODEX_HOME/generated_images/...` path.
 16. For batches or multi-asset requests, persist every requested deliverable final in the workspace unless the user explicitly asked to keep outputs preview-only. Discarded variants do not need to be kept unless requested.
-17. If the user explicitly chooses or confirms the CLI fallback, then use the fallback-only docs for model, quality, size, `input_fidelity`, masks, output format, output paths, and network setup.
+17. If the user explicitly chooses or confirms the CLI fallback, read the fallback-only docs for that CLI's arguments, masks, output format, output paths, and network setup.
 18. Always report the final saved path(s) for any workspace-bound asset(s), plus the final prompt or prompt set and whether the built-in tool or fallback CLI mode was used.
 
 ## Transparent image requests
@@ -191,7 +217,7 @@ Avoid: <negative constraints>
 Notes:
 - `Asset type` and `Input images` are prompt scaffolding, not dedicated CLI flags.
 - `Scene/backdrop` refers to the visual setting. It is not the same as the fallback CLI `background` parameter, which controls output transparency behavior.
-- Fallback-only execution notes such as `Quality:`, `Input fidelity:`, masks, output format, and output paths belong in the CLI path only. Do not treat them as built-in `image_gen` tool arguments.
+- Pass model, quality, and size as built-in tool arguments rather than relying on prompt text to set them. Input fidelity, masks, output format, and destination-path arguments belong to the explicit CLI path when supported there.
 
 Augmentation rules:
 - Keep it short.
@@ -232,7 +258,7 @@ Constraints: change only the background; keep the product and its edges unchange
 - Iterate with single-change follow-ups.
 - If the prompt is generic, add only the extra detail that will materially help.
 - If the prompt is already detailed, normalize it instead of expanding it.
-- For CLI fallback only, see `references/cli.md` and `references/image-api.md` for model, `quality`, `input_fidelity`, masks, output format, and output-path guidance.
+- For CLI fallback only, see `references/cli.md` and `references/image-api.md` for its supported arguments. Built-in model, quality, and size guidance is above.
 - For transparent images, ask built-in `image_gen` for actual transparency and preserve its alpha.
 
 More principles shared by both modes: `references/prompting.md`.
@@ -246,7 +272,7 @@ Asset-type templates (website assets, game assets, wireframes, logo) are consoli
 The fallback CLI defaults to `gpt-image-2`.
 
 - Use `gpt-image-2` for new CLI/API workflows unless the user confirms a different model.
-- CLI `gpt-image-2` does not support `background=transparent`; ask before using `gpt-image-1.5` unless the user explicitly requested that model.
+- The bundled CLI rejects `background=transparent` with `gpt-image-2`. This is a limitation of that script, not a statement about current API support. Ask before using its `gpt-image-1.5` path unless the user explicitly requested that model.
 - `gpt-image-2` always uses high fidelity for image inputs; do not set `input_fidelity` with this model.
 - `gpt-image-2` supports `quality` values `low`, `medium`, `high`, and `auto`.
 - Use `quality low` for fast drafts, thumbnails, and quick iterations. Use `medium`, `high`, or `auto` for final assets, dense text, diagrams, identity-sensitive edits, or high-resolution outputs.
