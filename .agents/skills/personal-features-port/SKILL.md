@@ -176,9 +176,18 @@ compiles and packages every integration push, so a local build only duplicates t
 
 Validate locally with static checks only: formatting, `git diff --check`, reading every call site
 of changed types and signatures, and an independent static review. Add or update tests and
-fixtures in the diff even though they are not executed locally. When a change would normally
-regenerate schema fixtures or snapshots through a workspace binary, record that the fixtures were
-not regenerated in the commit message instead of building to produce them.
+fixtures in the diff even though they are not executed locally.
+
+App-server protocol changes are the one exception: regenerate the app-server schema fixtures
+locally, stable and experimental, in the same feature commit series. Packaged
+`codex app-server generate-ts` and `generate-json-schema` export the precomputed snapshot under
+`app-server-protocol/schema/precomputed/` that is compiled into the binary, not the live Rust
+types, so a stale snapshot ships stale client types even though the wire carries the new fields.
+The regeneration builds only the protocol crate and takes a few minutes. Use the repository's
+schema-writer entrypoint for the current version (an env-gated ignored test in some versions,
+a `write_schema_fixtures` binary in others), stage the result, and confirm the staged diff
+contains only the intended protocol changes; line-ending churn in the working tree is normalized
+on commit.
 
 After static validation passes, merge into the integration branch and push it; the remote build is
 the compile gate. Real-path P0 acceptance then runs against the packaged binary from that build.
