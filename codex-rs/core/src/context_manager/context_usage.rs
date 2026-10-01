@@ -15,6 +15,15 @@ use codex_utils_output_truncation::approx_token_count;
 
 use super::estimate_image_bytes;
 use super::estimate_item_token_count;
+use super::is_user_turn_boundary;
+
+/// Whether reasoning recorded before the latest user turn is still part of the model input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PriorReasoning {
+    Retained,
+    /// The provider drops earlier turns' reasoning, so only the current turn's reasoning counts.
+    Dropped,
+}
 
 /// Request-level context that is not part of conversation history.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -42,8 +51,9 @@ pub(crate) fn estimate_tools_tokens(tools: &[ToolSpec]) -> i64 {
 
 /// Builds the context usage record for `tokens` of active context.
 pub(crate) fn context_usage<'a>(
-    items: impl IntoIterator<Item = &'a ResponseItem>,
+    items: &[&'a ResponseItem],
     overhead: RequestOverhead,
+    prior_reasoning: PriorReasoning,
     tokens: i64,
     auto_compact_token_limit: Option<i64>,
 ) -> ContextUsage {
@@ -52,7 +62,17 @@ pub(crate) fn context_usage<'a>(
         tools: overhead.tools_tokens,
         ..Default::default()
     };
-    for item in items {
+    let current_turn_start = match prior_reasoning {
+        PriorReasoning::Retained => 0,
+        PriorReasoning::Dropped => items
+            .iter()
+            .rposition(|item| is_user_turn_boundary(item))
+            .unwrap_or(0),
+    };
+    for (index, item) in items.iter().enumerate() {
+        if index < current_turn_start && matches!(item, ResponseItem::Reasoning { .. }) {
+            continue;
+        }
         add_item_estimate(&mut estimates, item);
     }
     ContextUsage {

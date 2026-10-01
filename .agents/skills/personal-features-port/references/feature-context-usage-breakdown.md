@@ -11,7 +11,7 @@ ended with, including threads reopened after a restart.
 
 - Tokenizer-accurate per-category counts. Categories are estimates scaled to the provider-reported
   total.
-- Changing model-visible context, compaction prompts, compaction thresholds, or model catalogs.
+- Changing model-visible context, compaction prompts, or compaction thresholds.
 - Per-content-item or per-file attribution below the stable category list.
 - Cost, billing, or rate-limit reporting.
 
@@ -32,6 +32,10 @@ ended with, including threads reopened after a restart.
 - **REQ-4**: Classification is derived from harness-owned content classifications, response item
   types, and the request's base instructions and tool definitions. Unknown or future
   classifications fall into `other`; they never fail the snapshot.
+- **REQ-4a**: Each model declares in its catalog entry whether reasoning from earlier turns stays in
+  its input; omitted means it does. For models that drop it, the breakdown counts only reasoning
+  recorded since the latest user turn, so dropped reasoning does not take share from other
+  categories.
 - **REQ-5**: The context usage record is persisted with the token usage snapshot, replayed when a
   client attaches to an existing thread, and included in live token usage notifications.
 - **REQ-6**: A thread token usage read returns, for every turn of a thread that recorded provider
@@ -73,6 +77,8 @@ ended with, including threads reopened after a restart.
    `thread/tokenUsage/updated` notification has a context usage record whose categories sum to its
    tokens, with non-zero developer instructions, AGENTS.md, tools, user, tool calls, and agent
    messages, and a compaction trigger derived from the model configuration.
+   Reasoning attribution for models that drop prior reasoning is covered by a breakdown unit test
+   comparing the dropped estimate with a history that contains only the current turn's reasoning.
 3. **Persistence and replay**: resume the thread from rollout in a new app-server. Evidence: the
    attach replay notification carries the same context usage record.
 4. **Per-turn read**: after two turns, `thread/tokenUsage/read` returns one entry per turn with each
