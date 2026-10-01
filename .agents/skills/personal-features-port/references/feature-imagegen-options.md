@@ -21,6 +21,11 @@ Backend model availability and supported size/quality combinations remain provid
   calls. Request serialization and response parsing support all advertised quality values.
 - **REQ-4**: Preserve service errors for unsupported options. Do not retry with substituted models,
   sizes, or quality settings. Existing credentials, image selection, and output handling remain intact.
+- **REQ-5**: Tool and bundled skill guidance identify the selectable GPT Image 2.5 model IDs and
+  give task-based starting points: Flare medium for everyday generation and visual exploration,
+  Sunburst high for precise editing and demanding detail. Explicit user settings take precedence.
+  Selecting a model, size, or quality stays on the built-in path; explain known choices without
+  claiming provider availability or requiring the user to supply a model ID first.
 
 ## Portability Constraints
 
@@ -44,6 +49,10 @@ Backend model availability and supported size/quality combinations remain provid
   and editing requests, and verify successful results with extended response quality values.
 - **Schema and failures (REQ-3, REQ-4)**: Inspect the advertised schema for optional fields and all
   quality values; exercise an unsupported-option service response and preserve its failure.
+- **Agent guidance (REQ-5)**: In a fresh session, ask which image models are available and how to
+  choose one. Verify that the agent names both complete model IDs and describes the starting
+  points with provider availability qualified. Ask for an explicit model, size, and quality;
+  capture the built-in call and verify that it preserves the requested settings without CLI routing.
 
 ## Integration Contract
 

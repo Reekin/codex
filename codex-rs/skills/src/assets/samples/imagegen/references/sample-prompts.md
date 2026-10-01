@@ -2,7 +2,7 @@
 
 These prompt recipes are shared across both top-level modes of the skill:
 - built-in `image_gen` tool (default)
-- `scripts/image_gen.py` CLI fallback for explicit or user-confirmed CLI/API/model requests
+- `scripts/image_gen.py` CLI fallback for explicit or user-confirmed separate CLI/API requests; naming a model stays on the built-in path
 
 Use these as starting points. They are intentionally complete prompt recipes, not the default amount of augmentation to add to every user request.
 
@@ -19,7 +19,7 @@ CLI model notes:
 - `gpt-image-2` is the fallback CLI default for new workflows.
 - `gpt-image-2` supports `quality` values `low`, `medium`, `high`, and `auto`.
 - For 4K-style `gpt-image-2` output, use `3840x2160` or `2160x3840`.
-- CLI `gpt-image-2` does not support `background=transparent`; ask before using `gpt-image-1.5` unless the user explicitly requested that model.
+- The bundled CLI rejects `background=transparent` with `gpt-image-2`; this is a script restriction. Ask before using its `gpt-image-1.5` path unless the user explicitly requested that model.
 - Do not set `input_fidelity` with `gpt-image-2`; image inputs already use high fidelity.
 
 For prompting principles (structure, specificity, invariants, iteration), see `references/prompting.md`.
