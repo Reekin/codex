@@ -5229,6 +5229,17 @@
       ],
       "type": "string"
     },
+    "ThreadTokenUsageReadParams": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadTurnsListParams": {
       "properties": {
         "cursor": {
@@ -6437,6 +6448,31 @@
         "params"
       ],
       "title": "Thread/items/listRequest",
+      "type": "object"
+    },
+    {
+      "description": "Read the last token usage recorded in each turn of a thread.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/tokenUsage/read"
+          ],
+          "title": "Thread/tokenUsage/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadTokenUsageReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/tokenUsage/readRequest",
       "type": "object"
     },
     {
