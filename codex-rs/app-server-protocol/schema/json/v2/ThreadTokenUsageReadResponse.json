@@ -168,24 +168,35 @@
         "totalTokens"
       ],
       "type": "object"
+    },
+    "TurnTokenUsage": {
+      "properties": {
+        "tokenUsage": {
+          "$ref": "#/definitions/ThreadTokenUsage"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tokenUsage",
+        "turnId"
+      ],
+      "type": "object"
     }
   },
   "properties": {
-    "threadId": {
-      "type": "string"
-    },
-    "tokenUsage": {
-      "$ref": "#/definitions/ThreadTokenUsage"
-    },
-    "turnId": {
-      "type": "string"
+    "data": {
+      "description": "The last token usage recorded in each turn of the thread's own history, in turn order.",
+      "items": {
+        "$ref": "#/definitions/TurnTokenUsage"
+      },
+      "type": "array"
     }
   },
   "required": [
-    "threadId",
-    "tokenUsage",
-    "turnId"
+    "data"
   ],
-  "title": "ThreadTokenUsageUpdatedNotification",
+  "title": "ThreadTokenUsageReadResponse",
   "type": "object"
 }

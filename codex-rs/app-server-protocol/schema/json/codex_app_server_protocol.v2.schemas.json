@@ -2407,6 +2407,31 @@
           "type": "object"
         },
         {
+          "description": "Read the last token usage recorded in each turn of a thread.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/tokenUsage/read"
+              ],
+              "title": "Thread/tokenUsage/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadTokenUsageReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/tokenUsage/readRequest",
+          "type": "object"
+        },
+        {
           "description": "Append raw Responses API items to the thread history without starting a user turn.",
           "properties": {
             "id": {
@@ -18290,6 +18315,103 @@
       "title": "ThreadCompactStartResponse",
       "type": "object"
     },
+    "ThreadContextUsage": {
+      "description": "Active model context usage; `tokens` is the value that drives automatic compaction.",
+      "properties": {
+        "autoCompactTokenLimit": {
+          "description": "Active context tokens at which automatic compaction triggers, when it can trigger.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "breakdown": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ThreadContextUsageBreakdown"
+            }
+          ],
+          "description": "Estimated composition of `tokens`; categories sum exactly to `tokens`."
+        },
+        "tokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "breakdown",
+        "tokens"
+      ],
+      "type": "object"
+    },
+    "ThreadContextUsageBreakdown": {
+      "properties": {
+        "agentMessages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "agentsMd": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "baseInstructions": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "compaction": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "developerInstructions": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "environment": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "other": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "reasoning": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "skills": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "toolCalls": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tools": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "userMessages": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "agentMessages",
+        "agentsMd",
+        "baseInstructions",
+        "compaction",
+        "developerInstructions",
+        "environment",
+        "other",
+        "reasoning",
+        "skills",
+        "toolCalls",
+        "tools",
+        "userMessages"
+      ],
+      "type": "object"
+    },
     "ThreadDeleteParams": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
@@ -21802,6 +21924,18 @@
     },
     "ThreadTokenUsage": {
       "properties": {
+        "contextUsage": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ThreadContextUsage"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Active context usage; absent for snapshots recorded without it."
+        },
         "last": {
           "$ref": "#/definitions/TokenUsageBreakdown"
         },
@@ -21820,6 +21954,36 @@
         "last",
         "total"
       ],
+      "type": "object"
+    },
+    "ThreadTokenUsageReadParams": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "title": "ThreadTokenUsageReadParams",
+      "type": "object"
+    },
+    "ThreadTokenUsageReadResponse": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "data": {
+          "description": "The last token usage recorded in each turn of the thread's own history, in turn order.",
+          "items": {
+            "$ref": "#/definitions/TurnTokenUsage"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "data"
+      ],
+      "title": "ThreadTokenUsageReadResponse",
       "type": "object"
     },
     "ThreadTokenUsageUpdatedNotification": {
@@ -22692,6 +22856,21 @@
         "turnId"
       ],
       "title": "TurnSteerResponse",
+      "type": "object"
+    },
+    "TurnTokenUsage": {
+      "properties": {
+        "tokenUsage": {
+          "$ref": "#/definitions/ThreadTokenUsage"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tokenUsage",
+        "turnId"
+      ],
       "type": "object"
     },
     "TurnToolOutput": {
