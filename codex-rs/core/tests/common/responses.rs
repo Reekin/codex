@@ -35,6 +35,78 @@ use wiremock::http::HeaderValue;
 use wiremock::matchers::method;
 use wiremock::matchers::path_regex;
 
+/// Reads the final structured instruction of an isolated local analysis request.
+pub fn local_compaction_payload(body: &Value, marker: &str) -> Option<Value> {
+    let texts = body["input"]
+        .as_array()?
+        .iter()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|content| content["text"].as_str())
+        .collect::<Vec<_>>();
+    texts.iter().rev().find_map(|text| {
+        let payload = text.strip_prefix(marker)?.trim();
+        serde_json::from_str(payload).ok()
+    })
+}
+
+/// Produces a summary matching the requested ranges; absent ranges remain empty.
+pub fn local_compaction_summary_text(body: &Value, summary: &str, ledger: &str) -> String {
+    let payload = local_compaction_payload(body, "LOCAL_COMPACTION_SUMMARIZE")
+        .expect("structured summary request");
+    serde_json::json!({
+        "l2": if payload["plan"]["l2"].is_null() { "" } else { summary },
+        "l3": if payload["plan"]["l3"].is_null() { "" } else { summary },
+        "ledger": ledger,
+    })
+    .to_string()
+}
+
+/// Serves private compaction requests without consuming the ordinary response sequence.
+pub async fn mount_local_compaction_sequence(
+    server: &MockServer,
+    ordinary: Vec<String>,
+    completed: Value,
+) -> ResponseMock {
+    let ordinary = Mutex::new(VecDeque::from(ordinary));
+    let (mock, response_mock) = base_mock();
+    mock.respond_with(move |request: &wiremock::Request| {
+        let body = ResponsesRequest(request.clone()).body_json();
+        let text =
+            if let Some(payload) = local_compaction_payload(&body, "LOCAL_COMPACTION_CLASSIFY") {
+                Some(
+                    serde_json::json!({"decisions": payload["eligible_ids"]
+                    .as_array().expect("eligible IDs").iter()
+                    .map(|id| serde_json::json!({"id": id, "action": "drop"}))
+                    .collect::<Vec<_>>()})
+                    .to_string(),
+                )
+            } else {
+                local_compaction_payload(&body, "LOCAL_COMPACTION_SUMMARIZE").map(|_| {
+                    local_compaction_summary_text(
+                        &body,
+                        "Earlier work completed; exact evidence remains in local recall.",
+                        "Preserve the user's constraints and pending verification.",
+                    )
+                })
+            };
+        let response = match text {
+            Some(text) => sse(vec![
+                ev_assistant_message("private-analysis", &text),
+                completed.clone(),
+            ]),
+            None => ordinary
+                .lock()
+                .expect("response queue")
+                .pop_front()
+                .expect("ordinary response available"),
+        };
+        sse_response(response)
+    })
+    .mount(server)
+    .await;
+    response_mock
+}
+
 #[derive(Debug, Clone)]
 pub struct ResponseMock {
     requests: Arc<Mutex<Vec<ResponsesRequest>>>,

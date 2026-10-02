@@ -1,17 +1,10 @@
-use super::compact::COMPACT_WARNING_MESSAGE;
+use super::compact::local_support::*;
 use anyhow::Result;
 use codex_core::CodexThread;
 use codex_core::TurnInputRequest;
-use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
-use core_test_support::responses::ResponsesRequest;
-use core_test_support::responses::ev_assistant_message;
-use core_test_support::responses::ev_completed;
-use core_test_support::responses::mount_sse_sequence;
-use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
@@ -24,28 +17,8 @@ async fn window_id_advances_after_compact_persists_on_resume_and_resets_on_fork(
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let request_log = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_assistant_message("msg-1", "first reply"),
-                ev_completed("resp-1"),
-            ]),
-            sse(vec![
-                ev_assistant_message("msg-2", "summary"),
-                ev_completed("resp-2"),
-            ]),
-            sse(vec![ev_completed("resp-3")]),
-            sse(vec![ev_completed("resp-4")]),
-            sse(vec![ev_completed("resp-5")]),
-        ],
-    )
-    .await;
-
-    let mut builder = test_codex().with_config(|config| {
-        config.model_provider.name = "Non-OpenAI Model provider".to_string();
-        config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
-    });
+    let model = LocalModel::mount(&server).await;
+    let mut builder = test_codex().with_config(configure);
     let initial = builder.build(&server).await?;
     let initial_thread = Arc::clone(&initial.codex);
     let rollout_path = initial
@@ -54,14 +27,20 @@ async fn window_id_advances_after_compact_persists_on_resume_and_resets_on_fork(
         .clone()
         .expect("rollout path");
 
+    model.reply(tool_turn());
+    model.text("first reply");
     submit_user_turn(&initial_thread, "before compact").await?;
+    model.text("recent reply");
+    submit_user_turn(&initial_thread, "recent protected turn").await?;
     submit_compact_turn(&initial_thread).await?;
+    model.text("after compact reply");
     submit_user_turn(&initial_thread, "after compact").await?;
     shutdown_thread(&initial_thread).await?;
 
     let resumed = builder
         .resume(&server, initial.home.clone(), rollout_path.clone())
         .await?;
+    model.text("after resume reply");
     submit_user_turn(&resumed.codex, "after resume").await?;
     shutdown_thread(&resumed.codex).await?;
 
@@ -75,10 +54,19 @@ async fn window_id_advances_after_compact_persists_on_resume_and_resets_on_fork(
             /*parent_trace*/ None,
         )
         .await?;
+    model.text("after fork reply");
     submit_user_turn(&forked.thread, "after fork").await?;
     shutdown_thread(&forked.thread).await?;
 
-    let requests = request_log.requests();
+    let all_requests = model.requests();
+    let requests = [
+        &all_requests[0],
+        &all_requests[3],
+        &all_requests[4],
+        &all_requests[5],
+        &all_requests[6],
+    ];
+    assert_eq!(all_requests.len(), 7);
     assert_eq!(requests.len(), 5, "expected five model requests");
 
     let (initial_thread_id, first_generation) = window_id_parts(&requests[0]);
@@ -101,15 +89,21 @@ async fn window_id_advances_after_compact_persists_on_resume_and_resets_on_fork(
         .iter()
         .map(|request| {
             let metadata = request
-                .header("x-codex-turn-metadata")
-                .expect("turn metadata header");
-            serde_json::from_str::<serde_json::Value>(&metadata).expect("valid turn metadata")
+                .headers
+                .get("x-codex-turn-metadata")
+                .expect("turn metadata header")
+                .to_str()
+                .unwrap();
+            serde_json::from_str::<serde_json::Value>(metadata).expect("valid turn metadata")
         })
         .collect::<Vec<_>>();
     for (request, metadata) in requests.iter().zip(&metadata) {
         assert_eq!(
             metadata["window_id"].as_str(),
-            request.header("x-codex-window-id").as_deref()
+            request
+                .headers
+                .get("x-codex-window-id")
+                .and_then(|value| value.to_str().ok())
         );
         assert!(
             metadata["context_window_id"]
@@ -153,12 +147,7 @@ async fn submit_user_turn(codex: &Arc<CodexThread>, text: &str) -> Result<()> {
 
 async fn submit_compact_turn(codex: &Arc<CodexThread>) -> Result<()> {
     codex.submit(Op::Compact).await?;
-    let warning_event = wait_for_event(codex, |event| matches!(event, EventMsg::Warning(_))).await;
-    let EventMsg::Warning(WarningEvent { message }) = warning_event else {
-        panic!("expected warning event after compact");
-    };
-    assert_eq!(message, COMPACT_WARNING_MESSAGE);
-    wait_for_event(codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    complete(codex).await;
     Ok(())
 }
 
@@ -168,10 +157,13 @@ async fn shutdown_thread(codex: &Arc<CodexThread>) -> Result<()> {
     Ok(())
 }
 
-fn window_id_parts(request: &ResponsesRequest) -> (String, u64) {
+fn window_id_parts(request: &wiremock::Request) -> (String, u64) {
     let window_id = request
-        .header("x-codex-window-id")
-        .expect("missing x-codex-window-id header");
+        .headers
+        .get("x-codex-window-id")
+        .expect("missing x-codex-window-id header")
+        .to_str()
+        .unwrap();
     let (thread_id, generation) = window_id
         .rsplit_once(':')
         .expect("window id header should contain a generation");

@@ -10,7 +10,6 @@ use codex_core::EnvironmentNetworkPolicy;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInputRequest;
 use codex_core::WaitForEnvironmentToolConfig;
-use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::config::Config;
 use codex_core::config::Constrained;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
@@ -2664,7 +2663,7 @@ fn environment_instructions_occurrences(request: &ResponsesRequest) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn deferred_executor_compaction_preserves_then_updates_environment_once() -> Result<()> {
+async fn deferred_executor_noop_cleanup_preserves_then_updates_environment_once() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let server = start_mock_server().await;
     let response_mock = mount_sse_sequence(
@@ -2694,10 +2693,6 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
                 ev_completed_with_tokens("resp-1", /*total_tokens*/ 96),
             ]),
             sse(vec![
-                ev_assistant_message("msg-compact", "AUTO_COMPACT_SUMMARY"),
-                ev_completed_with_tokens("resp-compact", /*total_tokens*/ 10),
-            ]),
-            sse(vec![
                 ev_response_created("resp-2"),
                 ev_assistant_message("msg-2", "done"),
                 ev_completed("resp-2"),
@@ -2717,8 +2712,8 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
                     .is_ok()
             );
             config.model_provider.name = "OpenAI (test)".to_string();
-            config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
-            config.model_context_window = Some(100);
+            config.local_compaction.force_local = true;
+            config.model_context_window = Some(100_000);
             config.model_auto_compact_token_limit = Some(90);
         });
     let test = expect_startup(builder.build(&server)).await;
@@ -2755,7 +2750,7 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
     .await;
 
     let requests = response_mock.requests();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 2);
     let initial_context = requests[0].message_input_texts("user");
     assert!(
         initial_context
@@ -2763,7 +2758,7 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
             .any(|text| text.contains("<status>starting</status>"))
     );
 
-    let post_compaction_context = requests[2].message_input_texts("user");
+    let post_compaction_context = requests[1].message_input_texts("user");
     assert_eq!(
         post_compaction_context
             .iter()
@@ -2807,18 +2802,18 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
             .iter()
             .map(|item| item.full)
             .collect::<Vec<_>>(),
-        vec![true, true, false]
+        vec![true, false]
     );
     assert_eq!(
         world_state_items[0].state["environments"].pointer("/environments/remote/status"),
         Some(&json!("starting"))
     );
     assert_eq!(
-        world_state_items[2].state["environments"].pointer("/environments/remote/status"),
+        world_state_items[1].state["environments"].pointer("/environments/remote/status"),
         Some(&json!("available"))
     );
     assert_eq!(
-        world_state_items[2].state["environments"].pointer("/environments/remote/shell"),
+        world_state_items[1].state["environments"].pointer("/environments/remote/shell"),
         Some(&json!("zsh"))
     );
 
