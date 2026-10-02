@@ -287,6 +287,9 @@ async fn model_switch_uses_active_capability_and_preserves_selected_reasoning() 
         },
     )
     .await?;
+    // The retained fixture is below the automatic threshold; explicitly request cleanup.
+    test.codex.submit(Op::Compact).await?;
+    complete(&test.codex).await;
     responder.text("After model switch.");
     test.submit_text_turn("Switch capability and continue.")
         .await?;
