@@ -8,7 +8,7 @@
 - retry-empty-final-answer：常规回合缺少最终回答或最终回答为空时，最多补试一次。
 - subagent-identity-labels：向子代理提供身份事实和继承历史边界，保持上游工具协议。
 - model-aware-compaction：根据 provider 与当前模型的能力选择远端压缩或本地摘要。
-- local-context-compaction：后台并行标记工具记录，达到可配置的释放差额后统一清理，保留对话原文与原始记录回查。后台标记默认每积累 32 条记录或窗口 5% 的工具内容触发；清理默认要求释放窗口的 30%。若在原有强制压缩上限前已不可能达到该收益，就停止无效标记。到 Codex 原有压缩条件或手动压缩时，才按预算分级精简历史；较旧窗口可反复降级，历史长度不会使原文永久累积。可强制任意模型使用本地方案。校验通过的标记立即落盘，恢复会话后继续有效，不会重复标记。app-server 的 `thread/toolCleanup/read` 返回当前标记预计可释放的上下文量、自动清理要求的释放量、本模型路线是否启用标记以及是否有标记请求在途；`thread/toolCleanup/apply` 忽略释放要求，立即应用已有标记并返回实际释放量，不等待在途标记、不发模型请求。完整契约见[本地上下文压缩](../../../../.agents/skills/personal-features-port/references/feature-local-context-compaction.md)。
+- local-context-compaction：后台并行标记工具记录，达到可配置的释放差额后统一清理，保留对话原文与原始记录回查。后台标记默认每积累 32 条记录或窗口 5% 的工具内容触发；清理默认要求释放窗口的 30%。若在原有强制压缩上限前已不可能达到该收益，就停止无效标记。到 Codex 原有压缩条件或手动压缩时，才按预算分级精简历史；较旧窗口可反复降级，历史长度不会使原文永久累积。可强制任意模型使用本地方案。校验通过的标记立即落盘，恢复会话或从中 fork 出的新会话都继续有效，不会重复标记。app-server 的 `thread/toolCleanup/read` 返回当前标记预计可释放的上下文量、自动清理要求的释放量、本模型路线是否启用标记以及是否有标记请求在途；`thread/toolCleanup/apply` 忽略释放要求，立即应用已有标记并返回实际释放量，不等待在途标记、不发模型请求。完整契约见[本地上下文压缩](../../../../.agents/skills/personal-features-port/references/feature-local-context-compaction.md)。
 - large-request-upload-resilience：检测未完成的大请求上传异常，取消该次上传并通过新连接补试一次。
 - stream-retry-timeout：响应长时间没有完整结果时保留原请求并补发，采用先就绪的一条，规则见[功能契约](../../../../.agents/skills/personal-features-port/references/feature-stream-retry-timeout.md)。
 - auth-independent-tools：已安装的生图工具满足功能开关、模型要求和套餐条件时，任何 provider 均可向模型暴露该工具，不按 provider 类型、声明的生图能力或登录方式隐藏；实际服务请求沿用原有凭据和授权流程。[用户：确保任何provider都能看到生图]
