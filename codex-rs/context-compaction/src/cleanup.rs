@@ -14,7 +14,6 @@ use crate::CompactionError;
 use crate::MAX_FRAGMENT_BYTES;
 use crate::bounded_json;
 use crate::groups::call_key;
-use crate::groups::is_user_direction;
 use crate::groups::output_key;
 use crate::groups::protected_start;
 
@@ -49,11 +48,15 @@ pub struct StagedDecisions {
 
 pub fn eligible_results(items: &[ResponseItemEnvelope]) -> Vec<String> {
     let protected = protected_start(items);
-    let calls: HashSet<_> = items[..protected]
+    completed_results(&items[..protected])
+}
+
+fn completed_results(items: &[ResponseItemEnvelope]) -> Vec<String> {
+    let calls: HashSet<_> = items
         .iter()
         .filter_map(|item| call_key(&item.item))
         .collect();
-    items[..protected].iter().filter_map(|envelope| {
+    items.iter().filter_map(|envelope| {
         let item = &envelope.item;
         let key = output_key(item)?;
         if !calls.contains(&key)
@@ -69,14 +72,54 @@ pub fn eligible_results(items: &[ResponseItemEnvelope]) -> Vec<String> {
 }
 
 impl StagedDecisions {
-    pub fn kept_ids(&self) -> Vec<String> {
-        self.decisions
+    /// Only unchanged records count as marked; unrelated edits do not invalidate decisions.
+    pub fn contains(&self, item: &ResponseItemEnvelope) -> bool {
+        self.source.iter().any(|source| source.item == item.item)
+    }
+
+    /// Optimistic removable view includes completed results that can age out of protection.
+    /// Calls, archive references, known keeps and already installed reductions remain intact.
+    pub fn optimistic_replacement(
+        &self,
+        current: &[ResponseItemEnvelope],
+    ) -> Vec<ResponseItemEnvelope> {
+        let candidates: HashSet<_> = completed_results(current).into_iter().collect();
+        let mut result = current.to_vec();
+        for item in &mut result {
+            if self.contains(item)
+                || !item
+                    .item
+                    .id()
+                    .is_some_and(|id| candidates.contains(id.as_str()))
+            {
+                continue;
+            }
+            let id = item.item.id().expect("candidate has ID").to_string();
+            if let ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } = &mut item.item
+            {
+                // The original-ID reference is mandatory; a future concise replacement
+                // can be smaller than the drop notice. Omit optional prose for this bound.
+                let reference = format!("[Original item: {id}; use recall_read_item.]");
+                if reference.len() < output.to_string().len() {
+                    output.body = FunctionCallOutputBody::Text(reference);
+                }
+            }
+        }
+        result
+    }
+
+    pub fn retain_current(&mut self, current: &[ResponseItemEnvelope]) {
+        self.source
+            .retain(|source| current.iter().any(|item| item.item == source.item));
+        let ids: HashSet<_> = self
+            .source
             .iter()
-            .filter_map(|decision| match decision {
-                Decision::Keep { id } => Some(id.clone()),
-                Decision::Shorten { .. } | Decision::Drop { .. } => None,
-            })
-            .collect()
+            .filter_map(|source| source.item.id())
+            .map(ToString::to_string)
+            .collect();
+        self.decisions
+            .retain(|decision| ids.contains(decision.id()));
     }
 
     /// Validate the complete response before making any decision available to the adapter.
@@ -117,30 +160,31 @@ impl StagedDecisions {
             ));
         }
         Ok(Self {
-            source,
+            source: source
+                .into_iter()
+                .filter(|item| {
+                    item.item
+                        .id()
+                        .is_some_and(|id| allowed.contains(id.as_str()))
+                })
+                .collect(),
             decisions: analysis.decisions,
         })
     }
 
-    pub fn is_current(&self, current: &[ResponseItemEnvelope]) -> bool {
-        !self.source.is_empty()
-            && current.starts_with(&self.source)
-            && !current[self.source.len()..]
-                .iter()
-                .any(|item| is_user_direction(&item.item))
-    }
-
     /// Extend a validated speculative batch while preserving decisions about earlier results.
-    pub fn merge(&mut self, newer: Self) -> Result<(), CompactionError> {
-        if !self.is_current(&newer.source) {
-            return Err(CompactionError::Stale);
-        }
+    pub fn merge(&mut self, newer: Self) {
         let updated: HashSet<_> = newer.decisions.iter().map(Decision::id).collect();
         self.decisions
             .retain(|decision| !updated.contains(decision.id()));
+        self.source.retain(|item| {
+            !item
+                .item
+                .id()
+                .is_some_and(|id| updated.contains(id.as_str()))
+        });
+        self.source.extend(newer.source);
         self.decisions.extend(newer.decisions);
-        self.source = newer.source;
-        Ok(())
     }
 
     /// Preserve calls and IDs, replacing dropped output with a small archive reference.
@@ -148,9 +192,7 @@ impl StagedDecisions {
         &self,
         current: &[ResponseItemEnvelope],
     ) -> Result<Vec<ResponseItemEnvelope>, CompactionError> {
-        if !self.is_current(current) {
-            return Err(CompactionError::Stale);
-        }
+        let eligible: HashSet<_> = eligible_results(current).into_iter().collect();
         let decisions: HashMap<_, _> = self
             .decisions
             .iter()
@@ -158,12 +200,18 @@ impl StagedDecisions {
             .collect();
         let mut replacement = current.to_vec();
         for envelope in &mut replacement {
+            if !self.contains(envelope) {
+                continue;
+            }
             let Some(id) = envelope.item.id().map(ToString::to_string) else {
                 continue;
             };
             let Some(decision) = decisions.get(id.as_str()) else {
                 continue;
             };
+            if !eligible.contains(&id) {
+                continue;
+            }
             let text = match decision {
                 Decision::Keep { .. } => continue,
                 Decision::Shorten { text, .. } => {
