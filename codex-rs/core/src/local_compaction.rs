@@ -117,13 +117,23 @@ pub(crate) fn uses_local_route(turn: &TurnContext, model_info: &ModelInfo) -> bo
 pub(crate) async fn maybe_clean_history(
     sess: &Arc<Session>,
     step: &Arc<StepContext>,
-) -> CodexResult<bool> {
+) -> CodexResult<()> {
     let _boundary = sess.lock_local_compaction_boundary().await;
     let context = LocalCompactionContext::from_step(Arc::clone(step));
-    let budget = budget(sess, &context).await;
     let mut state = prepared_state(sess, &context).await;
-    let installed =
-        install_marks(sess, &context, &mut state, CleanupTrigger::Savings(budget)).await? > 0;
+    let result = clean_and_launch(sess, context, &mut state).await;
+    // A concurrent full-window reset owns the new generation and discards this batch.
+    sess.set_local_compaction_state(state).await;
+    result
+}
+
+async fn clean_and_launch(
+    sess: &Arc<Session>,
+    context: LocalCompactionContext,
+    state: &mut LocalCompactionState,
+) -> CodexResult<()> {
+    let budget = budget(sess, &context).await;
+    install_marks(sess, &context, state, CleanupTrigger::Savings(budget)).await?;
     let history = sess.clone_history().await;
     let source = history.annotated_items();
     state.staged.retain_current(source);
@@ -184,8 +194,7 @@ pub(crate) async fn maybe_clean_history(
                 Err(error) => {
                     tracing::warn!(%error, "cannot prepare background local marking");
                     state.retry_after = Some(Instant::now() + Duration::from_secs(60));
-                    sess.set_local_compaction_state(state).await;
-                    return Ok(installed);
+                    return Ok(());
                 }
             };
             let base = sess.get_prompt_base_instructions().await;
@@ -205,7 +214,7 @@ pub(crate) async fn maybe_clean_history(
                 .begin_local_compaction_usage(&context.turn.sub_id, state.generation)
                 .await
             {
-                return Ok(installed);
+                return Ok(());
             }
             let weak = Arc::downgrade(sess);
             let completed = Arc::new(Mutex::new(MarkingResult::default()));
@@ -261,9 +270,7 @@ pub(crate) async fn maybe_clean_history(
             state.retry_after = None;
         }
     }
-    // A concurrent full-window reset owns the new generation and discards this batch.
-    sess.set_local_compaction_state(state).await;
-    Ok(installed)
+    Ok(())
 }
 
 /// Restores durable marks and takes a finished background batch. Callers hold the boundary lock.

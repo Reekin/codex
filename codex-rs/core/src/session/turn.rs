@@ -426,11 +426,13 @@ pub(crate) async fn run_turn(
             if crate::local_compaction::uses_local_route(
                 &turn_context,
                 &step_context.settings.model_info,
-            ) && crate::local_compaction::maybe_clean_history(&sess, &step_context)
-                .or_cancel(&cancellation_token)
-                .await??
-                && run_pending_session_start_hooks(&sess, &turn_context).await
-            {
+            ) {
+                crate::local_compaction::maybe_clean_history(&sess, &step_context)
+                    .or_cancel(&cancellation_token)
+                    .await??;
+            }
+            // Cleanup installed here or by an out-of-turn request is announced before sampling.
+            if run_pending_session_start_hooks(&sess, &turn_context).await {
                 return Err(CodexErr::TurnAborted);
             }
 

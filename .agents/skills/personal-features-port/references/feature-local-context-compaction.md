@@ -98,8 +98,8 @@ keep original local records queryable without a hosted notes service.
 6. Resume/fork after cleanup and read originals with model tools and CLI. Compare forced-local and
    native-remote routes, and round-trip configuration (REQ-8,9).
 7. Validate marks below the savings requirement, restart, and verify identical status without new
-   marking requests. Apply manually through app-server and the packaged CLI; verify the release,
-   the next request's view, and a no-op second apply (REQ-2,10).
+   marking requests. Apply manually through the app-server methods, including on the packaged
+   binary; verify the release, the next request's view, and a no-op second apply (REQ-2,10).
 
 ## Integration Contract
 
