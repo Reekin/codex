@@ -8,7 +8,7 @@
 - retry-empty-final-answer：常规回合缺少最终回答或最终回答为空时，最多补试一次。
 - subagent-identity-labels：向子代理提供身份事实和继承历史边界，保持上游工具协议。
 - model-aware-compaction：根据 provider 与当前模型的能力选择远端压缩或本地摘要。
-- local-compaction-handoff：本地摘要保留决策、工作进度和关键证据，并提供原始 rollout 查阅路径。
+- local-context-compaction：本地压缩优先保留对话原文，对工具记录选择完整保留、精简或移出；空间仍不足时逐级精简旧历史。模型和用户可通过本地查询工具与 CLI 回查原始记录，恢复会话后保留压缩结果。可配置触发比例与目标比例，默认分别为上下文窗口的 50% 和 30%；也可为支持远端压缩的模型强制选择本地压缩。完整契约见[本地上下文压缩](../../../../.agents/skills/personal-features-port/references/feature-local-context-compaction.md)。
 - large-request-upload-resilience：检测未完成的大请求上传异常，取消该次上传并通过新连接补试一次。
 - stream-retry-timeout：响应长时间没有完整结果时保留原请求并补发，采用先就绪的一条，规则见[功能契约](../../../../.agents/skills/personal-features-port/references/feature-stream-retry-timeout.md)。
 - auth-independent-tools：已安装的生图工具满足功能开关、模型要求和套餐条件时，任何 provider 均可向模型暴露该工具，不按 provider 类型、声明的生图能力或登录方式隐藏；实际服务请求沿用原有凭据和授权流程。[用户：确保任何provider都能看到生图]
