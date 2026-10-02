@@ -1,11 +1,6 @@
-use crate::context::GuardianContextMode;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::Prompt;
-use crate::client::ModelClientSession;
-use crate::client_common::ResponseEvent;
 use crate::context::CompactionSummary;
 use crate::context::ContextualUserFragment;
 use crate::context::world_state::WorldState;
@@ -13,18 +8,14 @@ use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
 use crate::hook_runtime::run_post_compact_hooks;
 use crate::hook_runtime::run_pre_compact_hooks;
-use crate::responses_metadata::CodexResponsesMetadata;
-use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 #[cfg(test)]
 use crate::session::PreviousTurnSettings;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::step_settings::ResolvedStepSettings;
-use crate::session::turn::get_last_assistant_message_from_turn;
 use crate::session::turn_context::TurnContext;
 use crate::state::AutoCompactWindowIds;
-use crate::util::backoff;
 use codex_analytics::CodexCompactionEvent;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
@@ -48,30 +39,22 @@ use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
-use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
-use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
-use futures::prelude::*;
-use tracing::error;
-use tracing::warn;
 
-pub use codex_prompts::SUMMARIZATION_PROMPT;
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
-const ROLLOUT_RECOVERY_INTRO: &str =
-    "The complete pre-compaction conversation remains available in the rollout at:";
 
-struct LocalCompactionContext {
-    turn: Arc<TurnContext>,
-    settings: Arc<ResolvedStepSettings>,
-    session_telemetry: SessionTelemetry,
+pub(crate) struct LocalCompactionContext {
+    pub(crate) turn: Arc<TurnContext>,
+    pub(crate) settings: Arc<ResolvedStepSettings>,
+    pub(crate) session_telemetry: SessionTelemetry,
+    pub(crate) tool_tokens: usize,
 }
 
 impl LocalCompactionContext {
@@ -79,28 +62,36 @@ impl LocalCompactionContext {
         Self {
             settings: Arc::clone(&turn.initial_settings),
             session_telemetry: turn.session_telemetry.clone(),
+            tool_tokens: 0,
             turn,
         }
     }
 
-    fn from_step(step: Arc<StepContext>) -> Self {
+    pub(crate) fn from_step(step: Arc<StepContext>) -> Self {
         Self {
             turn: Arc::clone(&step.turn),
             settings: Arc::clone(&step.settings),
             session_telemetry: step.session_telemetry.clone(),
+            tool_tokens: usize::try_from(
+                crate::context_manager::context_usage::estimate_tools_tokens(
+                    &step.tool_router.model_visible_specs(),
+                ),
+            )
+            .unwrap_or(0),
         }
     }
 }
 
-/// Controls whether compaction replacement history must include initial context.
+/// Controls initial context reconstruction for native remote compaction.
 ///
-/// Pre-turn/manual compaction variants use `DoNotInject`: they replace history with a summary and
+/// Remote pre-turn/manual compaction variants use `DoNotInject`: they replace history with a summary and
 /// clear `reference_context_item`, so the next regular turn will fully reinject initial context
 /// after compaction.
 ///
-/// Mid-turn compaction must use `BeforeLastUserMessage` because the model is trained to see the
+/// Remote mid-turn compaction uses `BeforeLastUserMessage` because the model is trained to see the
 /// compaction summary as the last item in history after mid-turn compaction; we therefore inject
 /// initial context into the replacement history just above the last real user message.
+/// Local cleanup retains initial context and its baseline in the replacement view.
 pub(crate) enum InitialContextInjection {
     BeforeLastUserMessage {
         world_state: Arc<WorldState>,
@@ -159,7 +150,7 @@ pub(crate) async fn run_inline_auto_compact_task(
         .config
         .compact_prompt
         .as_deref()
-        .unwrap_or(SUMMARIZATION_PROMPT)
+        .unwrap_or("")
         .to_string();
     let input = vec![UserInput::Text {
         text: prompt,
@@ -284,186 +275,22 @@ async fn run_compact_task_inner_impl(
     input: Vec<UserInput>,
     initial_context_injection: InitialContextInjection,
     compaction_metadata: CompactionTurnMetadata,
-) -> CodexResult<String> {
+) -> CodexResult<()> {
     let turn_context = &compaction_context.turn;
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(turn_context, &compaction_item)
         .await;
-    let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
-
-    let mut history = sess.clone_history().await;
-    history.record_items(
-        &[initial_input_for_turn.into()],
-        compaction_context
-            .settings
-            .model_info
-            .truncation_policy
-            .into(),
-    );
-
-    let max_retries = turn_context.provider.info().stream_max_retries();
-    let mut retries = 0;
-    let mut client_session = sess.services.model_client.new_session();
-    // Reuse one client session so turn-scoped state (sticky routing, websocket incremental
-    // request tracking)
-    // survives retries within this compact turn.
-    let responses_metadata = sess
-        .responses_metadata(
-            turn_context.as_ref(),
-            CodexResponsesRequestKind::Compaction(compaction_metadata),
-        )
-        .await;
-
-    let compaction_response_id = loop {
-        // Clone is required because of the loop
-        let turn_input = history
-            .clone()
-            .for_prompt(&compaction_context.settings.model_info.input_modalities);
-        let turn_input_len = turn_input.len();
-        let prompt = Prompt {
-            input: turn_input,
-            base_instructions: sess.get_prompt_base_instructions().await,
-            ..Default::default()
-        };
-        let attempt_result = drain_to_completed(
-            &sess,
-            compaction_context,
-            &mut client_session,
-            &responses_metadata,
-            &prompt,
-        )
-        .await;
-
-        match attempt_result {
-            Ok(response_id) => {
-                break response_id;
-            }
-            Err(err)
-                if matches!(
-                    err.details(),
-                    CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
-                ) =>
-            {
-                return Err(err);
-            }
-            Err(e) if matches!(e.details(), CodexErrorDetails::SessionBudgetExceeded) => {
-                sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                sess.send_event(turn_context, event).await;
-                return Err(e);
-            }
-            Err(e) if matches!(e.details(), CodexErrorDetails::ContextWindowExceeded) => {
-                if turn_input_len > 1 {
-                    // Trim from the beginning to preserve cache (prefix-based) and keep recent messages intact.
-                    error!(
-                        "Context window exceeded while compacting; removing oldest history item. Error: {e}"
-                    );
-                    history.remove_first_item();
-                    retries = 0;
-                    continue;
-                }
-                sess.set_total_tokens_full(turn_context.as_ref()).await;
-                sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                sess.send_event(turn_context, event).await;
-                return Err(e);
-            }
-            Err(e) => {
-                if retries < max_retries {
-                    retries += 1;
-                    let delay = backoff(retries);
-                    sess.notify_stream_error(
-                        turn_context.as_ref(),
-                        format!("Reconnecting... {retries}/{max_retries}"),
-                        e,
-                    )
-                    .await;
-                    tokio::time::sleep(delay).await;
-                    continue;
-                } else {
-                    sess.track_turn_codex_error(turn_context.as_ref(), &e);
-                    let event = EventMsg::Error(e.to_error_event(/*message_prefix*/ None));
-                    sess.send_event(turn_context, event).await;
-                    return Err(e);
-                }
-            }
-        }
-    };
-
-    let history_snapshot = sess.clone_history().await;
-    let history_items = history_snapshot.annotated_items();
-    let summary_suffix =
-        get_last_assistant_message_from_turn(history_snapshot.raw_items()).unwrap_or_default();
-    let rollout_path = match sess.current_rollout_path().await {
-        Ok(path) => path,
-        Err(err) => {
-            warn!("failed to resolve local compaction rollout recovery path: {err}");
-            None
-        }
-    };
-    let summary_text = build_local_compaction_summary(&summary_suffix, rollout_path.as_deref());
-    let identity = if sess.guardian_context_mode == GuardianContextMode::ThreadOwned {
-        CompactedMessageIdentity::Preserve
-    } else {
-        CompactedMessageIdentity::Regenerate
-    };
-    let user_messages = collect_annotated_user_messages(history_items, identity);
-
-    let mut new_history = build_compacted_history(Vec::new(), &user_messages, &summary_text);
-    if let Some(summary_item) = new_history.last_mut() {
-        // This replacement history skips `record_conversation_items`; only the appended summary
-        // belongs to this compaction turn.
-        summary_item.set_turn_id_if_missing(&turn_context.sub_id);
-    }
-    let (window_number, window_ids) = sess.advance_auto_compact_window().await;
-
-    let (initial_context, world_state_baseline) =
-        build_compaction_initial_context(sess.as_ref(), &initial_context_injection).await;
-    if !initial_context.is_empty() {
-        new_history =
-            insert_initial_context_before_last_real_user_or_summary(new_history, initial_context);
-    }
-    let reference_context_item = match initial_context_injection {
-        InitialContextInjection::DoNotInject => None,
-        InitialContextInjection::BeforeLastUserMessage { .. } => {
-            Some(turn_context.to_turn_context_item())
-        }
-    };
-    sess.replace_compacted_history(
-        new_history,
-        reference_context_item,
-        world_state_baseline,
-        CompactedHistoryMetadata {
-            message: summary_text,
-            window_number,
-            window_ids,
-            compaction_response_id: Some(compaction_response_id),
-            compaction_model_hash: compaction_context.settings.model_info.comp_hash.clone(),
-        },
+    crate::local_compaction::run_pipeline(
+        &sess,
+        compaction_context,
+        input,
+        initial_context_injection,
+        compaction_metadata,
     )
-    .await;
-    sess.recompute_token_usage(turn_context).await;
-
+    .await?;
     sess.emit_turn_item_completed(turn_context, compaction_item)
         .await;
-    let warning = EventMsg::Warning(WarningEvent {
-        message: "Heads up: Long threads and multiple compactions can cause the model to be less accurate. Start a new thread when possible to keep threads small and targeted.".to_string(),
-    });
-    sess.send_event(turn_context, warning).await;
-    Ok(summary_suffix)
-}
-
-fn build_local_compaction_summary(summary: &str, rollout_path: Option<&Path>) -> String {
-    let summary = format!("{SUMMARY_PREFIX}\n{summary}");
-    let Some(path) = rollout_path else {
-        return summary;
-    };
-    format!(
-        "{summary}\n\n{ROLLOUT_RECOVERY_INTRO}\n`{}`\n\
-         If exact code, tool output, errors, or decisions are needed, read that rollout instead of \
-         guessing.",
-        path.display()
-    )
+    Ok(())
 }
 
 pub(crate) struct CompactionAnalyticsAttempt {
@@ -725,6 +552,8 @@ pub(crate) fn insert_initial_context_before_last_real_user_or_summary(
     compacted_history
 }
 
+/// Reconstruct native remote and legacy rollout checkpoints that use a handoff summary.
+/// New local compaction uses the structured cleanup and tier pipeline instead.
 pub(crate) fn build_compacted_history(
     initial_context: Vec<ResponseItemEnvelope>,
     user_messages: &[CompactedUserMessage],
@@ -815,68 +644,6 @@ fn build_compacted_history_with_limit(
     )));
 
     history
-}
-
-async fn drain_to_completed(
-    sess: &Session,
-    compaction_context: &LocalCompactionContext,
-    client_session: &mut ModelClientSession,
-    responses_metadata: &CodexResponsesMetadata,
-    prompt: &Prompt,
-) -> CodexResult<String> {
-    let turn_context = &compaction_context.turn;
-    let mut stream = client_session
-        .stream(
-            prompt,
-            &compaction_context.settings.model_info,
-            &compaction_context.session_telemetry,
-            compaction_context.settings.reasoning_effort().cloned(),
-            compaction_context.settings.reasoning_summary,
-            compaction_context.settings.service_tier.clone(),
-            responses_metadata,
-            // Rollout tracing currently models remote compaction only; local compaction streams
-            // are left untraced until the reducer has a first-class local compaction lifecycle.
-            &InferenceTraceContext::disabled(),
-        )
-        .await?;
-    loop {
-        let maybe_event = stream.next().await;
-        let Some(event) = maybe_event else {
-            return Err(CodexErr::Stream(
-                "stream closed before response.completed".into(),
-            ));
-        };
-        match event {
-            Ok(ResponseEvent::OutputItemDone(item)) => {
-                sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
-                    .await;
-            }
-            // Provider usage totals already cover retained reasoning.
-            Ok(ResponseEvent::ServerReasoningIncluded(_)) => {}
-            Ok(ResponseEvent::RateLimits(snapshot)) => {
-                sess.update_rate_limits(turn_context, snapshot).await;
-            }
-            Ok(ResponseEvent::Completed {
-                response_id,
-                token_usage,
-                usage_metadata,
-                ..
-            }) => {
-                sess.record_observed_response_completed(
-                    turn_context,
-                    &response_id,
-                    token_usage.as_ref(),
-                    usage_metadata.as_ref(),
-                )
-                .await;
-                sess.update_token_usage_info(turn_context, token_usage.as_ref())
-                    .await?;
-                return Ok(response_id);
-            }
-            Ok(_) => continue,
-            Err(e) => return Err(e),
-        }
-    }
 }
 
 #[cfg(test)]
