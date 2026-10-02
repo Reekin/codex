@@ -2,48 +2,52 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Occupancy and batching policy for local conversation cleanup.
+/// Background marking, reclaim thresholds, and full-compaction budgets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalCompactionConfig {
     /// Use local cleanup even when the provider supports remote compaction.
     pub force_local: bool,
-    /// Percentage of the usable context window that starts automatic cleanup.
-    pub trigger_percent: u8,
-    /// Desired percentage of the usable context window after cleanup.
-    pub target_percent: u8,
-    /// Minimum savings as a percentage of the usable context window per cleanup.
-    pub minimum_savings_percent: u8,
+    /// Window percentage points that completed tool marks must reclaim before cleanup.
+    pub reclaim_percent: u8,
+    /// Unmarked tool tokens as a percentage of the window that starts a background batch.
+    pub mark_after_tokens_percent: u8,
+    /// Completed unmarked tool records that can independently start a background batch.
+    pub mark_after_records: u16,
+    /// Preferred total occupancy after full compaction; safe larger results are allowed.
+    pub compact_target_percent: u8,
 }
 
 impl Default for LocalCompactionConfig {
     fn default() -> Self {
         Self {
             force_local: false,
-            trigger_percent: 50,
-            target_percent: 30,
-            minimum_savings_percent: 5,
+            reclaim_percent: 30,
+            mark_after_tokens_percent: 5,
+            mark_after_records: 32,
+            compact_target_percent: 30,
         }
     }
 }
 
 impl LocalCompactionConfig {
     pub fn validate(&self) -> std::io::Result<()> {
-        if self.target_percent == 0
-            || self.target_percent >= self.trigger_percent
-            || self.trigger_percent > 100
-        {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "local_compaction requires 0 < target_percent < trigger_percent <= 100",
-            ));
+        for (name, percent) in [
+            ("reclaim_percent", self.reclaim_percent),
+            ("mark_after_tokens_percent", self.mark_after_tokens_percent),
+            ("compact_target_percent", self.compact_target_percent),
+        ] {
+            if !(1..100).contains(&percent) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("local_compaction.{name} must be between 1 and 99"),
+                ));
+            }
         }
-        if self.minimum_savings_percent == 0
-            || self.minimum_savings_percent > self.trigger_percent - self.target_percent
-        {
+        if self.mark_after_records == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "local_compaction.minimum_savings_percent must be positive and no greater than trigger_percent - target_percent",
+                "local_compaction.mark_after_records must be positive",
             ));
         }
         Ok(())

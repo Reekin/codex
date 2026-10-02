@@ -1918,30 +1918,37 @@
     },
     "LocalCompactionConfig": {
       "additionalProperties": false,
-      "description": "Occupancy and batching policy for local conversation cleanup.",
+      "description": "Background marking, reclaim thresholds, and full-compaction budgets.",
       "properties": {
+        "compact_target_percent": {
+          "default": 30,
+          "description": "Preferred total occupancy after full compaction; safe larger results are allowed.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "force_local": {
           "default": false,
           "description": "Use local cleanup even when the provider supports remote compaction.",
           "type": "boolean"
         },
-        "minimum_savings_percent": {
+        "mark_after_records": {
+          "default": 32,
+          "description": "Completed unmarked tool records that can independently start a background batch.",
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mark_after_tokens_percent": {
           "default": 5,
-          "description": "Minimum savings as a percentage of the usable context window per cleanup.",
+          "description": "Unmarked tool tokens as a percentage of the window that starts a background batch.",
           "format": "uint8",
           "minimum": 0.0,
           "type": "integer"
         },
-        "target_percent": {
+        "reclaim_percent": {
           "default": 30,
-          "description": "Desired percentage of the usable context window after cleanup.",
-          "format": "uint8",
-          "minimum": 0.0,
-          "type": "integer"
-        },
-        "trigger_percent": {
-          "default": 50,
-          "description": "Percentage of the usable context window that starts automatic cleanup.",
+          "description": "Window percentage points that completed tool marks must reclaim before cleanup.",
           "format": "uint8",
           "minimum": 0.0,
           "type": "integer"
@@ -6599,10 +6606,11 @@
         }
       ],
       "default": {
+        "compact_target_percent": 30,
         "force_local": false,
-        "minimum_savings_percent": 5,
-        "target_percent": 30,
-        "trigger_percent": 50
+        "mark_after_records": 32,
+        "mark_after_tokens_percent": 5,
+        "reclaim_percent": 30
       },
       "description": "Local cleanup policy, independent of native remote compaction budgets."
     },
