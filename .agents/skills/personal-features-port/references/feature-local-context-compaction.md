@@ -23,11 +23,17 @@ independent of hosted notes, encrypted compaction protocols, and model vendor.
   appended items survive. Kept items can be reassessed when cleanup is insufficient.
 - **REQ-3**: Automatic cleanup has configurable trigger and target occupancy, defaulting to 50%
   and 30%. It batches meaningful savings rather than rewriting every request. Budget calculations
-  include fixed context. Manual local compaction uses the same pipeline.
+  include fixed context. This soft trigger permits tool-only cleanup. If it cannot reach the target,
+  keep the active view unchanged and suspend further soft attempts for that history generation and
+  model, including after new user input. A rewritten window or model change permits soft attempts
+  again. The ordinary Codex automatic-compaction limit and limit scope remain the hard trigger;
+  manual compaction also permits full compression.
 - **REQ-4**: Tool-only cleanup preserves dialogue verbatim and in order, and retains valid tool
   call/result pairing. Shortened and removed results carry stable original-content references.
   Decisions and analysis output are not ordinary dialogue.
-- **REQ-5**: When cleanup cannot provide sufficient room, bounded chronological tiers retain recent
+- **REQ-5**: Only an ordinary hard compaction trigger or manual compaction may promote history into
+  bounded chronological tiers when tool cleanup cannot provide sufficient room. Soft cleanup never
+  invokes the tier summarizer. The tiers retain recent
   original history, dialogue with concise evidence, older condensed dialogue, and a bounded oldest
   range overview. Active constraints and decisions survive in a bounded ledger. Older ranges merge
   rather than accumulating one permanent entry per turn. Summaries preserve uncertainty,
@@ -70,7 +76,10 @@ independent of hosted notes, encrypted compaction protocols, and model vendor.
    private, dialogue survives cleanup, IDs retrieve originals, and subsequent requests contain the
    installed view. Cover manual and automatic entrypoints (REQ-1–4,7).
 2. Repeatedly promote long dialogue/tool history; verify bounds, protected recent work, persistent
-   constraints, chronological source ranges, and no orphan calls (REQ-5).
+   constraints, chronological source ranges, and no orphan calls (REQ-5). Before the original hard
+   limit, unsuccessful soft cleanup must leave the view intact, send no tier request, and suppress
+   repeated soft requests despite further user input. At the original configured hard trigger,
+   observe full compaction; also cover explicit manual compaction (REQ-3,5).
 3. Return malformed/oversized/foreign-ID output and interrupt analysis; compare history before and
    after. Append newer items and invalidate on new user direction (REQ-1,2,6).
 4. Resume after cleanup and read originals with model tools and CLI; verify replacement identity,
