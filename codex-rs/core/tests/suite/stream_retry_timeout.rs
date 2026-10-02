@@ -10,11 +10,10 @@ use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use tokio::sync::oneshot;
 
-#[rstest::rstest]
-#[case::original_finishes_first("primary")]
-#[case::backup_finishes_first("backup")]
+#[test_case::test_case("primary"; "original finishes first")]
+#[test_case::test_case("backup"; "backup finishes first")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn only_the_winning_request_executes_its_tool(#[case] winner: &str) -> anyhow::Result<()> {
+async fn only_the_winning_request_executes_its_tool(winner: &str) -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let mut gates = Vec::new();

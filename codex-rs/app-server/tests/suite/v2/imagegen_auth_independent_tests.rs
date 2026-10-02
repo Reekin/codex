@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 use test_case::test_case;
 
 #[test_case("api"; "API key exposes installed image tool")]

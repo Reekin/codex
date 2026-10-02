@@ -41,15 +41,14 @@ fn completed(id: &str) -> ResponseEvent {
     }
 }
 
-#[rstest::rstest]
-#[case::primary(7, 4, Winner::Primary)]
-#[case::backup(12, 2, Winner::Backup)]
-#[case::no_hedge(1, 2, Winner::Primary)]
+#[test_case::test_case(7, 4, Winner::Primary; "primary")]
+#[test_case::test_case(12, 2, Winner::Backup; "backup")]
+#[test_case::test_case(1, 2, Winner::Primary; "no hedge")]
 #[tokio::test(start_paused = true)]
 async fn first_complete_response_wins_and_cancels_the_loser(
-    #[case] primary_seconds: u64,
-    #[case] backup_seconds: u64,
-    #[case] expected: Winner,
+    primary_seconds: u64,
+    backup_seconds: u64,
+    expected: Winner,
 ) {
     let primary_cancelled = CancellationToken::new();
     let backup_cancelled = CancellationToken::new();
