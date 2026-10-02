@@ -16,6 +16,19 @@ import threading
 import time
 
 
+class SmokeDirectory(tempfile.TemporaryDirectory):
+    def cleanup(self):
+        # Windows can retain directory handles briefly after child processes exit.
+        for attempt in range(20):
+            try:
+                super().cleanup()
+                return
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.25)
+
+
 def analysis_payload(body, marker):
     for item in reversed(body.get("input", [])):
         for content in item.get("content", []):
@@ -293,7 +306,7 @@ def run(binary):
         subprocess.run(
             [str(binary), subcommand, "--help"], check=True, capture_output=True
         )
-    with tempfile.TemporaryDirectory(prefix="codex-local-context-") as temporary:
+    with SmokeDirectory(prefix="codex-local-context-") as temporary:
         root = Path(temporary)
         (root / "home").mkdir()
         (root / "work").mkdir()
@@ -374,18 +387,14 @@ def run(binary):
             assert recall_outputs, "model recall tool did not complete"
             assert model.recall_id in json.dumps(recall_outputs[-1])
             assert not model.errors, model.errors
-            print(
-                json.dumps(
-                    {
-                        "status": "passed",
-                        "requests": len(model.requests),
-                        "checkpoints": len(compacted),
-                        "classified": len(model.decisions),
-                        "cli_recall": True,
-                        "model_recall_after_resume": True,
-                    }
-                )
-            )
+            result = {
+                "status": "passed",
+                "requests": len(model.requests),
+                "checkpoints": len(compacted),
+                "classified": len(model.decisions),
+                "cli_recall": True,
+                "model_recall_after_resume": True,
+            }
         except Exception:
             print(
                 (root / "app-server.log").read_text(encoding="utf-8", errors="replace")[
@@ -398,6 +407,7 @@ def run(binary):
                 rpc.close()
             model.shutdown()
             model.server_close()
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":
