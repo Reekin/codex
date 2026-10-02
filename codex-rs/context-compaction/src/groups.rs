@@ -91,5 +91,17 @@ pub(crate) fn protected_start(items: &[ResponseItemEnvelope]) -> usize {
 }
 
 pub(crate) fn pinned(item: &ResponseItemEnvelope) -> bool {
-    matches!(&item.item, ResponseItem::Message { role, .. } if role == "developer" || role == "system")
+    match &item.item {
+        ResponseItem::Message { role, .. } if role == "developer" || role == "system" => true,
+        ResponseItem::Message {
+            role,
+            internal_chat_message_metadata_passthrough: Some(metadata),
+            ..
+        } if role == "user" => metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
+            kinds.iter().any(|kind| {
+                kind.0.ends_with(".instructions") || kind.0 == "environments.environment_context"
+            })
+        }),
+        _ => false,
+    }
 }

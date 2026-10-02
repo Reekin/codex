@@ -39,6 +39,38 @@ fn history() -> Vec<ResponseItemEnvelope> {
 }
 
 #[test]
+fn tier_promotion_keeps_harness_instructions_and_environment_verbatim() {
+    let instructions: Vec<_> = ["agents_md.instructions", "environments.environment_context"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, kind)| {
+            item(json!({
+                "type":"message", "id":format!("instructions_{index}"), "role":"user",
+                "content":[{"type":"input_text","text":format!("Canonical {kind} remains exact.")}],
+                "internal_chat_message_metadata_passthrough":{"content_item_kinds":[kind]}
+            }))
+        })
+        .collect();
+    let mut original = instructions.clone();
+    original.extend(history());
+    let costs: Vec<_> = original
+        .iter()
+        .map(|entry| match &entry.item {
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(id), ..
+            } if id != "c3" => 10_000,
+            _ => 100,
+        })
+        .collect();
+    let plan = TierPlan::new(&original, 5_000, &costs).expect("older evidence can be promoted");
+    assert_eq!(
+        &plan.retained_prefix[..instructions.len()],
+        instructions.as_slice()
+    );
+    assert!(plan.max_fragment_bytes > 0);
+}
+
+#[test]
 fn cleanup_preserves_dialogue_pairs_ids_and_error_status_in_one_long_turn() {
     let mut original = history();
     if let ResponseItem::FunctionCallOutput { output, .. } = &mut original[4].item {
