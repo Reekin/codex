@@ -35,7 +35,7 @@ support it use Codex local summarization without requiring a provider switch.
 - Manual and automatic compaction MUST use the same effective capability rule.
 - Provider eligibility MUST remain an independent requirement; a model capability cannot enable
   remote compaction for a provider that does not support it.
-- Local compaction MUST reuse the upstream summarization and history replacement implementation.
+- Local compaction MUST use the local context compaction pipeline and canonical history replacement.
 
 ## Adapter Seams
 
