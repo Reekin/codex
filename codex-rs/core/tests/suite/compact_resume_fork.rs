@@ -166,25 +166,27 @@ async fn compact_resume_and_fork_preserve_installed_history_and_original_ids() -
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let model = LocalModel::mount(&server).await;
-    let mut builder = test_codex().with_config(configure);
+    let mut builder = test_codex().with_config(configure_marking);
     let test = builder.build_with_auto_env(&server).await?;
     model.reply(tool_turn());
     model.text("Exact original assistant dialogue.");
-    test.submit_turn("Original user instruction.").await?;
+    test.submit_text_turn("Original user instruction.").await?;
     model.text("Protected recent dialogue.");
-    test.submit_turn("Keep the recent turn.").await?;
-    test.codex.submit(Op::Compact).await?;
-    complete(&test.codex).await;
+    test.submit_text_turn("Keep the recent turn.").await?;
+    finish_marking(&test, &model, /*expected_batches*/ 1).await?;
     model.text("Following installed history.");
-    test.submit_turn("After cleanup.").await?;
+    test.submit_text_turn("After cleanup.").await?;
     test.codex.flush_rollout().await?;
     let path = test.codex.rollout_path().unwrap();
     let installed = checkpoints(&path)?.pop().expect("installed view");
     let decisions = model.decisions();
-    let resumed = builder.restart(&server, &test).await?;
+    let resumed = test_codex()
+        .with_config(configure_marking)
+        .restart(&server, &test)
+        .await?;
     model.text("Resumed.");
-    resumed.submit_turn("After resume.").await?;
-    let bodies = model.bodies();
+    resumed.submit_text_turn("After resume.").await?;
+    let bodies = model.ordinary_bodies();
     let resumed_input = bodies.last().unwrap()["input"].as_array().unwrap();
     let before = &bodies[bodies.len() - 2]["input"];
     assert_eq!(
@@ -229,7 +231,7 @@ async fn compact_resume_and_fork_preserve_installed_history_and_original_ids() -
     complete(&forked.thread).await;
     assert!(
         model
-            .bodies()
+            .ordinary_bodies()
             .last()
             .unwrap()
             .to_string()
@@ -256,7 +258,7 @@ async fn repeated_tiers_preserve_constraints_recent_dialogue_and_resume() -> Res
     let model = LocalModel::mount(&server).await;
     let configure_tiers = |config: &mut codex_core::config::Config| {
         configure(config);
-        config.local_compaction.target_percent = 15;
+        config.local_compaction.compact_target_percent = 15;
     };
     let mut builder = test_codex().with_config(configure_tiers);
     let test = builder.build_with_auto_env(&server).await?;
@@ -266,20 +268,20 @@ async fn repeated_tiers_preserve_constraints_recent_dialogue_and_resume() -> Res
                 "Evidence {cycle}-{turn}: {}",
                 "Verification pending; earlier assumption corrected. ".repeat(200)
             ));
-            test.submit_turn(&format!(
+            test.submit_text_turn(&format!(
                 "Offline-only constraint, cycle {cycle} turn {turn}: {}",
                 "Preserve uncertainty and pending work. ".repeat(200)
             ))
             .await?;
         }
         model.text("Recent original answer must survive verbatim.");
-        test.submit_turn("Recent original instruction must survive verbatim.")
+        test.submit_text_turn("Recent original instruction must survive verbatim.")
             .await?;
         test.codex.submit(Op::Compact).await?;
         complete(&test.codex).await;
         model.text("Continue after promotion.");
-        test.submit_turn("Read installed tiers.").await?;
-        let bodies = model.bodies();
+        test.submit_text_turn("Read installed tiers.").await?;
+        let bodies = model.ordinary_bodies();
         let installed = bodies.last().unwrap().to_string();
         assert!(installed.contains(LEDGER));
         assert!(installed.contains("Recent original instruction must survive verbatim."));
@@ -359,8 +361,17 @@ async fn repeated_tiers_preserve_constraints_recent_dialogue_and_resume() -> Res
         test.config.local_compaction
     );
     model.text("Resumed bounded history.");
-    resumed.submit_turn("Continue after tier resume.").await?;
-    assert!(model.bodies().last().unwrap().to_string().contains(LEDGER));
+    resumed
+        .submit_text_turn("Continue after tier resume.")
+        .await?;
+    assert!(
+        model
+            .ordinary_bodies()
+            .last()
+            .unwrap()
+            .to_string()
+            .contains(LEDGER)
+    );
     resumed.codex.flush_rollout().await?;
     assert_eq!(checkpoints(&path)?, before);
     // Listing uses the original turn archive, not only the small installed tier view.
@@ -375,9 +386,11 @@ async fn repeated_tiers_preserve_constraints_recent_dialogue_and_resume() -> Res
     )?)?;
     assert_ne!(page["data"], second["data"]);
     model.text(&"More original evidence. ".repeat(2000));
-    resumed.submit_turn("New evidence after resume.").await?;
+    resumed
+        .submit_text_turn("New evidence after resume.")
+        .await?;
     model.text("Recent protected answer.");
-    resumed.submit_turn("New recent direction.").await?;
+    resumed.submit_text_turn("New recent direction.").await?;
     resumed.codex.submit(Op::Compact).await?;
     complete(&resumed.codex).await;
     resumed.codex.flush_rollout().await?;
@@ -391,18 +404,17 @@ async fn rollback_discards_later_dialogue_after_local_cleanup() -> Result<()> {
     let server = start_mock_server().await;
     let model = LocalModel::mount(&server).await;
     let test = test_codex()
-        .with_config(configure)
+        .with_config(configure_marking)
         .build_with_auto_env(&server)
         .await?;
     model.reply(tool_turn());
     model.text("Retained answer.");
-    test.submit_turn("Retained instruction.").await?;
+    test.submit_text_turn("Retained instruction.").await?;
     model.text("Recent answer.");
-    test.submit_turn("Recent instruction.").await?;
-    test.codex.submit(Op::Compact).await?;
-    complete(&test.codex).await;
+    test.submit_text_turn("Recent instruction.").await?;
+    finish_marking(&test, &model, /*expected_batches*/ 1).await?;
     model.text("Discard this answer.");
-    test.submit_turn("Discard this instruction.").await?;
+    test.submit_text_turn("Discard this instruction.").await?;
     test.codex
         .submit(Op::ThreadRollback { num_turns: 1 })
         .await?;
@@ -414,8 +426,8 @@ async fn rollback_discards_later_dialogue_after_local_cleanup() -> Result<()> {
     })
     .await;
     model.text("Edited answer.");
-    test.submit_turn("Edited instruction.").await?;
-    let body: Value = model.bodies().last().unwrap().clone();
+    test.submit_text_turn("Edited instruction.").await?;
+    let body: Value = model.ordinary_bodies().last().unwrap().clone();
     assert!(body.to_string().contains("Retained instruction."));
     assert!(body.to_string().contains(SHORTENED));
     assert!(!body.to_string().contains("Discard this instruction."));

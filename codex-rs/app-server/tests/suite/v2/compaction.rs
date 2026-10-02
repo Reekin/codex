@@ -278,7 +278,7 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     let initial_cwd = TempDir::new()?;
     let updated_cwd = TempDir::new()?;
     compaction_config(&server.uri(), /*auto_compact_limit*/ 1_000_000)
-        .with_root_config("model_context_window = 100000\nlocal_compaction.trigger_percent = 99\nlocal_compaction.force_local = true")
+        .with_root_config("model_context_window = 100000\nlocal_compaction.force_local = true")
         .write(codex_home.path())?;
 
     // Top-level cwd restoration uses host-native paths, not a foreign executor's paths.
