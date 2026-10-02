@@ -64,7 +64,7 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
     let config = &test.config;
     let conversation = &test.codex;
 
-    test.submit_turn(TURN_ONE_USER).await?;
+    test.submit_text_turn(TURN_ONE_USER).await?;
 
     let override_cwd = config.cwd.join(PRETURN_CONTEXT_DIFF_CWD);
     std::fs::create_dir_all(&override_cwd)?;
@@ -85,7 +85,7 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
     )
     .await?;
 
-    test.submit_turn(TURN_TWO_USER).await?;
+    test.submit_text_turn(TURN_TWO_USER).await?;
 
     conversation
         .submit(Op::ThreadRollback { num_turns: 1 })
@@ -99,7 +99,7 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
     };
     assert_eq!(rollback_event.num_turns, 1);
 
-    test.submit_turn(FOLLOWUP_USER).await?;
+    test.submit_text_turn(FOLLOWUP_USER).await?;
 
     let requests = request_log.requests();
     assert_eq!(requests.len(), 3);
@@ -346,7 +346,13 @@ async fn repeated_tiers_preserve_constraints_recent_dialogue_and_resume() -> Res
         ranges.windows(2).all(|ranges| ranges[0].1 < ranges[1].0),
         "tiers preserve disjoint chronological source ranges"
     );
-    let resumed = builder.restart(&server, &test).await?;
+    // Builder config mutators are consumed by the initial build; configure the new process too.
+    let mut resume_builder = test_codex().with_config(configure_tiers);
+    let resumed = resume_builder.restart(&server, &test).await?;
+    assert_eq!(
+        resumed.config.local_compaction,
+        test.config.local_compaction
+    );
     model.text("Resumed bounded history.");
     resumed.submit_turn("Continue after tier resume.").await?;
     assert!(model.bodies().last().unwrap().to_string().contains(LEDGER));

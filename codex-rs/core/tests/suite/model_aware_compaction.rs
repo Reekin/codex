@@ -287,8 +287,12 @@ async fn model_switch_uses_active_capability_and_preserves_selected_reasoning() 
         },
     )
     .await?;
+    // The retained fixture is below the automatic threshold; explicitly request cleanup.
+    test.codex.submit(Op::Compact).await?;
+    complete(&test.codex).await;
     responder.text("After model switch.");
-    test.submit_turn("Switch capability and continue.").await?;
+    test.submit_text_turn("Switch capability and continue.")
+        .await?;
     let bodies = responder.bodies();
     let classifier = bodies
         .iter()
@@ -345,7 +349,7 @@ async fn compatible_model_switch_does_not_request_unnecessary_cleanup(
     )
     .await?;
     responder.text("Switched answer.");
-    test.submit_turn("Next turn.").await?;
+    test.submit_text_turn("Next turn.").await?;
     let bodies = responder.bodies();
     assert_eq!(bodies.len(), 2);
     assert_eq!(bodies[1]["model"], "next-model");
