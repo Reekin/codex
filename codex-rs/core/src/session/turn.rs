@@ -533,8 +533,8 @@ pub(crate) async fn run_turn(
                         &step_context.settings.model_info,
                     ) == RemoteCompactionSupport::Unsupported;
                 let should_roll_over = needs_follow_up
-                    && !local_route
-                    && (sess.take_new_context_window_request().await || token_limit_reached);
+                    && (token_limit_reached
+                        || (!local_route && sess.take_new_context_window_request().await));
                 let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
                 super::token_budget::maybe_record(
                     sess.as_ref(),
@@ -1132,15 +1132,6 @@ async fn run_pre_sampling_compact(
     client_session: &mut ModelClientSession,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
-    if turn_context.config.local_compaction.force_local
-        || crate::compaction_policy::remote_compaction_support(
-            turn_context.provider.capabilities().remote_compaction,
-            turn_context.model_info(),
-        ) == RemoteCompactionSupport::Unsupported
-    {
-        // The local hook includes incoming input and initial context in its budget.
-        return Ok(());
-    }
     maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
         .await?;
     let token_status =
@@ -1315,6 +1306,7 @@ async fn run_auto_compact(
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
+    sess.cancel_local_compaction().await;
     let local_route = turn_context.config.local_compaction.force_local
         || crate::compaction_policy::remote_compaction_support(
             turn_context.provider.capabilities().remote_compaction,

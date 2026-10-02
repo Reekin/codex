@@ -2,16 +2,23 @@ use std::sync::Arc;
 
 use super::session::Session;
 use super::thread_settings;
+use super::turn_context::TurnContext;
 use crate::compact::CompactedHistoryMetadata;
+use crate::compact::LocalCompactionContext;
 use crate::context::GuardianContextMode;
 use crate::context::world_state::WorldState;
 use crate::context_manager::estimate_item_token_count;
+use crate::local_compaction::AnalysisKind;
 use crate::local_compaction::LocalCompactionState;
 use codex_history::CompactedItem;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RolloutItem;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::TokenCountEvent;
+use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::WorldStateItem;
 
@@ -21,13 +28,116 @@ impl Session {
     }
 
     pub(crate) async fn set_local_compaction_state(&self, state: LocalCompactionState) {
-        self.state.lock().await.local_compaction = state;
+        let mut current = self.state.lock().await;
+        if current.local_compaction.generation == state.generation {
+            current.local_compaction = state;
+        }
+    }
+
+    pub(crate) async fn cancel_local_compaction(&self) {
+        let mut state = self.state.lock().await;
+        state.local_compaction.reset_window();
+        state.background_compaction_usage = None;
+    }
+
+    pub(crate) async fn begin_local_compaction_usage(
+        &self,
+        turn_id: &str,
+        generation: u64,
+    ) -> bool {
+        let mut state = self.state.lock().await;
+        if state.local_compaction.generation != generation {
+            return false;
+        }
+        let usage = state
+            .latest_token_usage_record
+            .as_ref()
+            .filter(|record| record.turn_id == turn_id)
+            .map(|record| record.turn_token_usage.clone())
+            .unwrap_or_default();
+        state.background_compaction_usage = Some((turn_id.to_string(), usage));
+        true
+    }
+
+    pub(crate) async fn local_compaction_hard_limit(
+        &self,
+        context: &LocalCompactionContext,
+    ) -> usize {
+        super::context_window::context_window_token_status_for_model(
+            self,
+            &context.turn.config,
+            &context.turn,
+            &context.settings.model_info,
+        )
+        .await
+        .auto_compact_token_limit
+        .and_then(|limit| usize::try_from(limit).ok())
+        .unwrap_or(128_000)
+    }
+
+    /// Charge private inference without changing foreground occupancy or completion state.
+    pub(crate) async fn record_local_compaction_usage(
+        &self,
+        turn: &TurnContext,
+        response_id: &str,
+        usage: Option<&TokenUsage>,
+        kind: AnalysisKind,
+    ) -> CodexResult<()> {
+        let Some(usage) = usage else {
+            return Ok(());
+        };
+        let record = {
+            let mut state = self.state.lock().await;
+            let mut info = state.token_info().unwrap_or(TokenUsageInfo {
+                total_token_usage: TokenUsage::default(),
+                last_token_usage: TokenUsage::default(),
+                model_context_window: None,
+                context_usage: None,
+            });
+            info.total_token_usage.add_assign(usage);
+            state.set_token_info(Some(info));
+            let foreground = (kind == AnalysisKind::Background)
+                .then(|| state.latest_token_usage_record.clone())
+                .flatten()
+                .filter(|record| record.turn_id != turn.sub_id);
+            let record = state.record_token_usage(
+                self.thread_id,
+                &turn.sub_id,
+                self.session_id(),
+                turn.turn_metadata_state
+                    .root_turn_id()
+                    .unwrap_or_else(|| turn.sub_id.clone()),
+                response_id.to_string(),
+                usage,
+            );
+            if let Some(mut foreground) = foreground {
+                foreground.thread_token_usage = record.thread_token_usage.clone();
+                state.latest_token_usage_record = Some(foreground);
+            }
+            if kind == AnalysisKind::Background {
+                state.background_compaction_usage = None;
+            }
+            record
+        };
+        self.persist_rollout_items(&[RolloutItem::TokenUsageRecord(record)])
+            .await;
+        self.record_rollout_budget_usage(usage)
+    }
+
+    pub(crate) async fn send_local_compaction_token_count(&self, turn: &TurnContext) {
+        let (info, rate_limits) = self.state.lock().await.token_info_and_rate_limits();
+        self.send_event(
+            turn,
+            EventMsg::TokenCount(TokenCountEvent { info, rate_limits }),
+        )
+        .await;
     }
 
     pub(crate) async fn install_local_compaction(
         self: &Arc<Self>,
         source: &[ResponseItemEnvelope],
         user_revision: u64,
+        generation: u64,
         mut replacement: Vec<ResponseItemEnvelope>,
         reference_context_item: Option<TurnContextItem>,
         world_state_baseline: Option<Arc<WorldState>>,
@@ -42,11 +152,12 @@ impl Session {
             let _settings_guard = thread_settings::acquire_persistence_lock(&session).await;
             let settings_event = thread_settings::applied_event(&session).await;
             let mut state = session.state.lock().await;
-            if state
-                .history
-                .conversation_history_snapshot()
-                .user_message_revision()
-                != user_revision
+            if state.local_compaction.generation != generation
+                || state
+                    .history
+                    .conversation_history_snapshot()
+                    .user_message_revision()
+                    != user_revision
                 || !state.history.annotated_items().starts_with(&source)
             {
                 return Ok(false);

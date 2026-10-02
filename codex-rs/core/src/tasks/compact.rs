@@ -34,6 +34,7 @@ impl SessionTask for CompactTask {
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let _profile_guard = ctx.turn_timing_state.begin_compaction();
+        session.cancel_local_compaction().await;
         let support = if ctx.config.local_compaction.force_local {
             RemoteCompactionSupport::Unsupported
         } else {
