@@ -70,6 +70,7 @@ mod mcp_cmd;
 mod migrate_rollouts;
 mod plugin_cmd;
 mod queue_cmd;
+mod recall_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
@@ -145,6 +146,8 @@ struct MultitoolCli {
 
 #[derive(Debug, clap::Subcommand)]
 enum Subcommand {
+    /// Query original local conversation history in bounded pages.
+    Recall(recall_cmd::RecallCommand),
     /// Browse all agent sessions on the shared local app-server daemon.
     Agents(AgentsCommand),
 
@@ -1222,6 +1225,14 @@ async fn cli_main(
             )
             .await?;
             handle_app_exit(exit_info)?;
+        }
+        Some(Subcommand::Recall(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "recall",
+            )?;
+            command.run().await?;
         }
         Some(Subcommand::Exec(mut exec_cli)) => {
             reject_remote_mode_for_subcommand(

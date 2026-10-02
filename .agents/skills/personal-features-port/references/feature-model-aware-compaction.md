@@ -4,7 +4,7 @@
 
 Allow one model provider to serve models with different compaction capabilities. Models that
 support the native Responses compaction protocol use remote compaction, while models that do not
-support it use Codex local summarization without requiring a provider switch.
+support it use local context compaction without requiring a provider switch.
 
 ## Non-Goals
 
@@ -17,9 +17,10 @@ support it use Codex local summarization without requiring a provider switch.
 
 - **REQ-1**: Every model exposes whether it supports remote compaction. The capability defaults to
   enabled when omitted so existing model catalogs retain their behavior.
-- **REQ-2**: Remote compaction is selected only when both the provider and the active model support
-  it.
-- **REQ-3**: A model that disables remote compaction uses the existing local summarization path for
+- **REQ-2**: By default remote compaction is selected only when both the provider and the active
+  model support it. The explicit local preference defined in [local context compaction](feature-local-context-compaction.md)
+  can select local compaction even when remote support is available.
+- **REQ-3**: A model that disables remote compaction uses the local context compaction path for
   both manual and automatic compaction.
 - **REQ-4**: Switching models changes the compaction path immediately according to the newly active
   model without requiring a provider or session switch.
@@ -35,7 +36,7 @@ support it use Codex local summarization without requiring a provider switch.
 - Manual and automatic compaction MUST use the same effective capability rule.
 - Provider eligibility MUST remain an independent requirement; a model capability cannot enable
   remote compaction for a provider that does not support it.
-- Local compaction MUST reuse the upstream summarization and history replacement implementation.
+- Local compaction MUST use the local context compaction pipeline and canonical history replacement.
 
 ## Adapter Seams
 

@@ -171,6 +171,10 @@ pub struct ConfigToml {
     /// only to tokens after the carried prefix in the current compaction window.
     pub model_auto_compact_token_limit_scope: Option<AutoCompactTokenLimitScope>,
 
+    /// Local cleanup policy, independent of native remote compaction budgets.
+    #[serde(default)]
+    pub local_compaction: crate::LocalCompactionConfig,
+
     /// Default approval policy for executing commands.
     #[schemars(with = "Option<crate::schema::ConfigAskForApproval>")]
     pub approval_policy: Option<AskForApproval>,

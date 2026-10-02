@@ -1,608 +1,33 @@
-//! Integration tests that cover compacting, resuming, and forking conversations.
-//!
-//! Each test sets up a mocked SSE conversation and drives the conversation through
-//! a specific sequence of operations. After every operation we capture the
-//! request payload that Codex would send to the model and assert that the
-//! model-visible history matches the expected sequence of messages.
+//! Replay, fork, and repeated cleanup through the production local pipeline.
 
-use super::compact::COMPACT_WARNING_MESSAGE;
-use super::compact::FIRST_REPLY;
-use super::compact::SUMMARY_TEXT;
-use anyhow::Context;
+use super::compact::local_support::*;
 use anyhow::Result;
-use codex_core::CodexThread;
-use codex_core::ThreadManager;
 use codex_core::TurnInputRequest;
-use codex_core::compact::SUMMARIZATION_PROMPT;
-use codex_core::config::Config;
-use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
-use codex_history::CodexHarnessMetadata;
-use codex_history::RolloutItem;
-use codex_protocol::config_types::CollaborationMode;
-use codex_protocol::config_types::ModeKind;
-use codex_protocol::config_types::Settings;
-use codex_protocol::mcp::ClientMcpExtensions;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::ThreadSettingsOverrides;
-use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
-use core_test_support::context_snapshot;
-use core_test_support::context_snapshot::ContextSnapshotOptions;
-use core_test_support::context_snapshot::ContextSnapshotRenderMode;
-use core_test_support::responses::ResponseMock;
-use core_test_support::responses::ResponsesRequest;
-use core_test_support::responses::ev_assistant_message;
-use core_test_support::responses::ev_completed;
-use core_test_support::responses::ev_response_created;
-use core_test_support::responses::mount_sse_once_match;
-use core_test_support::responses::mount_sse_sequence;
-use core_test_support::responses::sse;
-use core_test_support::test_codex::local_selections;
+use codex_rollout::recall::RecallArchive;
+use core_test_support::responses::start_mock_server;
+use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
-use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
-use std::path::Path;
-use std::sync::Arc;
-use tempfile::TempDir;
-use wiremock::MockServer;
-
-const AFTER_SECOND_RESUME: &str = "AFTER_SECOND_RESUME";
-const AFTER_ROLLBACK: &str = "AFTER_ROLLBACK";
-const CHECKPOINT_METADATA_KEY: &str = "replacement_history_metadata";
-
-fn network_disabled() -> bool {
-    std::env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok()
-}
-
-fn body_contains_text(body: &str, text: &str) -> bool {
-    body.contains(&json_fragment(text))
-}
-
-fn json_fragment(text: &str) -> String {
-    serde_json::to_string(text)
-        .expect("serialize text to JSON")
-        .trim_matches('"')
-        .to_string()
-}
-
-fn normalize_line_endings_str(text: &str) -> String {
-    if text.contains('\r') {
-        text.replace("\r\n", "\n").replace('\r', "\n")
-    } else {
-        text.to_string()
-    }
-}
-
-fn response_message_contains_text(item: &ResponseItem, expected: &str) -> bool {
-    matches!(
-        item,
-        ResponseItem::Message { role, content, .. }
-            if role == "user"
-                && content.iter().any(|item| {
-                    matches!(item, ContentItem::InputText { text } if text == expected)
-                })
-    )
-}
-
-fn seed_first_checkpoint_harness_metadata(path: &Path, retained_text: &str) -> Result<()> {
-    let mut lines = std::fs::read_to_string(path)?
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(codex_rollout::parse_rollout_line)
-        .collect::<Result<Vec<_>, _>>()?;
-    let replacement_history = lines
-        .iter_mut()
-        .find_map(|line| match &mut line.item {
-            RolloutItem::Compacted(compacted) => compacted.replacement_history.as_mut(),
-            _ => None,
-        })
-        .context("first compacted checkpoint missing replacement history")?;
-    replacement_history
-        .iter()
-        .find(|envelope| response_message_contains_text(&envelope.item, retained_text))
-        .context("retained user message missing from first compacted checkpoint")?;
-    for envelope in replacement_history {
-        envelope.metadata = Some(CodexHarnessMetadata::default());
-    }
-
-    let rewritten = lines
-        .iter()
-        .map(serde_json::to_string)
-        .collect::<Result<Vec<_>, _>>()?
-        .join("\n");
-    std::fs::write(path, format!("{rewritten}\n"))?;
-    Ok(())
-}
-
-fn assert_latest_checkpoint_retains_harness_metadata(
-    path: &Path,
-    retained_text: &str,
-) -> Result<()> {
-    let replacement_history = std::fs::read_to_string(path)?
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(codex_rollout::parse_rollout_line)
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .rev()
-        .find_map(|line| match line.item {
-            RolloutItem::Compacted(compacted) => compacted.replacement_history,
-            _ => None,
-        })
-        .context("latest compacted checkpoint missing replacement history")?;
-    assert!(
-        replacement_history.iter().any(|envelope| {
-            response_message_contains_text(&envelope.item, retained_text)
-                && envelope.metadata.is_some()
-        }),
-        "latest compacted checkpoint should retain aligned harness metadata on {retained_text:?}"
-    );
-    Ok(())
-}
-
-fn extract_summary_user_text(request: &Value, summary_text: &str) -> String {
-    json_message_input_texts(request, "user")
-        .into_iter()
-        .find(|text| text.contains(summary_text))
-        .expect("expected summary message")
-}
-
-fn json_message_input_texts(request: &Value, role: &str) -> Vec<String> {
-    request
-        .get("input")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|item| {
-            item.get("type").and_then(Value::as_str) == Some("message")
-                && item.get("role").and_then(Value::as_str) == Some(role)
-        })
-        .filter_map(|item| {
-            item.get("content")
-                .and_then(Value::as_array)
-                .and_then(|content| content.first())
-                .and_then(|entry| entry.get("text"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
-        })
-        .collect()
-}
-
-fn normalize_compact_prompts(requests: &mut [Value]) {
-    let normalized_summary_prompt = normalize_line_endings_str(SUMMARIZATION_PROMPT);
-    for request in requests {
-        if let Some(input) = request.get_mut("input").and_then(Value::as_array_mut) {
-            input.retain(|item| {
-                if item.get("type").and_then(Value::as_str) != Some("message")
-                    || item.get("role").and_then(Value::as_str) != Some("user")
-                {
-                    return true;
-                }
-                let Some(content) = item.get("content").and_then(Value::as_array) else {
-                    return false;
-                };
-                let Some(first) = content.first() else {
-                    return false;
-                };
-                let text = first
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let normalized_text = normalize_line_endings_str(text);
-                !(text.is_empty() || normalized_text == normalized_summary_prompt)
-            });
-        }
-    }
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-/// Scenario: compact an initial conversation, resume it, fork one turn back, and
-/// ensure the model-visible history matches expectations at each request.
-async fn compact_resume_and_fork_preserve_model_history_view() {
-    if network_disabled() {
-        println!("Skipping test because network is disabled in this sandbox");
-        return;
-    }
-
-    // 1. Arrange mocked SSE responses for the initial compact/resume/fork flow.
-    let server = MockServer::start().await;
-    let request_log = mount_initial_flow(&server).await;
-    let expected_model = "gpt-5.4";
-    // 2. Start a new conversation and drive it through the compact/resume/fork steps.
-    let (_home, config, manager, base) =
-        start_test_conversation(&server, Some(expected_model)).await;
-
-    user_turn(&base, "hello world").await;
-    compact_conversation(&base).await;
-    user_turn(&base, "AFTER_COMPACT").await;
-    let base_path = fetch_conversation_path(&base);
-    assert!(
-        base_path.exists(),
-        "compact+resume test expects base path {base_path:?} to exist",
-    );
-
-    shutdown_conversation(&base).await;
-    let resumed = resume_conversation(&manager, &config, base_path).await;
-    user_turn(&resumed, "AFTER_RESUME").await;
-    let resumed_path = fetch_conversation_path(&resumed);
-    assert!(
-        resumed_path.exists(),
-        "compact+resume test expects resumed path {resumed_path:?} to exist",
-    );
-
-    let forked = fork_thread(&manager, &config, resumed_path, /*nth_user_message*/ 2).await;
-    user_turn(&forked, "AFTER_FORK").await;
-
-    // 3. Capture the requests to the model and validate the history slices.
-    let mut requests = gather_request_bodies(&request_log);
-    normalize_compact_prompts(&mut requests);
-
-    // input after compact is a prefix of input after resume/fork
-    let input_after_compact = json!(requests[requests.len() - 3]["input"]);
-    let input_after_resume = json!(requests[requests.len() - 2]["input"]);
-    let input_after_fork = json!(requests[requests.len() - 1]["input"]);
-
-    let compact_arr = input_after_compact
-        .as_array()
-        .expect("input after compact should be an array");
-    let resume_arr = input_after_resume
-        .as_array()
-        .expect("input after resume should be an array");
-    let fork_arr = input_after_fork
-        .as_array()
-        .expect("input after fork should be an array");
-
-    assert!(
-        compact_arr.len() <= resume_arr.len(),
-        "after-resume input should have at least as many items as after-compact",
-    );
-    assert_eq!(compact_arr.as_slice(), &resume_arr[..compact_arr.len()]);
-
-    assert!(
-        compact_arr.len() <= fork_arr.len(),
-        "after-fork input should have at least as many items as after-compact",
-    );
-    assert_eq!(
-        &compact_arr.as_slice()[..compact_arr.len()],
-        &fork_arr[..compact_arr.len()]
-    );
-
-    let first_request_user_texts = json_message_input_texts(&requests[0], "user");
-    let first_turn_user_index = first_request_user_texts
-        .len()
-        .checked_sub(1)
-        .expect("first turn request missing user messages");
-    assert_eq!(
-        first_request_user_texts[first_turn_user_index],
-        "hello world"
-    );
-    let seeded_user_prefix = &first_request_user_texts[..first_turn_user_index];
-    let summary_after_compact = extract_summary_user_text(&requests[2], SUMMARY_TEXT);
-    let summary_after_resume = extract_summary_user_text(&requests[3], SUMMARY_TEXT);
-    let summary_after_fork = extract_summary_user_text(&requests[4], SUMMARY_TEXT);
-    let mut expected_after_compact_user_texts =
-        vec!["hello world".to_string(), summary_after_compact];
-    expected_after_compact_user_texts.extend_from_slice(seeded_user_prefix);
-    expected_after_compact_user_texts.push("AFTER_COMPACT".to_string());
-    assert_eq!(
-        json_message_input_texts(&requests[2], "user"),
-        expected_after_compact_user_texts
-    );
-
-    let mut expected_after_resume_user_texts =
-        vec!["hello world".to_string(), summary_after_resume];
-    expected_after_resume_user_texts.extend_from_slice(seeded_user_prefix);
-    expected_after_resume_user_texts.push("AFTER_COMPACT".to_string());
-    let after_resume_user_texts = json_message_input_texts(&requests[3], "user");
-    let (after_resume_last, after_resume_prefix) = after_resume_user_texts
-        .split_last()
-        .expect("after-resume request missing user messages");
-    assert_eq!(after_resume_last, "AFTER_RESUME");
-    assert!(
-        after_resume_prefix.starts_with(&expected_after_resume_user_texts),
-        "after-resume user texts should preserve compacted history prefix"
-    );
-    let after_resume_seeded_suffix = &after_resume_prefix[expected_after_resume_user_texts.len()..];
-    if seeded_user_prefix.is_empty() {
-        assert!(
-            after_resume_seeded_suffix.is_empty(),
-            "after-resume request should not append unexpected user prefix items"
-        );
-    } else {
-        let mut chunks = after_resume_seeded_suffix.chunks_exact(seeded_user_prefix.len());
-        assert!(
-            chunks.remainder().is_empty(),
-            "after-resume suffix should be whole seeded-prefix repeats"
-        );
-        for chunk in &mut chunks {
-            assert_eq!(chunk, seeded_user_prefix);
-        }
-    }
-
-    let after_fork_user_texts = json_message_input_texts(&requests[4], "user");
-    let mut expected_after_fork_history_prefix =
-        vec!["hello world".to_string(), summary_after_fork];
-    expected_after_fork_history_prefix.extend_from_slice(seeded_user_prefix);
-    expected_after_fork_history_prefix.push("AFTER_COMPACT".to_string());
-    let (after_fork_last, after_fork_prefix) = after_fork_user_texts
-        .split_last()
-        .expect("after-fork request missing user messages");
-    assert_eq!(after_fork_last, "AFTER_FORK");
-    assert!(
-        after_fork_prefix.starts_with(&expected_after_fork_history_prefix),
-        "after-fork user texts should preserve compacted user history prefix"
-    );
-    let after_fork_seeded_suffix = &after_fork_prefix[expected_after_fork_history_prefix.len()..];
-    if seeded_user_prefix.is_empty() {
-        assert!(
-            after_fork_seeded_suffix.is_empty(),
-            "after-fork request should not append unexpected user prefix items"
-        );
-    } else {
-        let mut chunks = after_fork_seeded_suffix.chunks_exact(seeded_user_prefix.len());
-        assert!(
-            chunks.remainder().is_empty(),
-            "after-fork suffix should be whole seeded-prefix repeats"
-        );
-        for chunk in &mut chunks {
-            assert_eq!(chunk, seeded_user_prefix);
-        }
-    }
-    assert_eq!(requests.len(), 5);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-/// Scenario: after the forked branch is compacted, resuming again should reuse
-/// the compacted history and only append the new user message.
-async fn compact_resume_after_second_compaction_preserves_history() -> Result<()> {
-    if network_disabled() {
-        println!("Skipping test because network is disabled in this sandbox");
-        return Ok(());
-    }
-
-    // 1. Arrange mocked SSE responses as a single ordered stream so assertions
-    // observe the real request sequence instead of per-mock duplicate captures.
-    let server = MockServer::start().await;
-    let request_log = mount_second_compact_sequence(&server).await;
-
-    // 2. Drive the conversation through compact -> resume -> fork -> compact -> resume.
-    let (_home, config, manager, base) = start_test_conversation(&server, /*model*/ None).await;
-
-    user_turn(&base, "hello world").await;
-    compact_conversation(&base).await;
-    user_turn(&base, "AFTER_COMPACT").await;
-    let base_path = fetch_conversation_path(&base);
-    assert!(
-        base_path.exists(),
-        "second compact test expects base path {base_path:?} to exist",
-    );
-
-    shutdown_conversation(&base).await;
-    seed_first_checkpoint_harness_metadata(&base_path, "hello world")?;
-    let resumed = resume_conversation(&manager, &config, base_path).await;
-    user_turn(&resumed, "AFTER_RESUME").await;
-    let resumed_path = fetch_conversation_path(&resumed);
-    assert!(
-        resumed_path.exists(),
-        "second compact test expects resumed path {resumed_path:?} to exist",
-    );
-
-    let forked = fork_thread(&manager, &config, resumed_path, /*nth_user_message*/ 3).await;
-    user_turn(&forked, "AFTER_FORK").await;
-
-    compact_conversation(&forked).await;
-    user_turn(&forked, "AFTER_COMPACT_2").await;
-    let forked_path = fetch_conversation_path(&forked);
-    assert!(
-        forked_path.exists(),
-        "second compact test expects forked path {forked_path:?} to exist",
-    );
-
-    shutdown_conversation(&forked).await;
-    assert_latest_checkpoint_retains_harness_metadata(&forked_path, "hello world")?;
-    let resumed_again = resume_conversation(&manager, &config, forked_path).await;
-    user_turn(&resumed_again, AFTER_SECOND_RESUME).await;
-
-    let mut requests = request_log
-        .requests()
-        .into_iter()
-        .map(|request| request.body_json())
-        .collect::<Vec<_>>();
-    requests.iter_mut().for_each(normalize_line_endings);
-    normalize_compact_prompts(&mut requests);
-    assert!(
-        requests
-            .iter()
-            .flat_map(|request| request["input"].as_array().expect("provider request input"))
-            .all(|item| {
-                item.get(CHECKPOINT_METADATA_KEY).is_none() && item.get("metadata").is_none()
-            }),
-        "provider requests must not contain harness metadata"
-    );
-    let input_after_compact = json!(requests[requests.len() - 2]["input"]);
-    let input_after_resume = json!(requests[requests.len() - 1]["input"]);
-
-    // test input after compact before resume is the same as input after resume
-    let compact_input_array = input_after_compact
-        .as_array()
-        .expect("input after compact should be an array");
-    let resume_input_array = input_after_resume
-        .as_array()
-        .expect("input after resume should be an array");
-    assert!(
-        compact_input_array.len() <= resume_input_array.len(),
-        "after-resume input should have at least as many items as after-compact"
-    );
-    assert_eq!(
-        compact_input_array.as_slice(),
-        &resume_input_array[..compact_input_array.len()]
-    );
-    let first_request_user_texts = json_message_input_texts(&requests[0], "user");
-    let first_turn_user_index = first_request_user_texts
-        .len()
-        .checked_sub(1)
-        .expect("first turn request missing user messages");
-    assert_eq!(
-        first_request_user_texts[first_turn_user_index],
-        "hello world"
-    );
-    let seeded_user_prefix = &first_request_user_texts[..first_turn_user_index];
-    let summary_after_second_compact =
-        extract_summary_user_text(&requests[requests.len() - 2], SUMMARY_TEXT);
-    let mut expected_after_second_compact_user_texts = vec![
-        "hello world".to_string(),
-        "AFTER_COMPACT".to_string(),
-        "AFTER_RESUME".to_string(),
-        "AFTER_FORK".to_string(),
-        summary_after_second_compact.clone(),
-    ];
-    expected_after_second_compact_user_texts.extend_from_slice(seeded_user_prefix);
-    expected_after_second_compact_user_texts.push("AFTER_COMPACT_2".to_string());
-    let mut expected_fork_local_user_texts =
-        vec!["AFTER_FORK".to_string(), summary_after_second_compact];
-    expected_fork_local_user_texts.extend_from_slice(seeded_user_prefix);
-    expected_fork_local_user_texts.push("AFTER_COMPACT_2".to_string());
-    let final_user_texts = json_message_input_texts(&requests[requests.len() - 1], "user");
-    let (final_last, final_prefix) = final_user_texts
-        .split_last()
-        .expect("after-second-resume request missing user messages");
-    assert_eq!(final_last, AFTER_SECOND_RESUME);
-    let matched_prefix_len = if let Some(start) = final_prefix
-        .windows(expected_after_second_compact_user_texts.len())
-        .position(|window| window == expected_after_second_compact_user_texts)
-    {
-        start + expected_after_second_compact_user_texts.len()
-    } else if let Some(start) = final_prefix
-        .windows(expected_fork_local_user_texts.len())
-        .position(|window| window == expected_fork_local_user_texts)
-    {
-        start + expected_fork_local_user_texts.len()
-    } else {
-        panic!("after-second-resume user texts should preserve post-compact user history prefix");
-    };
-    let final_seeded_suffix = &final_prefix[matched_prefix_len..];
-    if seeded_user_prefix.is_empty() {
-        assert!(
-            final_seeded_suffix.is_empty(),
-            "after-second-resume request should not append unexpected user prefix items"
-        );
-    } else {
-        let mut chunks = final_seeded_suffix.chunks_exact(seeded_user_prefix.len());
-        assert!(
-            chunks.remainder().is_empty(),
-            "after-second-resume suffix should be whole seeded-prefix repeats"
-        );
-        for chunk in &mut chunks {
-            assert_eq!(chunk, seeded_user_prefix);
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-/// Scenario: rolling back behind a pre-turn compaction should replay
-/// append-only history from the rollout file and keep earlier compacted
-/// history visible.
-async fn snapshot_rollback_past_compaction_replays_append_only_history() -> Result<()> {
-    if network_disabled() {
-        println!("Skipping test because network is disabled in this sandbox");
-        return Ok(());
-    }
-
-    const EDITED_AFTER_COMPACT: &str = "EDITED_AFTER_COMPACT";
-    const SECOND_REPLY: &str = "SECOND_REPLY";
-
-    let server = MockServer::start().await;
-    let sse1 = sse(vec![
-        ev_assistant_message("m1", FIRST_REPLY),
-        ev_completed("r1"),
-    ]);
-    let sse2 = sse(vec![
-        ev_assistant_message("m2", SUMMARY_TEXT),
-        ev_completed("r2"),
-    ]);
-    let sse3 = sse(vec![
-        ev_assistant_message("m3", SECOND_REPLY),
-        ev_completed("r3"),
-    ]);
-    let sse4 = sse(vec![ev_completed("r4")]);
-
-    let request_log = mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
-
-    let (_home, _config, _manager, base) = start_test_conversation(&server, /*model*/ None).await;
-
-    user_turn(&base, "hello world").await;
-    compact_conversation(&base).await;
-    user_turn(&base, EDITED_AFTER_COMPACT).await;
-
-    base.submit(Op::ThreadRollback { num_turns: 1 })
-        .await
-        .expect("submit thread rollback");
-    let rollback_event =
-        wait_for_event(&base, |ev| matches!(ev, EventMsg::ThreadRolledBack(_))).await;
-    let EventMsg::ThreadRolledBack(rollback_event) = rollback_event else {
-        panic!("expected thread rolled back event");
-    };
-    assert_eq!(rollback_event.num_turns, 1);
-
-    user_turn(&base, AFTER_ROLLBACK).await;
-
-    let requests = request_log.requests();
-    assert_eq!(requests.len(), 4);
-    assert!(requests[1].body_contains_text(SUMMARIZATION_PROMPT));
-    assert!(requests[2].body_contains_text("hello world"));
-    assert!(requests[2].body_contains_text(SUMMARY_TEXT));
-    assert!(requests[2].body_contains_text(EDITED_AFTER_COMPACT));
-    let after_rollback_user_texts = requests[3].message_input_texts("user");
-    let after_rollback_last = after_rollback_user_texts
-        .last()
-        .expect("post-rollback request missing user messages");
-    assert_eq!(after_rollback_last, AFTER_ROLLBACK);
-    assert!(
-        requests[3].body_contains_text("hello world"),
-        "the first turn should remain visible after rollback behind compaction",
-    );
-    assert!(
-        !requests[3].body_contains_text(EDITED_AFTER_COMPACT),
-        "the edited post-compaction turn should be removed by rollback",
-    );
-    assert!(
-        requests[3].body_contains_text(SUMMARY_TEXT),
-        "compaction summary should remain for the preserved first turn",
-    );
-
-    insta::assert_snapshot!(
-        "rollback_past_compaction_shapes",
-        context_snapshot::format_labeled_requests_snapshot(
-            "rollback past compaction replay after rollback",
-            &[
-                ("compaction request", &requests[1]),
-                ("before rollback", &requests[2]),
-                ("after rollback", &requests[3]),
-            ],
-            &ContextSnapshotOptions::default()
-                .strip_capability_instructions()
-                .render_mode(ContextSnapshotRenderMode::KindWithTextPrefix { max_chars: 64 }),
-        )
-    );
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-/// Scenario: rolling back a turn that introduced persistent pre-thread settings
-/// diffs should trim those context updates so the next request includes them
-/// only once.
 async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
-    if network_disabled() {
-        println!("Skipping test because network is disabled in this sandbox");
-        return Ok(());
-    }
+    use codex_protocol::config_types::{CollaborationMode, ModeKind, Settings};
+    use codex_protocol::protocol::{EventMsg, ThreadSettingsOverrides};
+    use core_test_support::context_snapshot::{
+        self, ContextSnapshotOptions, ContextSnapshotRenderMode,
+    };
+    use core_test_support::responses::{
+        ev_assistant_message, ev_completed, ev_response_created, mount_sse_sequence, sse,
+    };
+    use core_test_support::test_codex::local_selections;
+    use core_test_support::wait_for_event;
+    use wiremock::MockServer;
+
+    skip_if_no_network!(Ok(()));
 
     const MODEL: &str = "gpt-5.4";
     const TURN_ONE_USER: &str = "turn 1 user";
@@ -628,10 +53,18 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
     )
     .await;
 
-    let (_home, config, _manager, conversation) =
-        start_test_conversation(&server, Some(MODEL)).await;
+    let test = test_codex()
+        .with_model(MODEL)
+        .with_config(|config| {
+            config.update_plan_enabled = true;
+            config.model_provider.name = "Non-OpenAI Model provider".to_string();
+        })
+        .build(&server)
+        .await?;
+    let config = &test.config;
+    let conversation = &test.codex;
 
-    user_turn(&conversation, TURN_ONE_USER).await;
+    test.submit_turn(TURN_ONE_USER).await?;
 
     let override_cwd = config.cwd.join(PRETURN_CONTEXT_DIFF_CWD);
     std::fs::create_dir_all(&override_cwd)?;
@@ -652,7 +85,7 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
     )
     .await?;
 
-    user_turn(&conversation, TURN_TWO_USER).await;
+    test.submit_turn(TURN_TWO_USER).await?;
 
     conversation
         .submit(Op::ThreadRollback { num_turns: 1 })
@@ -666,7 +99,7 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
     };
     assert_eq!(rollback_event.num_turns, 1);
 
-    user_turn(&conversation, FOLLOWUP_USER).await;
+    test.submit_turn(FOLLOWUP_USER).await?;
 
     let requests = request_log.requests();
     assert_eq!(requests.len(), 3);
@@ -723,218 +156,258 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
     Ok(())
 }
 
-fn normalize_line_endings(value: &mut Value) {
-    match value {
-        Value::String(text) if text.contains('\r') => {
-            *text = text.replace("\r\n", "\n").replace('\r', "\n");
-        }
-        Value::Array(items) => {
-            for item in items {
-                normalize_line_endings(item);
-            }
-        }
-        Value::Object(map) => {
-            for item in map.values_mut() {
-                normalize_line_endings(item);
-            }
-        }
-        _ => {}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compact_resume_and_fork_preserve_installed_history_and_original_ids() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    let mut builder = test_codex().with_config(configure);
+    let test = builder.build_with_auto_env(&server).await?;
+    model.reply(tool_turn());
+    model.text("Exact original assistant dialogue.");
+    test.submit_turn("Original user instruction.").await?;
+    model.text("Protected recent dialogue.");
+    test.submit_turn("Keep the recent turn.").await?;
+    test.codex.submit(Op::Compact).await?;
+    complete(&test.codex).await;
+    model.text("Following installed history.");
+    test.submit_turn("After cleanup.").await?;
+    test.codex.flush_rollout().await?;
+    let path = test.codex.rollout_path().unwrap();
+    let installed = checkpoints(&path)?.pop().expect("installed view");
+    let decisions = model.decisions();
+    let resumed = builder.restart(&server, &test).await?;
+    model.text("Resumed.");
+    resumed.submit_turn("After resume.").await?;
+    let bodies = model.bodies();
+    let resumed_input = bodies.last().unwrap()["input"].as_array().unwrap();
+    let before = &bodies[bodies.len() - 2]["input"];
+    assert_eq!(
+        resumed_input.get(..before.as_array().unwrap().len()),
+        Some(before.as_array().unwrap().as_slice())
+    );
+    assert!(
+        resumed_input
+            .iter()
+            .any(|item| item.to_string().contains(SHORTENED))
+    );
+    resumed.codex.flush_rollout().await?;
+    assert_eq!(checkpoints(&path)?.last(), Some(&installed));
+    let archive = RecallArchive::load(&path, Some(test.home.path())).await?;
+    for decision in &decisions {
+        let page = archive.query(serde_json::from_value(
+            json!({"action":"read_item","item_id":decision["id"],"max_chars":500}),
+        )?)?;
+        assert_eq!(page["item_id"], decision["id"]);
+        assert!(page["text"].as_str().unwrap().contains("unsupported call:"));
     }
-}
 
-fn gather_requests(request_log: &[ResponseMock]) -> Vec<ResponsesRequest> {
-    request_log
-        .iter()
-        .flat_map(ResponseMock::requests)
-        .collect::<Vec<_>>()
-}
-
-fn gather_request_bodies(request_log: &[ResponseMock]) -> Vec<Value> {
-    let mut bodies = gather_requests(request_log)
-        .into_iter()
-        .map(|request| request.body_json())
-        .collect::<Vec<_>>();
-    bodies.iter_mut().for_each(normalize_line_endings);
-    bodies
-}
-
-async fn mount_initial_flow(server: &MockServer) -> Vec<ResponseMock> {
-    let sse1 = sse(vec![
-        ev_assistant_message("m1", FIRST_REPLY),
-        ev_completed("r1"),
-    ]);
-    let sse2 = sse(vec![
-        ev_assistant_message("m2", SUMMARY_TEXT),
-        ev_completed("r2"),
-    ]);
-    let sse3 = sse(vec![
-        ev_assistant_message("m3", "AFTER_COMPACT_REPLY"),
-        ev_completed("r3"),
-    ]);
-    let sse4 = sse(vec![ev_completed("r4")]);
-    let sse5 = sse(vec![ev_completed("r5")]);
-
-    let match_first = |req: &wiremock::Request| {
-        let body = std::str::from_utf8(&req.body).unwrap_or("");
-        body.contains("\"text\":\"hello world\"")
-            && !body.contains(&format!("\"text\":\"{SUMMARY_TEXT}\""))
-            && !body.contains("\"text\":\"AFTER_COMPACT\"")
-            && !body.contains("\"text\":\"AFTER_RESUME\"")
-            && !body.contains("\"text\":\"AFTER_FORK\"")
-    };
-    let first = mount_sse_once_match(server, match_first, sse1).await;
-
-    let match_compact = |req: &wiremock::Request| {
-        let body = std::str::from_utf8(&req.body).unwrap_or("");
-        body_contains_text(body, SUMMARIZATION_PROMPT) || body.contains(&json_fragment(FIRST_REPLY))
-    };
-    let compact = mount_sse_once_match(server, match_compact, sse2).await;
-
-    let match_after_compact = |req: &wiremock::Request| {
-        let body = std::str::from_utf8(&req.body).unwrap_or("");
-        body.contains("\"text\":\"AFTER_COMPACT\"")
-            && !body.contains("\"text\":\"AFTER_RESUME\"")
-            && !body.contains("\"text\":\"AFTER_FORK\"")
-    };
-    let after_compact = mount_sse_once_match(server, match_after_compact, sse3).await;
-
-    let match_after_resume = |req: &wiremock::Request| {
-        let body = std::str::from_utf8(&req.body).unwrap_or("");
-        body.contains("\"text\":\"AFTER_RESUME\"")
-    };
-    let after_resume = mount_sse_once_match(server, match_after_resume, sse4).await;
-
-    let match_after_fork = |req: &wiremock::Request| {
-        let body = std::str::from_utf8(&req.body).unwrap_or("");
-        body.contains("\"text\":\"AFTER_FORK\"")
-    };
-    let after_fork = mount_sse_once_match(server, match_after_fork, sse5).await;
-
-    vec![first, compact, after_compact, after_resume, after_fork]
-}
-
-async fn mount_second_compact_sequence(server: &MockServer) -> ResponseMock {
-    let sse1 = sse(vec![
-        ev_assistant_message("m1", FIRST_REPLY),
-        ev_completed("r1"),
-    ]);
-    let sse2 = sse(vec![
-        ev_assistant_message("m2", SUMMARY_TEXT),
-        ev_completed("r2"),
-    ]);
-    let sse3 = sse(vec![
-        ev_assistant_message("m3", "AFTER_COMPACT_REPLY"),
-        ev_completed("r3"),
-    ]);
-    let sse4 = sse(vec![ev_completed("r4")]);
-    let sse5 = sse(vec![ev_completed("r5")]);
-    let sse6 = sse(vec![
-        ev_assistant_message("m4", SUMMARY_TEXT),
-        ev_completed("r6"),
-    ]);
-    let sse7 = sse(vec![ev_completed("r7")]);
-    let sse8 = sse(vec![ev_completed("r8")]);
-
-    mount_sse_sequence(server, vec![sse1, sse2, sse3, sse4, sse5, sse6, sse7, sse8]).await
-}
-
-async fn start_test_conversation(
-    server: &MockServer,
-    model: Option<&str>,
-) -> (Arc<TempDir>, Config, Arc<ThreadManager>, Arc<CodexThread>) {
-    let base_url = format!("{}/v1", server.uri());
-    let model = model.map(str::to_string);
-    let mut builder = test_codex().with_config(move |config| {
-        config.update_plan_enabled = true;
-        config.model_provider.name = "Non-OpenAI Model provider".to_string();
-        config.model_provider.base_url = Some(base_url);
-        config.compact_prompt = Some(SUMMARIZATION_PROMPT.to_string());
-        if let Some(model) = model {
-            config.model = Some(model);
-        }
-    });
-    let test = Box::pin(builder.build(server))
-        .await
-        .expect("create conversation");
-    (test.home, test.config, test.thread_manager, test.codex)
-}
-
-async fn user_turn(conversation: &Arc<CodexThread>, text: &str) {
-    conversation
+    // A fork at the end replays the installed view and can resolve its original references.
+    let forked = resumed
+        .thread_manager
+        .fork_thread(
+            usize::MAX,
+            resumed.config.clone(),
+            path,
+            /*thread_source*/ None,
+            /*parent_trace*/ None,
+        )
+        .await?;
+    model.text("Fork continued.");
+    forked
+        .thread
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: text.into(),
+            text: "After fork.".to_string(),
             text_elements: Vec::new(),
         }]))
-        .await
-        .expect("submit user turn");
-    wait_for_event(conversation, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+        .await?;
+    complete(&forked.thread).await;
+    assert!(
+        model
+            .bodies()
+            .last()
+            .unwrap()
+            .to_string()
+            .contains(SHORTENED)
+    );
+    forked.thread.flush_rollout().await?;
+    let fork_archive = RecallArchive::load(
+        &forked.thread.rollout_path().unwrap(),
+        Some(test.home.path()),
+    )
+    .await?;
+    let original = fork_archive.query(serde_json::from_value(
+        json!({"action":"read_item","item_id":decisions[1]["id"],"max_chars":500}),
+    )?)?;
+    assert_eq!(original["item_id"], decisions[1]["id"]);
+    assert!(original["text"].as_str().unwrap().contains("evidence_"));
+    Ok(())
 }
 
-async fn compact_conversation(conversation: &Arc<CodexThread>) {
-    conversation
-        .submit(Op::Compact)
-        .await
-        .expect("compact conversation");
-    let warning_event = wait_for_event(conversation, |ev| {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn repeated_tiers_preserve_constraints_recent_dialogue_and_resume() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    let configure_tiers = |config: &mut codex_core::config::Config| {
+        configure(config);
+        config.local_compaction.target_percent = 15;
+    };
+    let mut builder = test_codex().with_config(configure_tiers);
+    let test = builder.build_with_auto_env(&server).await?;
+    for cycle in 0..3 {
+        for turn in 0..4 {
+            model.text(&format!(
+                "Evidence {cycle}-{turn}: {}",
+                "Verification pending; earlier assumption corrected. ".repeat(200)
+            ));
+            test.submit_turn(&format!(
+                "Offline-only constraint, cycle {cycle} turn {turn}: {}",
+                "Preserve uncertainty and pending work. ".repeat(200)
+            ))
+            .await?;
+        }
+        model.text("Recent original answer must survive verbatim.");
+        test.submit_turn("Recent original instruction must survive verbatim.")
+            .await?;
+        test.codex.submit(Op::Compact).await?;
+        complete(&test.codex).await;
+        model.text("Continue after promotion.");
+        test.submit_turn("Read installed tiers.").await?;
+        let bodies = model.bodies();
+        let installed = bodies.last().unwrap().to_string();
+        assert!(installed.contains(LEDGER));
+        assert!(installed.contains("Recent original instruction must survive verbatim."));
+        assert!(installed.contains("Recent original answer must survive verbatim."));
+        assert!(!installed.contains("tiers-private"));
+        // Each generated tier is bounded, and old promotions do not accumulate one entry per turn.
+        let tier_items = bodies.last().unwrap()["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| {
+                item.to_string()
+                    .contains("Earlier dialogue and concise evidence")
+                    || item.to_string().contains("Oldest conversation overview")
+            })
+            .collect::<Vec<_>>();
+        assert!(tier_items.len() <= 3);
+        for item in tier_items {
+            assert!(item.to_string().len() < 12_000);
+        }
+    }
+    test.codex.flush_rollout().await?;
+    let path = test.codex.rollout_path().unwrap();
+    let before = checkpoints(&path)?;
+    assert!(before.len() >= 3);
+    let records = rollout(&path)?;
+    let originals = records
+        .iter()
+        .filter_map(|record| match record {
+            codex_history::RolloutItem::ResponseItem(item) => {
+                item.item.id().map(ToString::to_string)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let latest = records
+        .iter()
+        .rev()
+        .find_map(|record| match record {
+            codex_history::RolloutItem::Compacted(item) => item.replacement_history.as_ref(),
+            _ => None,
+        })
+        .expect("latest replacement");
+    let ranges = latest
+        .iter()
+        .filter_map(|item| item.metadata.as_ref()?.local_compaction.as_ref())
+        .filter(|source| {
+            matches!(
+                source.kind,
+                codex_history::LocalCompactionKind::OldestOverview
+                    | codex_history::LocalCompactionKind::CondensedDialogue
+            )
+        })
+        .map(|source| {
+            let first = originals
+                .iter()
+                .position(|id| id == &source.first_item_id)
+                .expect("range begins at an archived original");
+            let last = originals
+                .iter()
+                .position(|id| id == &source.last_item_id)
+                .expect("range ends at an archived original");
+            assert!(first <= last, "source range is chronological");
+            (first, last)
+        })
+        .collect::<Vec<_>>();
+    assert!(!ranges.is_empty());
+    assert!(
+        ranges.windows(2).all(|ranges| ranges[0].1 < ranges[1].0),
+        "tiers preserve disjoint chronological source ranges"
+    );
+    let resumed = builder.restart(&server, &test).await?;
+    model.text("Resumed bounded history.");
+    resumed.submit_turn("Continue after tier resume.").await?;
+    assert!(model.bodies().last().unwrap().to_string().contains(LEDGER));
+    resumed.codex.flush_rollout().await?;
+    assert_eq!(checkpoints(&path)?, before);
+    // Listing uses the original turn archive, not only the small installed tier view.
+    let archive = RecallArchive::load(&path, Some(test.home.path())).await?;
+    let page = archive.query(serde_json::from_value(
+        json!({"action":"list_turns","limit":2}),
+    )?)?;
+    assert_eq!(page["data"].as_array().unwrap().len(), 2);
+    let offset = page["next_offset"].as_u64().expect("more original turns");
+    let second = archive.query(serde_json::from_value(
+        json!({"action":"list_turns","offset":offset,"limit":2}),
+    )?)?;
+    assert_ne!(page["data"], second["data"]);
+    model.text(&"More original evidence. ".repeat(2000));
+    resumed.submit_turn("New evidence after resume.").await?;
+    model.text("Recent protected answer.");
+    resumed.submit_turn("New recent direction.").await?;
+    resumed.codex.submit(Op::Compact).await?;
+    complete(&resumed.codex).await;
+    resumed.codex.flush_rollout().await?;
+    assert!(checkpoints(&path)?.len() > before.len());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rollback_discards_later_dialogue_after_local_cleanup() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    let test = test_codex()
+        .with_config(configure)
+        .build_with_auto_env(&server)
+        .await?;
+    model.reply(tool_turn());
+    model.text("Retained answer.");
+    test.submit_turn("Retained instruction.").await?;
+    model.text("Recent answer.");
+    test.submit_turn("Recent instruction.").await?;
+    test.codex.submit(Op::Compact).await?;
+    complete(&test.codex).await;
+    model.text("Discard this answer.");
+    test.submit_turn("Discard this instruction.").await?;
+    test.codex
+        .submit(Op::ThreadRollback { num_turns: 1 })
+        .await?;
+    core_test_support::wait_for_event(&test.codex, |event| {
         matches!(
-            ev,
-            EventMsg::Warning(WarningEvent { message }) if message == COMPACT_WARNING_MESSAGE
+            event,
+            codex_protocol::protocol::EventMsg::ThreadRolledBack(_)
         )
     })
     .await;
-    let EventMsg::Warning(WarningEvent { message }) = warning_event else {
-        panic!("expected warning event after compact");
-    };
-    assert_eq!(message, COMPACT_WARNING_MESSAGE);
-    wait_for_event(conversation, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
-}
-
-fn fetch_conversation_path(conversation: &Arc<CodexThread>) -> std::path::PathBuf {
-    conversation.rollout_path().expect("rollout path")
-}
-
-async fn shutdown_conversation(conversation: &Arc<CodexThread>) {
-    conversation
-        .shutdown_and_wait()
-        .await
-        .expect("shutdown conversation");
-}
-
-async fn resume_conversation(
-    manager: &ThreadManager,
-    config: &Config,
-    path: std::path::PathBuf,
-) -> Arc<CodexThread> {
-    let auth_manager = codex_core::test_support::auth_manager_from_auth(
-        codex_login::CodexAuth::from_api_key("dummy"),
-    );
-    Box::pin(manager.resume_thread_from_rollout(
-        config.clone(),
-        path,
-        auth_manager,
-        /*parent_trace*/ None,
-        ClientMcpExtensions::default(),
-    ))
-    .await
-    .expect("resume conversation")
-    .thread
-}
-
-#[cfg(test)]
-async fn fork_thread(
-    manager: &ThreadManager,
-    config: &Config,
-    path: std::path::PathBuf,
-    nth_user_message: usize,
-) -> Arc<CodexThread> {
-    Box::pin(manager.fork_thread(
-        nth_user_message,
-        config.clone(),
-        path,
-        /*thread_source*/ None,
-        /*parent_trace*/ None,
-    ))
-    .await
-    .expect("fork conversation")
-    .thread
+    model.text("Edited answer.");
+    test.submit_turn("Edited instruction.").await?;
+    let body: Value = model.bodies().last().unwrap().clone();
+    assert!(body.to_string().contains("Retained instruction."));
+    assert!(body.to_string().contains(SHORTENED));
+    assert!(!body.to_string().contains("Discard this instruction."));
+    assert!(!body.to_string().contains("Discard this answer."));
+    Ok(())
 }

@@ -45,7 +45,7 @@ Read only the target feature reference unless integration work needs more.
 | Missing/empty final-answer retry | `ft/retry-empty-final-answer-<upstream-version>` | lifecycle policy | `references/feature-empty-final-answer-retry.md` |
 | Subagent identity | `ft/subagent-identity-labels-<upstream-version>` | typed projection | `references/feature-subagent-identity.md` |
 | Model-aware compaction | `ft/model-aware-compaction-<upstream-version>` | typed projection | `references/feature-model-aware-compaction.md` |
-| Local compaction handoff | `ft/local-compaction-handoff-<upstream-version>` | lifecycle policy | `references/feature-local-compaction-handoff.md` |
+| Local context compaction | `ft/local-context-compaction-<upstream-version>` | stateful core | `references/feature-local-context-compaction.md` |
 | Large request upload resilience | `ft/large-request-upload-resilience-<upstream-version>` | lifecycle policy | `references/feature-large-request-upload-resilience.md` |
 | Stream retry timeout | `ft/stream-retry-timeout-<upstream-version>` | lifecycle policy | `references/feature-stream-retry-timeout.md` |
 | Auth-independent tool exposure | `ft/auth-independent-tools-<upstream-version>` | typed projection | `references/feature-auth-independent-tools.md` |

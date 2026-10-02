@@ -314,6 +314,10 @@ impl ContextManager {
         self.world_state_baseline = Some(snapshot);
     }
 
+    pub(crate) fn world_state_baseline(&self) -> Option<WorldStateSnapshot> {
+        self.world_state_baseline.clone()
+    }
+
     pub(crate) fn set_token_usage_full(&mut self, context_window: i64) {
         match &mut self.token_info {
             Some(info) => info.fill_to_context_window(context_window),

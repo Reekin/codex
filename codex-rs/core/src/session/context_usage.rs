@@ -11,6 +11,11 @@ impl Session {
         self.state.lock().await.request_tools_tokens = tools_tokens;
     }
 
+    /// Tool-definition size recorded for the most recent normal model request.
+    pub(crate) async fn request_tools_tokens(&self) -> i64 {
+        self.state.lock().await.request_tools_tokens
+    }
+
     /// Attaches the current active context usage to the latest token usage snapshot.
     pub(crate) async fn refresh_context_usage(&self, turn_context: &TurnContext) {
         if self.state.lock().await.token_info().is_none() {

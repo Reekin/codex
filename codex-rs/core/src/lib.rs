@@ -212,5 +212,6 @@ pub use exec_policy::format_exec_policy_error_with_source;
 pub use exec_policy::load_exec_policy;
 pub use installation_id::resolve_installation_id;
 pub mod compact;
+mod local_compaction;
 mod memory_usage;
 pub mod otel_init;

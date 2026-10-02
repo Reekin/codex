@@ -55,25 +55,28 @@ async fn auto_compaction_local_emits_started_and_completed_items() -> Result<()>
 
     let server = responses::start_mock_server().await;
     let sse1 = responses::sse(vec![
-        responses::ev_assistant_message("m1", "FIRST_REPLY"),
+        responses::ev_assistant_message("m1", &"FIRST_REPLY ".repeat(20_000)),
         responses::ev_completed_with_tokens("r1", /*total_tokens*/ 70_000),
     ]);
     let sse2 = responses::sse(vec![
         responses::ev_assistant_message("m2", "SECOND_REPLY"),
         responses::ev_completed_with_tokens("r2", /*total_tokens*/ 330_000),
     ]);
-    let sse3 = responses::sse(vec![
-        responses::ev_assistant_message("m3", "LOCAL_SUMMARY"),
-        responses::ev_completed_with_tokens("r3", /*total_tokens*/ 200),
-    ]);
     let sse4 = responses::sse(vec![
         responses::ev_assistant_message("m4", "FINAL_REPLY"),
         responses::ev_completed_with_tokens("r4", /*total_tokens*/ 120),
     ]);
-    responses::mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
+    responses::mount_local_compaction_sequence(
+        &server,
+        vec![sse1, sse2, sse4],
+        responses::ev_completed_with_tokens("local-analysis", /*total_tokens*/ 200),
+    )
+    .await;
 
     let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), AUTO_COMPACT_LIMIT).write(codex_home.path())?;
+    compaction_config(&server.uri(), /*auto_compact_limit*/ 90_000)
+        .with_root_config("model_context_window = 100000\nlocal_compaction.force_local = true")
+        .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -249,27 +252,34 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
 
     let server = responses::start_mock_server().await;
     let seed = responses::sse(vec![
-        responses::ev_assistant_message("seed", "FIRST_REPLY"),
+        responses::ev_assistant_message("seed", &"FIRST_REPLY ".repeat(20_000)),
         responses::ev_completed_with_tokens("seed", /*total_tokens*/ 120),
     ]);
     let mut completed = responses::ev_completed_with_tokens("r1", /*total_tokens*/ 200);
     completed["response"]["usage_metadata"] = serde_json::json!({ "amount": "0.125" });
     completed["response"]["usage"]["extra"] = serde_json::json!({ "label": "example" });
     let expected_metadata = completed["response"]["usage"].clone();
-    let sse = responses::sse(vec![
-        responses::ev_assistant_message("m1", "MANUAL_COMPACT_SUMMARY"),
-        completed,
+    let second_seed = responses::sse(vec![
+        responses::ev_assistant_message("second-seed", "New task direction received."),
+        responses::ev_completed_with_tokens("second-seed", /*total_tokens*/ 120),
     ]);
     let followup = responses::sse(vec![
         responses::ev_assistant_message("followup", "FINAL_REPLY"),
         responses::ev_completed_with_tokens("followup", /*total_tokens*/ 120),
     ]);
-    let _responses = responses::mount_sse_sequence(&server, vec![seed, sse, followup]).await;
+    responses::mount_local_compaction_sequence(
+        &server,
+        vec![seed, second_seed, followup],
+        completed,
+    )
+    .await;
 
     let codex_home = TempDir::new()?;
     let initial_cwd = TempDir::new()?;
     let updated_cwd = TempDir::new()?;
-    compaction_config(&server.uri(), /*auto_compact_limit*/ 1_000_000).write(codex_home.path())?;
+    compaction_config(&server.uri(), /*auto_compact_limit*/ 1_000_000)
+        .with_root_config("model_context_window = 100000\nlocal_compaction.trigger_percent = 99\nlocal_compaction.force_local = true")
+        .write(codex_home.path())?;
 
     // Top-level cwd restoration uses host-native paths, not a foreign executor's paths.
     let mut mcp = TestAppServer::builder()
@@ -303,6 +313,12 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
         }),
     )
     .await??;
+    send_turn_and_wait(
+        &mut mcp,
+        &thread_id,
+        "Keep the current task; archive earlier verbose details.",
+    )
+    .await?;
     mcp.clear_message_buffer();
 
     let compact_id = mcp

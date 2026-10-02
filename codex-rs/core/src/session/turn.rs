@@ -421,6 +421,21 @@ pub(crate) async fn run_turn(
             sess.record_reasoning_effort_override(step_context.as_ref())
                 .await;
 
+            // All prior tool results and newly accepted user direction are recorded before
+            // staging or installing a local view for the next normal model request.
+            if (turn_context.config.local_compaction.force_local
+                || crate::compaction_policy::remote_compaction_support(
+                    turn_context.provider.capabilities().remote_compaction,
+                    &step_context.settings.model_info,
+                ) == RemoteCompactionSupport::Unsupported)
+                && crate::local_compaction::maybe_clean_history(&sess, &step_context)
+                    .or_cancel(&cancellation_token)
+                    .await??
+                && run_pending_session_start_hooks(&sess, &turn_context).await
+            {
+                return Err(CodexErr::TurnAborted);
+            }
+
             // Construct the input that we will send to the model.
             let sampling_request_input: Vec<ResponseItem> = async {
                 sess.clone_history()
@@ -512,7 +527,13 @@ pub(crate) async fn run_turn(
                     );
                 }
 
+                let local_route = turn_context.config.local_compaction.force_local
+                    || crate::compaction_policy::remote_compaction_support(
+                        turn_context.provider.capabilities().remote_compaction,
+                        &step_context.settings.model_info,
+                    ) == RemoteCompactionSupport::Unsupported;
                 let should_roll_over = needs_follow_up
+                    && !local_route
                     && (sess.take_new_context_window_request().await || token_limit_reached);
                 let allow_auto_compact_fallback = !should_roll_over && !token_limit_reached;
                 super::token_budget::maybe_record(
@@ -1111,6 +1132,15 @@ async fn run_pre_sampling_compact(
     client_session: &mut ModelClientSession,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<()> {
+    if turn_context.config.local_compaction.force_local
+        || crate::compaction_policy::remote_compaction_support(
+            turn_context.provider.capabilities().remote_compaction,
+            turn_context.model_info(),
+        ) == RemoteCompactionSupport::Unsupported
+    {
+        // The local hook includes incoming input and initial context in its budget.
+        return Ok(());
+    }
     maybe_run_previous_model_inline_compact(sess, turn_context, client_session, cancellation_token)
         .await?;
     let token_status =
@@ -1285,7 +1315,12 @@ async fn run_auto_compact(
 ) -> CodexResult<()> {
     let turn_context = &step_context.turn;
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
-    if turn_context.config.features.enabled(Feature::TokenBudget) {
+    let local_route = turn_context.config.local_compaction.force_local
+        || crate::compaction_policy::remote_compaction_support(
+            turn_context.provider.capabilities().remote_compaction,
+            &step_context.settings.model_info,
+        ) == RemoteCompactionSupport::Unsupported;
+    if !local_route && turn_context.config.features.enabled(Feature::TokenBudget) {
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.
         crate::compact_token_budget::run_inline_auto_compact_task(
@@ -1297,10 +1332,15 @@ async fn run_auto_compact(
         return Ok(());
     }
 
-    match crate::compaction_policy::remote_compaction_support(
-        turn_context.provider.capabilities().remote_compaction,
-        step_context.settings.model_info.as_ref(),
-    ) {
+    let support = if local_route {
+        RemoteCompactionSupport::Unsupported
+    } else {
+        crate::compaction_policy::remote_compaction_support(
+            turn_context.provider.capabilities().remote_compaction,
+            step_context.settings.model_info.as_ref(),
+        )
+    };
+    match support {
         RemoteCompactionSupport::V2
             if turn_context
                 .config
@@ -1677,6 +1717,16 @@ pub(crate) async fn built_tools(
             .instrument(trace_span!("built_tools.load_discoverable_tools"))
             .await
         };
+    let has_local_compaction_history =
+        sess.clone_history()
+            .await
+            .annotated_items()
+            .iter()
+            .any(|item| {
+                item.metadata
+                    .as_ref()
+                    .is_some_and(|metadata| metadata.local_compaction.is_some())
+            });
     Ok(Arc::new(build_tool_router(
         sess,
         turn_context,
@@ -1687,6 +1737,7 @@ pub(crate) async fn built_tools(
         apps_enabled,
         step_store,
         tool_suggest_candidates.as_ref(),
+        has_local_compaction_history,
     )?))
 }
 

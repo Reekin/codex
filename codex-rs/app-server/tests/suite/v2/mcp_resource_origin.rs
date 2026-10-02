@@ -68,14 +68,6 @@ async fn widget_reads_survive_history_modes_compaction_restarts_and_app_only_vis
     model_responses.insert(
         /*index*/ 4,
         responses::sse(vec![
-            responses::ev_response_created("widget-compaction"),
-            responses::ev_assistant_message("widget-summary", "The apps found matching lamps."),
-            responses::ev_completed("widget-compaction"),
-        ]),
-    );
-    model_responses.insert(
-        /*index*/ 5,
-        responses::sse(vec![
             responses::ev_response_created("after-widget-compaction"),
             responses::ev_assistant_message("widget-follow-up", "The lamps are still available."),
             responses::ev_completed("after-widget-compaction"),
@@ -84,7 +76,12 @@ async fn widget_reads_survive_history_modes_compaction_restarts_and_app_only_vis
     model_responses.push(responses::sse(vec![responses::ev_completed(
         "app-only-visibility",
     )]));
-    let response_mock = responses::mount_sse_sequence(&responses_server, model_responses).await;
+    let response_mock = responses::mount_local_compaction_sequence(
+        &responses_server,
+        model_responses,
+        responses::ev_completed("widget-compaction"),
+    )
+    .await;
 
     let mut persistent_thread_ids = Vec::new();
     for (history_mode, ephemeral) in [

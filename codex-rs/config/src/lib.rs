@@ -18,6 +18,7 @@ mod host_name;
 mod in_app_browser_requirements;
 mod key_aliases;
 pub mod loader;
+mod local_compaction;
 mod marketplace_edit;
 mod mcp_edit;
 mod mcp_requirements;
@@ -41,6 +42,8 @@ mod tui_keymap;
 pub mod types;
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
+
+pub use local_compaction::LocalCompactionConfig;
 
 pub use application_requirements::ApplicationNetworkRequirementsToml;
 pub use application_requirements::ApplicationRequirementsToml;
