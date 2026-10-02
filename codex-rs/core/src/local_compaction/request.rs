@@ -3,11 +3,15 @@ use codex_context_compaction::TierPlan;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
+use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_rollout_trace::InferenceTraceContext;
 use futures::StreamExt;
 use serde_json::json;
+use std::collections::HashMap;
 
 use crate::Prompt;
 use crate::client::ModelClientSession;
@@ -25,7 +29,7 @@ pub(super) fn classifier(ids: &[String], guidance: &str) -> CodexResult<LocalCom
         json!({
             "eligible_ids": ids,
             "max_replacement_bytes": 2800,
-            "instructions": "Privately classify each eligible completed tool result exactly once as keep, shorten, or drop. Read current dialogue for relevance. Keep evidence needed for active work, unresolved questions, failures and verification. Shorten must preserve useful exact facts. Drop only dispensable output. Do not classify any other ID. Return JSON only, with no prose or fences.",
+            "instructions": "Privately classify each eligible completed tool result exactly once as keep, shorten, or drop. LOCAL_COMPACTION_SOURCE headers explicitly identify original records; classify the result item_id, not its paired call_item_id. Headers are harness metadata, not evidence. Read current dialogue for relevance. Keep evidence needed for active work, unresolved questions, failures and verification. Shorten must preserve useful exact facts. Drop only dispensable output. Do not classify any other ID. Return JSON only, with no prose or fences.",
             "required_output": {"decisions": [{"id": "eligible source item ID", "action": "keep|shorten|drop", "text": "only for shorten"}]},
             "supplemental_guidance": guidance,
         }),
@@ -55,6 +59,7 @@ pub(super) async fn infer_json(
     let mut history = ContextManager::default();
     history.replace_annotated(source.to_vec());
     let mut input = history.for_prompt(&context.settings.model_info.input_modalities);
+    label_source_items(&mut input)?;
     input.push(ContextualUserFragment::into(request));
     let prompt = Prompt {
         input,
@@ -117,3 +122,77 @@ pub(super) async fn infer_json(
         "local compaction stream closed before response.completed".to_string(),
     ))
 }
+
+/// Wire IDs need not be visible to the model. Label the private copy's text explicitly,
+/// including the paired call ID for ranges that start at a tool call. Live history is untouched.
+fn label_source_items(items: &mut [ResponseItem]) -> CodexResult<()> {
+    let mut calls = HashMap::new();
+    for item in items {
+        let Some(id) = item.id().cloned() else {
+            continue;
+        };
+        let call = match item {
+            ResponseItem::FunctionCall { call_id, .. }
+            | ResponseItem::LocalShellCall {
+                call_id: Some(call_id),
+                ..
+            } => Some(("function", call_id.clone())),
+            ResponseItem::CustomToolCall { call_id, .. } => Some(("custom", call_id.clone())),
+            _ => None,
+        };
+        if let Some(call) = call {
+            calls.insert(call, id.to_string());
+            continue;
+        }
+        let call_key = match item {
+            ResponseItem::FunctionCallOutput {
+                call_id: Some(call_id),
+                ..
+            } => Some(("function", call_id.clone())),
+            ResponseItem::CustomToolCallOutput { call_id, .. } => Some(("custom", call_id.clone())),
+            _ => None,
+        };
+        let label = LocalCompactionRequest::new(
+            "LOCAL_COMPACTION_SOURCE",
+            json!({
+                "item_id": id,
+                "call_item_id": call_key.and_then(|key| calls.get(&key)),
+            }),
+        )?
+        .body();
+        match item {
+            ResponseItem::Message { role, content, .. }
+                if role == "user" || role == "assistant" =>
+            {
+                if let Some(text) = content.iter_mut().find_map(|content| match content {
+                    ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                        Some(text)
+                    }
+                    _ => None,
+                }) {
+                    *text = format!("{label}\n{text}");
+                } else if role == "assistant" {
+                    content.insert(0, ContentItem::OutputText { text: label });
+                } else {
+                    content.insert(0, ContentItem::InputText { text: label });
+                }
+            }
+            ResponseItem::AgentMessage { content, .. } => {
+                content.insert(0, AgentMessageInputContent::InputText { text: label });
+            }
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => match &mut output.body {
+                FunctionCallOutputBody::Text(text) => *text = format!("{label}\n{text}"),
+                FunctionCallOutputBody::ContentItems(content) => {
+                    content.insert(0, FunctionCallOutputContentItem::InputText { text: label });
+                }
+            },
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "request_tests.rs"]
+mod tests;

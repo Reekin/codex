@@ -197,6 +197,22 @@ fn source_range(items: &[ResponseItemEnvelope]) -> Option<SourceRange> {
     let mut sources = items
         .iter()
         .filter(|item| !pinned(item))
+        // Range endpoints must name records whose source labels can be shown to the model.
+        .filter(|item| {
+            matches!(
+                item.item,
+                codex_protocol::models::ResponseItem::Message { .. }
+                    | codex_protocol::models::ResponseItem::AgentMessage { .. }
+                    | codex_protocol::models::ResponseItem::FunctionCall { .. }
+                    | codex_protocol::models::ResponseItem::FunctionCallOutput { .. }
+                    | codex_protocol::models::ResponseItem::CustomToolCall { .. }
+                    | codex_protocol::models::ResponseItem::CustomToolCallOutput { .. }
+                    | codex_protocol::models::ResponseItem::LocalShellCall {
+                        call_id: Some(_),
+                        ..
+                    }
+            )
+        })
         .filter_map(|item| {
             if let Some(source) = item
                 .metadata
