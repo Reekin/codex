@@ -845,6 +845,18 @@ client_request_definitions! {
         serialization: None,
         response: v2::ThreadTokenUsageReadResponse,
     },
+    /// Read validated tool-result marks against the automatic cleanup requirement.
+    ThreadToolCleanupRead => "thread/toolCleanup/read" {
+        params: v2::ThreadToolCleanupReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadToolCleanupReadResponse,
+    },
+    /// Apply every validated tool-result mark now, ignoring the automatic savings requirement.
+    ThreadToolCleanupApply => "thread/toolCleanup/apply" {
+        params: v2::ThreadToolCleanupApplyParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadToolCleanupApplyResponse,
+    },
     /// Append raw Responses API items to the thread history without starting a user turn.
     ThreadInjectItems => "thread/inject_items" {
         params: v2::ThreadInjectItemsParams,

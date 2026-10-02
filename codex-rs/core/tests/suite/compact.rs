@@ -56,6 +56,8 @@ use wiremock::MockServer;
 mod local;
 #[path = "compact_local_support.rs"]
 pub(crate) mod local_support;
+#[path = "compact_local_tool_cleanup.rs"]
+mod tool_cleanup;
 
 pub(super) const FIRST_REPLY: &str = "FIRST_REPLY";
 const SECOND_LARGE_REPLY: &str = "SECOND_LARGE_REPLY";

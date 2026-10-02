@@ -415,16 +415,28 @@ async fn rollback_discards_later_dialogue_after_local_cleanup() -> Result<()> {
     finish_marking(&test, &model, /*expected_batches*/ 1).await?;
     model.text("Discard this answer.");
     test.submit_text_turn("Discard this instruction.").await?;
-    test.codex
-        .submit(Op::ThreadRollback { num_turns: 1 })
-        .await?;
-    core_test_support::wait_for_event(&test.codex, |event| {
-        matches!(
-            event,
-            codex_protocol::protocol::EventMsg::ThreadRolledBack(_)
-        )
-    })
-    .await;
+    // TurnComplete is emitted just before the active turn is cleared, so an immediate
+    // rollback can be rejected as in progress; retry only that rejection.
+    loop {
+        test.codex
+            .submit(Op::ThreadRollback { num_turns: 1 })
+            .await?;
+        let rolled_back =
+            core_test_support::wait_for_event_match(&test.codex, |event| match event {
+                codex_protocol::protocol::EventMsg::ThreadRolledBack(_) => Some(true),
+                codex_protocol::protocol::EventMsg::Error(error)
+                    if error.message.contains("while a turn is in progress") =>
+                {
+                    Some(false)
+                }
+                _ => None,
+            })
+            .await;
+        if rolled_back {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
     model.text("Edited answer.");
     test.submit_text_turn("Edited instruction.").await?;
     let body: Value = model.ordinary_bodies().last().unwrap().clone();

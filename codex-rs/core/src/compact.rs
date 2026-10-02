@@ -58,7 +58,7 @@ pub(crate) struct LocalCompactionContext {
 }
 
 impl LocalCompactionContext {
-    fn from_turn(turn: Arc<TurnContext>) -> Self {
+    pub(crate) fn from_turn(turn: Arc<TurnContext>) -> Self {
         Self {
             settings: Arc::clone(&turn.initial_settings),
             session_telemetry: turn.session_telemetry.clone(),

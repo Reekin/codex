@@ -582,6 +582,16 @@ impl CodexThread {
         self.session.terminate_background_terminal(process_id).await
     }
 
+    /// Reports validated tool marks against the automatic cleanup requirement.
+    pub async fn tool_cleanup_status(&self) -> CodexResult<crate::ToolCleanupStatus> {
+        crate::local_compaction::tool_cleanup_status(&self.session).await
+    }
+
+    /// Applies every validated tool mark now, ignoring the automatic savings requirement.
+    pub async fn apply_tool_cleanup(&self) -> CodexResult<crate::ToolCleanupOutcome> {
+        crate::local_compaction::apply_tool_cleanup(&self.session).await
+    }
+
     pub(crate) fn subscribe_status(&self) -> watch::Receiver<AgentStatus> {
         self.io.agent_status.clone()
     }
