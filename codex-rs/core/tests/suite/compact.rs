@@ -25,7 +25,6 @@ use codex_protocol::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
-use core_test_support::context_snapshot;
 use core_test_support::responses;
 use core_test_support::responses::mount_models_once;
 use core_test_support::skip_if_no_network;
