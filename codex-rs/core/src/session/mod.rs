@@ -226,6 +226,7 @@ pub(crate) mod extension_metrics;
 mod handlers;
 mod inject;
 mod input_queue;
+mod local_compaction;
 mod mcp;
 mod mcp_prewarm;
 mod mcp_refresh;
@@ -692,7 +693,8 @@ impl Session {
         // Forked subagents keep their parent's activation with the copied history.
         // Fresh children restore configured preferences before applying startup defaults.
         let inherits_token_budget = matches!(&conversation_history, InitialHistory::Forked(_))
-            && config.token_budget_startup_config.is_some();
+            && config.token_budget_startup_config.is_some()
+            && !token_budget::uses_local_compaction(&config, &model_info);
         if !inherits_token_budget {
             Arc::make_mut(&mut config)
                 .prepare_token_budget_for_startup()

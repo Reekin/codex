@@ -1916,6 +1916,39 @@
     "LegacyAppPathString": {
       "type": "string"
     },
+    "LocalCompactionConfig": {
+      "additionalProperties": false,
+      "description": "Occupancy and batching policy for local conversation cleanup.",
+      "properties": {
+        "force_local": {
+          "default": false,
+          "description": "Use local cleanup even when the provider supports remote compaction.",
+          "type": "boolean"
+        },
+        "minimum_savings_percent": {
+          "default": 5,
+          "description": "Minimum savings as a percentage of the usable context window per cleanup.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "target_percent": {
+          "default": 30,
+          "description": "Desired percentage of the usable context window after cleanup.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "trigger_percent": {
+          "default": 50,
+          "description": "Percentage of the usable context window that starts automatic cleanup.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "MarketplaceConfig": {
       "additionalProperties": false,
       "properties": {
@@ -6558,6 +6591,20 @@
     "instructions": {
       "description": "System instructions.",
       "type": "string"
+    },
+    "local_compaction": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/LocalCompactionConfig"
+        }
+      ],
+      "default": {
+        "force_local": false,
+        "minimum_savings_percent": 5,
+        "target_percent": 30,
+        "trigger_percent": 50
+      },
+      "description": "Local cleanup policy, independent of native remote compaction budgets."
     },
     "log_dir": {
       "allOf": [

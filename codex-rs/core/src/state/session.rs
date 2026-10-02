@@ -35,6 +35,7 @@ pub(crate) struct SessionState {
     /// Persisted origin of the session base instructions, when known.
     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
     pub(crate) history: ContextManager,
+    pub(crate) local_compaction: crate::local_compaction::LocalCompactionState,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
     /// Estimated tool-definition tokens of the latest sampling request.
@@ -78,6 +79,7 @@ impl SessionState {
             session_configuration,
             base_instructions_provenance: None,
             history,
+            local_compaction: crate::local_compaction::LocalCompactionState::default(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
             request_tools_tokens: 0,
@@ -256,6 +258,22 @@ impl SessionState {
 
     pub(crate) fn advance_auto_compact_window(&mut self) -> (u64, AutoCompactWindowIds) {
         self.auto_compact_window.advance()
+    }
+
+    pub(crate) fn next_local_compaction_window(&self) -> (u64, AutoCompactWindowIds) {
+        let mut candidate = self.auto_compact_window;
+        candidate.advance()
+    }
+
+    pub(crate) fn install_local_compacted_history(
+        &mut self,
+        history: ContextManager,
+        window_number: u64,
+        window_ids: AutoCompactWindowIds,
+    ) {
+        self.history = history;
+        self.auto_compact_window = AutoCompactWindow::new_with_ids(window_ids);
+        self.auto_compact_window.restore(window_number, window_ids);
     }
 
     pub(crate) fn request_new_context_window(&mut self) {

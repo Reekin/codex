@@ -739,10 +739,15 @@ impl Session {
         );
 
         let mut per_turn_config = per_turn_config;
-        let configured_token_budget = per_turn_config.token_budget.clone();
-        let use_model_token_budget_defaults =
-            per_turn_config.features.enabled(Feature::TokenBudget)
-                && !has_explicit_settings(&per_turn_config);
+        let local_route = super::token_budget::uses_local_compaction(&per_turn_config, model_info);
+        let configured_token_budget = if local_route {
+            None
+        } else {
+            per_turn_config.token_budget.clone()
+        };
+        let use_model_token_budget_defaults = !local_route
+            && per_turn_config.features.enabled(Feature::TokenBudget)
+            && !has_explicit_settings(&per_turn_config);
         per_turn_config.token_budget = resolve_token_budget(
             configured_token_budget.as_ref(),
             use_model_token_budget_defaults,

@@ -17,6 +17,12 @@ pub struct TokenBudgetStartupConfig {
 impl Config {
     /// Captures configured preferences, removing any inherited startup activation first.
     pub(crate) fn prepare_token_budget_for_startup(&mut self) -> ConstraintResult<()> {
+        if self.local_compaction.force_local {
+            self.features.disable(Feature::TokenBudget)?;
+            self.token_budget = None;
+            self.token_budget_startup_config = None;
+            return Ok(());
+        }
         if let Some(snapshot) = self.token_budget_startup_config.as_ref() {
             self.features
                 .set_enabled(Feature::TokenBudget, snapshot.enabled)?;

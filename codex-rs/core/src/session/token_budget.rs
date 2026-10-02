@@ -6,9 +6,21 @@ use crate::config::resolve_token_budget_config;
 use crate::context::ContextualUserFragment;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_model_provider::RemoteCompactionSupport;
+use codex_model_provider::create_model_provider;
 use codex_protocol::account::PlanType;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::openai_models::ModelInfo;
+
+pub(super) fn uses_local_compaction(config: &Config, model_info: &ModelInfo) -> bool {
+    config.local_compaction.force_local
+        || crate::compaction_policy::remote_compaction_support(
+            create_model_provider(config.model_provider.clone(), /*auth_manager*/ None)
+                .capabilities()
+                .remote_compaction,
+            model_info,
+        ) == RemoteCompactionSupport::Unsupported
+}
 
 fn experimental_context_is_eligible(auth_mode: AuthMode, plan_type: Option<PlanType>) -> bool {
     auth_mode == AuthMode::Chatgpt
@@ -23,6 +35,14 @@ pub(super) fn apply_experimental_context(
     auth: Option<&CodexAuth>,
     starting_model: &ModelInfo,
 ) -> std::io::Result<()> {
+    if uses_local_compaction(config, starting_model) {
+        config
+            .features
+            .disable(Feature::TokenBudget)
+            .map_err(std::io::Error::other)?;
+        config.token_budget = None;
+        return Ok(());
+    }
     let provider = &config.model_provider;
     if !config.features.enabled(Feature::ContextManagement)
         || !starting_model.supports_experimental_context
@@ -121,6 +141,9 @@ pub(super) fn resolve_token_budget(
 
 /// Applies model activation defaults before thread extensions are initialized.
 pub(super) fn apply_model_defaults(config: &mut Config, model_info: &ModelInfo) {
+    if uses_local_compaction(config, model_info) {
+        return;
+    }
     let Some(model_defaults) = model_info
         .model_messages
         .as_ref()
@@ -164,7 +187,9 @@ pub(super) async fn maybe_record(
     base_window_tokens_remaining: Option<i64>,
     allow_auto_compact_fallback: bool,
 ) {
-    if !turn_context.config.features.enabled(Feature::TokenBudget) {
+    if uses_local_compaction(&turn_context.config, turn_context.model_info())
+        || !turn_context.config.features.enabled(Feature::TokenBudget)
+    {
         return;
     }
     let Some(base_window_tokens_remaining) = base_window_tokens_remaining else {

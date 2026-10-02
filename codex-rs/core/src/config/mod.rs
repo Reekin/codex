@@ -16,6 +16,7 @@ use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
 use codex_config::ConstrainedWithSource;
 use codex_config::FeatureRequirementsToml;
+pub use codex_config::LocalCompactionConfig;
 use codex_config::ManagedAuthPolicy;
 use codex_config::McpServerRequirement;
 use codex_config::PluginRequirementsToml;
@@ -633,6 +634,8 @@ pub struct Config {
     /// Controls whether `model_auto_compact_token_limit` applies to the full
     /// active context or only tokens after the carried compaction-window prefix.
     pub model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope,
+
+    pub local_compaction: LocalCompactionConfig,
 
     /// Key into the model_providers map that specifies which provider to use.
     pub model_provider_id: String,
@@ -3705,7 +3708,12 @@ impl Config {
         };
         let code_mode = resolve_code_mode_config(&cfg);
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
-        let token_budget = resolve_token_budget_config(&cfg, &features)?;
+        cfg.local_compaction.validate()?;
+        let token_budget = if cfg.local_compaction.force_local {
+            None
+        } else {
+            resolve_token_budget_config(&cfg, &features)?
+        };
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
         let sleep_tool_mode = cfg
@@ -4158,6 +4166,7 @@ impl Config {
             model_auto_compact_token_limit_scope: cfg
                 .model_auto_compact_token_limit_scope
                 .unwrap_or_default(),
+            local_compaction: cfg.local_compaction,
             model_provider_id,
             model_provider,
             cwd: resolved_cwd,
@@ -4789,6 +4798,10 @@ pub fn log_dir(cfg: &Config) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "local_compaction_tests.rs"]
+mod local_compaction_tests;
 
 #[cfg(test)]
 #[path = "config_loader_tests.rs"]

@@ -7,6 +7,7 @@ use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
+use codex_async_utils::OrCancelExt;
 use codex_features::Feature;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErrorDetails;
@@ -30,18 +31,25 @@ impl SessionTask for CompactTask {
         session: Arc<Session>,
         ctx: Arc<TurnContext>,
         _input: Vec<TurnInput>,
-        _cancellation_token: CancellationToken,
+        cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         let _profile_guard = ctx.turn_timing_state.begin_compaction();
-        if ctx.config.features.enabled(Feature::TokenBudget) {
+        let support = if ctx.config.local_compaction.force_local {
+            RemoteCompactionSupport::Unsupported
+        } else {
+            crate::compaction_policy::remote_compaction_support(
+                ctx.provider.capabilities().remote_compaction,
+                ctx.model_info(),
+            )
+        };
+        if support != RemoteCompactionSupport::Unsupported
+            && ctx.config.features.enabled(Feature::TokenBudget)
+        {
             crate::compact_token_budget::run_manual_compact_task(session, ctx).await?;
             return Ok(None);
         }
 
-        let result = match crate::compaction_policy::remote_compaction_support(
-            ctx.provider.capabilities().remote_compaction,
-            ctx.model_info(),
-        ) {
+        let result = match support {
             RemoteCompactionSupport::V2
                 if ctx.config.features.enabled(Feature::RemoteCompactionV2) =>
             {
@@ -71,14 +79,20 @@ impl SessionTask for CompactTask {
                         .config
                         .compact_prompt
                         .as_deref()
-                        .unwrap_or(crate::compact::SUMMARIZATION_PROMPT)
+                        .unwrap_or("")
                         .to_string(),
                     // Compaction prompt is synthesized; no UI element ranges to preserve.
                     text_elements: Vec::new(),
                 }];
-                crate::compact::run_compact_task(session.clone(), ctx, input).await
+                crate::compact::run_compact_task(session.clone(), ctx, input)
+                    .or_cancel(&cancellation_token)
+                    .await?
             }
         };
+        if support == RemoteCompactionSupport::Unsupported {
+            result?;
+            return Ok(None);
+        }
         if let Err(err) = result
             && matches!(err.details(), CodexErrorDetails::TurnAborted)
         {
