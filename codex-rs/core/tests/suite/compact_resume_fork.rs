@@ -15,14 +15,19 @@ use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
-    use codex_protocol::config_types::{CollaborationMode, ModeKind, Settings};
-    use codex_protocol::protocol::{EventMsg, ThreadSettingsOverrides};
-    use core_test_support::context_snapshot::{
-        self, ContextSnapshotOptions, ContextSnapshotRenderMode,
-    };
-    use core_test_support::responses::{
-        ev_assistant_message, ev_completed, ev_response_created, mount_sse_sequence, sse,
-    };
+    use codex_protocol::config_types::CollaborationMode;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::config_types::Settings;
+    use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ThreadSettingsOverrides;
+    use core_test_support::context_snapshot::ContextSnapshotOptions;
+    use core_test_support::context_snapshot::ContextSnapshotRenderMode;
+    use core_test_support::context_snapshot;
+    use core_test_support::responses::ev_assistant_message;
+    use core_test_support::responses::ev_completed;
+    use core_test_support::responses::ev_response_created;
+    use core_test_support::responses::mount_sse_sequence;
+    use core_test_support::responses::sse;
     use core_test_support::test_codex::local_selections;
     use core_test_support::wait_for_event;
     use wiremock::MockServer;
