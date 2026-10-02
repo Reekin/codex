@@ -55,6 +55,11 @@ class Model(http.server.ThreadingHTTPServer):
         self.phase = "tools"
         self.recall_id = None
         self.errors = []
+        self.mark_started = threading.Event()
+        self.release_mark = threading.Event()
+        self.mark_sent = threading.Event()
+        self.sequence = 0
+        self.sequence_lock = threading.Lock()
 
     def respond(self, body):
         self.requests.append(body)
@@ -80,6 +85,8 @@ class Model(http.server.ThreadingHTTPServer):
                     )
                 decisions.append(decision)
             self.decisions.extend(decisions)
+            self.mark_started.set()
+            assert self.release_mark.wait(30), "marking gate was not released"
             return [assistant(json.dumps({"decisions": decisions}))]
         payload = analysis_payload(body, "LOCAL_COMPACTION_SUMMARIZE")
         if payload is not None:
@@ -140,8 +147,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.loads(raw)
             if not self.path.endswith("/responses"):
                 raise AssertionError(f"Unexpected remote service path: {self.path}")
+            with self.server.sequence_lock:
+                self.server.sequence += 1
+                response_id = f"fixture-response-{self.server.sequence}"
+            marking = analysis_payload(body, "LOCAL_COMPACTION_CLASSIFY") is not None
             output = self.server.respond(body)
-            response_id = f"fixture-response-{len(self.server.requests)}"
             for index, item in enumerate(output):
                 if item["type"] == "message":
                     item["id"] = f"{response_id}-message-{index}"
@@ -157,9 +167,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "id": response_id,
                         "output": output,
                         "usage": {
-                            "input_tokens": 1000,
-                            "output_tokens": 100,
-                            "total_tokens": 1100,
+                            "input_tokens": 700 if marking else 1000,
+                            "output_tokens": 77 if marking else 100,
+                            "total_tokens": 777 if marking else 1100,
                         },
                     },
                 }
@@ -172,6 +182,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
             self.wfile.write(payload)
+            self.wfile.flush()
+            if analysis_payload(body, "LOCAL_COMPACTION_CLASSIFY") is not None:
+                self.server.mark_sent.set()
         except Exception as error:
             self.server.errors.append(str(error))
             self.send_error(500, str(error))
@@ -190,9 +203,10 @@ class Rpc:
             "model_context_window": "100000",
             "model_auto_compact_token_limit": "95000",
             "local_compaction.force_local": "true",
-            "local_compaction.trigger_percent": "50",
-            "local_compaction.target_percent": "30",
-            "local_compaction.minimum_savings_percent": "1",
+            "local_compaction.reclaim_percent": "1",
+            "local_compaction.mark_after_tokens_percent": "1",
+            "local_compaction.mark_after_records": "1",
+            "local_compaction.compact_target_percent": "30",
             "model_reasoning_effort": '"low"',
             "features.code_mode": "false",
             "features.enable_request_compression": "false",
@@ -331,6 +345,64 @@ def run(binary):
                 thread["id"],
                 "The fixture batch is complete. Keep the offline-only constraint and continue.",
             )
+            assert model.mark_started.wait(10), "background marking did not start"
+            rpc.turn(thread["id"], "Continue ordinary work while marking is held.")
+            assert not model.mark_sent.is_set(), (
+                "marking gate did not hold the response"
+            )
+            assert (
+                sum(
+                    analysis_payload(body, "LOCAL_COMPACTION_CLASSIFY") is not None
+                    for body in model.requests
+                )
+                == 1
+            ), "multiple marking jobs ran concurrently"
+            assert not any(
+                analysis_payload(body, "LOCAL_COMPACTION_SUMMARIZE") is not None
+                for body in model.requests
+            ), "soft cleanup escalated into full compaction"
+            foreground_usage = [
+                event["params"]["tokenUsage"]
+                for event in rpc.pending
+                if event.get("method") == "thread/tokenUsage/updated"
+                and event["params"]["threadId"] == thread["id"]
+            ][-1]
+            model.release_mark.set()
+            assert model.mark_sent.wait(10), "marking response was not sent"
+            ready = rpc.wait(
+                lambda event: (
+                    event.get("method") == "thread/tokenUsage/updated"
+                    and event["params"]["threadId"] == thread["id"]
+                    and event["params"]["tokenUsage"]["total"]["totalTokens"]
+                    == foreground_usage["total"]["totalTokens"] + 777
+                )
+            )["params"]["tokenUsage"]
+            for field in ("last", "modelContextWindow", "contextUsage"):
+                assert ready[field] == foreground_usage[field], (
+                    field,
+                    foreground_usage,
+                    ready,
+                )
+            # Drive actual sampling boundaries until the validated replacement is visible.
+            # A sent HTTP response alone does not prove the client consumed its final event.
+            for _ in range(32):
+                rpc.turn(thread["id"], "Continue with the validated tool evidence.")
+                ordinary = [
+                    body
+                    for body in model.requests
+                    if analysis_payload(body, "LOCAL_COMPACTION_CLASSIFY") is None
+                    and analysis_payload(body, "LOCAL_COMPACTION_SUMMARIZE") is None
+                ]
+                if any(
+                    "recall_read_item" in str(item.get("output", ""))
+                    for item in ordinary[-1].get("input", [])
+                    if item.get("type") == "function_call_output"
+                ):
+                    break
+            else:
+                raise AssertionError(
+                    "completed marking never installed at sampling boundaries"
+                )
             rpc.close()
             rpc = None
             rollouts = list((root / "home" / "sessions").rglob("rollout-*.jsonl"))
@@ -394,6 +466,8 @@ def run(binary):
                 "classified": len(model.decisions),
                 "cli_recall": True,
                 "model_recall_after_resume": True,
+                "foreground_completed_while_marking_held": True,
+                "background_billing_preserves_foreground_occupancy": True,
             }
         except Exception:
             print(
@@ -403,6 +477,7 @@ def run(binary):
             )
             raise
         finally:
+            model.release_mark.set()
             if rpc is not None:
                 rpc.close()
             model.shutdown()

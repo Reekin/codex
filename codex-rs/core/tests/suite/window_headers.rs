@@ -37,7 +37,8 @@ async fn window_id_advances_after_compact_persists_on_resume_and_resets_on_fork(
     submit_user_turn(&initial_thread, "after compact").await?;
     shutdown_thread(&initial_thread).await?;
 
-    let resumed = builder
+    let resumed = test_codex()
+        .with_config(configure)
         .resume(&server, initial.home.clone(), rollout_path.clone())
         .await?;
     model.text("after resume reply");

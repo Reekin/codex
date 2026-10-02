@@ -8,6 +8,7 @@ use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
@@ -36,8 +37,7 @@ async fn mid_turn_cleanup_uses_activated_model_settings_and_keeps_pending_work()
         .with_config(|config| {
             configure(config);
             config.local_compaction.force_local = false;
-            config.local_compaction.trigger_percent = 20;
-            config.local_compaction.target_percent = 15;
+            config.local_compaction.compact_target_percent = 15;
             let mut next = model("local-model", false, "shared");
             next.default_reasoning_summary =
                 codex_protocol::config_types::ReasoningSummary::Detailed;
@@ -56,7 +56,7 @@ async fn mid_turn_cleanup_uses_activated_model_settings_and_keeps_pending_work()
         .build_with_auto_env(&server)
         .await?;
     responder.text(&"Earlier evidence needs verification. ".repeat(5000));
-    test.submit_turn("Keep the offline-only constraint.")
+    test.submit_text_turn("Keep the offline-only constraint.")
         .await?;
     responder.reply(sse(vec![ev_function_call("pause", "request_user_input", &json!({"questions":[{
         "id":"continue","header":"Continue","question":"Continue after changing model?",
@@ -92,7 +92,7 @@ async fn mid_turn_cleanup_uses_activated_model_settings_and_keeps_pending_work()
     );
     responder.reply(sse(vec![
         ev_function_call("pending-work", "unsupported_tool", "{}"),
-        ev_completed("pending-response"),
+        ev_completed_with_tokens("pending-response", /*total_tokens*/ 96_000),
     ]));
     responder.text("Continue with current settings.");
     test.codex
@@ -193,16 +193,16 @@ async fn provider_model_capability_and_local_preference_select_independent_route
         .await?;
     responder.reply(tool_turn());
     responder.text("Original dialogue.");
-    test.submit_turn("Seed route selection.").await?;
+    test.submit_text_turn("Seed route selection.").await?;
     responder.text("Recent dialogue.");
-    test.submit_turn("Recent direction.").await?;
+    test.submit_text_turn("Recent direction.").await?;
     if use_remote {
         responder.reply(remote_response());
     }
     test.codex.submit(Op::Compact).await?;
     complete(&test.codex).await;
     responder.text("Continue selected route.");
-    test.submit_turn("Read selected view.").await?;
+    test.submit_text_turn("Read selected view.").await?;
     let bodies = responder.bodies();
     let requests = &bodies[3..bodies.len() - 1];
     assert_eq!(
@@ -231,9 +231,9 @@ async fn provider_model_capability_and_local_preference_select_independent_route
                 .contains("remote-original-protocol")
         );
     } else {
-        assert!(analysis_payload(&requests[0], CLASSIFY).is_some());
+        assert!(analysis_payload(&requests[0], SUMMARIZE).is_some());
         assert!(!requests[0].to_string().contains("compaction_trigger"));
-        assert!(bodies.last().unwrap().to_string().contains(SHORTENED));
+        assert!(bodies.last().unwrap().to_string().contains(LEDGER));
         assert!(
             !bodies
                 .last()
@@ -275,9 +275,10 @@ async fn model_switch_uses_active_capability_and_preserves_selected_reasoning() 
         .await?;
     responder.reply(tool_turn());
     responder.text("Before model switch.");
-    test.submit_turn("Seed prior-model tool results.").await?;
+    test.submit_text_turn("Seed prior-model tool results.")
+        .await?;
     responder.text("Completed tool results are available for reassessment.");
-    test.submit_turn("Continue after collecting the evidence.")
+    test.submit_text_turn("Continue after collecting the evidence.")
         .await?;
     submit_thread_settings(
         &test.codex,
@@ -294,16 +295,16 @@ async fn model_switch_uses_active_capability_and_preserves_selected_reasoning() 
     test.submit_text_turn("Switch capability and continue.")
         .await?;
     let bodies = responder.bodies();
-    let classifier = bodies
+    let summarizer = bodies
         .iter()
-        .find(|body| analysis_payload(body, CLASSIFY).is_some())
-        .expect("model-switch cleanup");
-    assert_eq!(classifier["model"], "local-model");
-    assert_eq!(classifier["reasoning"]["summary"], "detailed");
-    assert!(!classifier.to_string().contains("compaction_trigger"));
+        .find(|body| analysis_payload(body, SUMMARIZE).is_some())
+        .expect("model-switch full compaction");
+    assert_eq!(summarizer["model"], "local-model");
+    assert_eq!(summarizer["reasoning"]["summary"], "detailed");
+    assert!(!summarizer.to_string().contains("compaction_trigger"));
     assert_eq!(bodies.last().unwrap()["model"], "local-model");
     assert_eq!(bodies.last().unwrap()["reasoning"]["summary"], "detailed");
-    assert!(bodies.last().unwrap().to_string().contains(SHORTENED));
+    assert!(bodies.last().unwrap().to_string().contains(LEDGER));
     assert!(
         bodies
             .last()
@@ -339,7 +340,7 @@ async fn compatible_model_switch_does_not_request_unnecessary_cleanup(
         .build_with_auto_env(&server)
         .await?;
     responder.text("Initial answer.");
-    test.submit_turn("Initial turn.").await?;
+    test.submit_text_turn("Initial turn.").await?;
     submit_thread_settings(
         &test.codex,
         ThreadSettingsOverrides {

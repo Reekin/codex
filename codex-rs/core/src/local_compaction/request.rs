@@ -4,6 +4,7 @@ use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::AgentMessageInputContent;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -21,7 +22,15 @@ use crate::context::ContextualUserFragment;
 use crate::context::LocalCompactionRequest;
 use crate::context_manager::ContextManager;
 use crate::responses_metadata::CodexResponsesMetadata;
-use crate::session::session::Session;
+use codex_protocol::protocol::TokenUsage;
+
+pub(super) struct AnalysisResponse {
+    pub(super) json: String,
+    pub(super) response_id: String,
+    pub(super) usage: Option<TokenUsage>,
+    pub(super) usage_metadata: Option<codex_protocol::ResponseUsageMetadata>,
+    pub(super) rate_limits: Option<codex_protocol::protocol::RateLimitSnapshot>,
+}
 
 pub(super) fn classifier(ids: &[String], guidance: &str) -> CodexResult<LocalCompactionRequest> {
     LocalCompactionRequest::new(
@@ -49,13 +58,13 @@ pub(super) fn summarizer(plan: &TierPlan, guidance: &str) -> CodexResult<LocalCo
 }
 
 pub(super) async fn infer_json(
-    sess: &Session,
+    base_instructions: BaseInstructions,
     context: &LocalCompactionContext,
     client: &mut ModelClientSession,
     metadata: &CodexResponsesMetadata,
     source: &[ResponseItemEnvelope],
     request: LocalCompactionRequest,
-) -> CodexResult<(String, String)> {
+) -> CodexResult<AnalysisResponse> {
     let mut history = ContextManager::default();
     history.replace_annotated(source.to_vec());
     let mut input = history.for_prompt(&context.settings.model_info.input_modalities);
@@ -63,7 +72,7 @@ pub(super) async fn infer_json(
     input.push(ContextualUserFragment::into(request));
     let prompt = Prompt {
         input,
-        base_instructions: sess.get_prompt_base_instructions().await,
+        base_instructions,
         ..Default::default()
     };
     let mut stream = client
@@ -79,6 +88,7 @@ pub(super) async fn infer_json(
         )
         .await?;
     let mut output = String::new();
+    let mut rate_limits = None;
     while let Some(event) = stream.next().await {
         match event? {
             ResponseEvent::OutputItemDone(ResponseItem::Message { role, content, .. })
@@ -93,27 +103,20 @@ pub(super) async fn infer_json(
                     }
                 }
             }
-            ResponseEvent::RateLimits(snapshot) => {
-                sess.update_rate_limits(&context.turn, snapshot).await
-            }
+            ResponseEvent::RateLimits(snapshot) => rate_limits = Some(snapshot),
             ResponseEvent::Completed {
                 response_id,
                 token_usage,
                 usage_metadata,
                 ..
             } => {
-                sess.record_observed_response_completed(
-                    &context.turn,
-                    &response_id,
-                    token_usage.as_ref(),
-                    usage_metadata.as_ref(),
-                )
-                .await;
-                sess.update_token_usage_info(&context.turn, token_usage.as_ref())
-                    .await?;
-                // Billing accumulates the private request; active occupancy describes real history.
-                sess.recompute_token_usage(&context.turn).await;
-                return Ok((output, response_id));
+                return Ok(AnalysisResponse {
+                    json: output,
+                    response_id,
+                    usage: token_usage,
+                    usage_metadata,
+                    rate_limits,
+                });
             }
             _ => {}
         }

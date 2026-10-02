@@ -38,6 +38,8 @@ pub(crate) struct SessionState {
     pub(crate) local_compaction: crate::local_compaction::LocalCompactionState,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
+    /// One originating turn can outlive its foreground work while marking is in flight.
+    pub(crate) background_compaction_usage: Option<(String, TokenUsage)>,
     /// Estimated tool-definition tokens of the latest sampling request.
     pub(crate) request_tools_tokens: i64,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
@@ -82,6 +84,7 @@ impl SessionState {
             local_compaction: crate::local_compaction::LocalCompactionState::default(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
+            background_compaction_usage: None,
             request_tools_tokens: 0,
             mcp_dependency_prompted: HashSet::new(),
             additional_context: AdditionalContextStore::default(),
@@ -148,6 +151,8 @@ impl SessionState {
         reference_context_item: Option<TurnContextItem>,
         replacement: HistoryReplacement,
     ) {
+        self.local_compaction.reset_window();
+        self.background_compaction_usage = None;
         match replacement {
             HistoryReplacement::Compaction => self.history.replace_compacted(items),
             HistoryReplacement::Reset => self.history.replace_annotated(items),
@@ -174,10 +179,20 @@ impl SessionState {
             .latest_token_usage_record
             .as_ref()
             .filter(|record| record.turn_id == turn_id)
-            .map_or_else(TokenUsage::default, |record| {
-                record.turn_token_usage.clone()
-            });
+            .map(|record| record.turn_token_usage.clone())
+            .or_else(|| {
+                self.background_compaction_usage
+                    .as_ref()
+                    .filter(|(id, _)| id == turn_id)
+                    .map(|(_, usage)| usage.clone())
+            })
+            .unwrap_or_default();
         turn_token_usage.add_assign(usage);
+        if let Some((id, accumulated)) = &mut self.background_compaction_usage
+            && id.as_str() == turn_id
+        {
+            *accumulated = turn_token_usage.clone();
+        }
         let mut thread_token_usage = self
             .latest_token_usage_record
             .as_ref()

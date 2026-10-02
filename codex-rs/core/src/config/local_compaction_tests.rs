@@ -17,12 +17,13 @@ async fn loads_local_compaction_overrides_and_partial_defaults() -> anyhow::Resu
             },
         ),
         (
-            "[local_compaction]\ntrigger_percent = 70\ntarget_percent = 40\nminimum_savings_percent = 10",
+            "[local_compaction]\nreclaim_percent = 20\nmark_after_tokens_percent = 4\nmark_after_records = 16\ncompact_target_percent = 25",
             LocalCompactionConfig {
                 force_local: false,
-                trigger_percent: 70,
-                target_percent: 40,
-                minimum_savings_percent: 10,
+                reclaim_percent: 20,
+                mark_after_tokens_percent: 4,
+                mark_after_records: 16,
+                compact_target_percent: 25,
             },
         ),
     ] {
@@ -41,11 +42,13 @@ async fn loads_local_compaction_overrides_and_partial_defaults() -> anyhow::Resu
 #[tokio::test]
 async fn rejects_invalid_local_compaction_budgets() -> anyhow::Result<()> {
     for text in [
-        "target_percent = 0",
-        "target_percent = 50",
-        "trigger_percent = 101",
-        "minimum_savings_percent = 0",
-        "minimum_savings_percent = 21",
+        "reclaim_percent = 0",
+        "reclaim_percent = 100",
+        "compact_target_percent = 0",
+        "compact_target_percent = 100",
+        "mark_after_tokens_percent = 0",
+        "mark_after_tokens_percent = 100",
+        "mark_after_records = 0",
     ] {
         let home = tempdir()?;
         let result = Config::load_from_base_config_with_overrides(

@@ -63,7 +63,8 @@ fn tier_promotion_keeps_harness_instructions_and_environment_verbatim() {
             _ => 100,
         })
         .collect();
-    let plan = TierPlan::new(&original, 5_000, &costs).expect("older evidence can be promoted");
+    let plan =
+        TierPlan::new(&original, 5_000, 10_000, &costs).expect("older evidence can be promoted");
     assert_eq!(
         &plan.retained_prefix[..instructions.len()],
         instructions.as_slice()
@@ -128,7 +129,7 @@ fn invalid_analysis_is_rejected_as_a_whole() {
 }
 
 #[test]
-fn staged_decisions_preserve_new_outputs_and_invalidate_on_user_direction() {
+fn staged_decisions_preserve_new_outputs_and_user_direction() {
     let source = history();
     let stage = StagedDecisions::parse(source.clone(), &json!({"decisions":[
         {"id":"result_0","action":"drop"},{"id":"result_1","action":"keep"},{"id":"result_2","action":"keep"}
@@ -138,7 +139,9 @@ fn staged_decisions_preserve_new_outputs_and_invalidate_on_user_direction() {
     let replacement = stage.apply(&newer).unwrap();
     assert_eq!(replacement.last(), newer.last());
     newer.push(message("user_2", "user", "Keep all evidence now."));
-    assert!(stage.apply(&newer).is_err());
+    let replacement = stage.apply(&newer).unwrap();
+    assert_eq!(replacement.last(), newer.last());
+    assert_ne!(replacement[2], newer[2]);
 }
 
 #[test]
@@ -164,7 +167,7 @@ fn new_classification_batches_extend_staged_decisions_without_live_edits() {
     .unwrap();
     let additional = StagedDecisions::parse_candidates(source.clone(), &["result_1".to_string()],
         &json!({"decisions":[{"id":"result_1","action":"shorten","text":"Verified relevant evidence."}]}).to_string()).unwrap();
-    stage.merge(additional).unwrap();
+    stage.merge(additional);
     let cleaned = stage.apply(&source).unwrap();
     assert_ne!(cleaned[2], source[2]);
     assert_ne!(cleaned[4], source[4]);
@@ -181,7 +184,7 @@ fn unresolved_group_blocks_promotion_across_its_start() {
 }
 
 #[test]
-fn kept_results_can_be_reassessed_after_append_only_growth() {
+fn decisions_survive_disjoint_cleanup_but_changed_sources_stay_unmarked() {
     let source = history();
     let mut stage = StagedDecisions::parse(
         source.clone(),
@@ -192,38 +195,88 @@ fn kept_results_can_be_reassessed_after_append_only_growth() {
         .to_string(),
     )
     .unwrap();
-    assert_eq!(stage.kept_ids(), vec!["result_0"]);
+    assert!(stage.contains(&source[2]));
     let mut newer = source.clone();
     newer.push(message(
         "assistant_growth",
         "assistant",
         "More completed analysis.",
     ));
-    let reassessed = StagedDecisions::parse_candidates(newer.clone(), &stage.kept_ids(),
-        &json!({"decisions":[{"id":"result_0","action":"shorten","text":"Now only this fact remains relevant"}]}).to_string()).unwrap();
     let first_view = stage.apply(&source).unwrap();
-    stage.merge(reassessed).unwrap();
+    newer[4] = first_view[4].clone();
+    stage.retain_current(&newer);
+    assert!(stage.contains(&newer[2]));
+    assert!(!stage.contains(&newer[4]));
     let next_view = stage.apply(&newer).unwrap();
-    assert_ne!(next_view[2], first_view[2]);
-    assert_eq!(&next_view[3..source.len()], &first_view[3..]);
+    assert_eq!(&next_view[..source.len()], &first_view);
     assert_eq!(next_view.last(), newer.last());
-    assert_eq!(stage.kept_ids(), Vec::<String>::new());
+    assert!(stage.contains(&source[2]));
+    if let ResponseItem::FunctionCallOutput { output, .. } = &mut newer[6].item {
+        output.body = FunctionCallOutputBody::Text("changed source content".to_string());
+    }
+    assert_eq!(stage.apply(&newer).unwrap()[6], newer[6]);
 }
 
 #[test]
-fn budget_includes_fixed_context_and_batches_meaningful_savings() {
+fn optimistic_bound_counts_protected_output_but_excludes_known_keeps_and_calls() {
+    let source = history();
+    let stage = StagedDecisions::parse_candidates(
+        source.clone(),
+        &["result_0".to_string()],
+        &json!({"decisions":[{"id":"result_0","action":"keep"}]}).to_string(),
+    )
+    .unwrap();
+    let optimistic = stage.optimistic_replacement(&source);
+    assert_eq!(&optimistic[..3], &source[..3]);
+    for index in [3, 5, 7, 9] {
+        assert_eq!(optimistic[index], source[index]);
+    }
+    assert_ne!(optimistic[8], source[8]);
+    assert!(!eligible_results(&source).contains(&"result_3".to_string()));
+}
+
+#[test]
+fn completed_batch_merges_after_a_disjoint_cleanup_and_new_input() {
+    let source = history();
+    let mut stage = StagedDecisions::parse_candidates(
+        source.clone(),
+        &["result_0".to_string()],
+        &json!({"decisions":[{"id":"result_0","action":"drop"}]}).to_string(),
+    )
+    .unwrap();
+    let inflight = StagedDecisions::parse_candidates(
+        source.clone(),
+        &["result_1".to_string()],
+        &json!({"decisions":[{"id":"result_1","action":"drop"}]}).to_string(),
+    )
+    .unwrap();
+    let mut current = stage.apply(&source).unwrap();
+    current.push(message("new_user", "user", "Continue"));
+    stage.merge(inflight);
+    stage.retain_current(&current);
+    let result = stage.apply(&current).unwrap();
+    assert_eq!(result[2], current[2]);
+    assert_ne!(result[4], current[4]);
+    assert_eq!(result.last(), current.last());
+}
+
+#[test]
+fn cleanup_uses_window_percentage_points_and_optimistic_headroom() {
     let budget = Budget {
         window_tokens: 20_000,
         fixed_tokens: 4_000,
-        trigger_percent: 50,
-        target_percent: 30,
-        minimum_savings_percent: 5,
+        reclaim_percent: 30,
+        compact_target_percent: 30,
     };
-    assert!(budget.should_analyze(6_000));
-    assert!(!budget.should_analyze(5_999));
     assert_eq!(budget.history_target(), 2_000);
-    assert!(budget.useful(6_000, 2_000));
-    assert!(!budget.useful(6_000, 5_001));
+    assert_eq!(budget.required_savings(), 6_000);
+    // Fixed 4k + history6k=50%; a drop to total30% only saves20 percentage points.
+    assert!(!budget.useful(6_000, 2_000));
+    // Fixed4k + history10k=70%; total40% saves the required30 percentage points.
+    assert!(budget.useful(10_000, 4_000));
+    assert!(budget.can_reach(2_000, 2_000, 14_000, 18_000));
+    assert!(!budget.can_reach(1_000, 2_000, 16_000, 18_000));
+    assert!(budget.can_reach(1_000, 2_000, 16_000, 20_000));
 }
 
 #[test]
@@ -235,7 +288,7 @@ fn repeated_tiers_merge_old_ranges_and_bound_the_ledger() {
         let len = costs.len();
         costs[len - 3..].fill(20);
         costs[0] = 20;
-        let plan = TierPlan::new(&source, 2_000, &costs).unwrap();
+        let plan = TierPlan::new(&source, 2_000, 10_000, &costs).unwrap();
         let fragments = plan.parse(&json!({
             "l2": if plan.l2.is_some() { "Older dialogue, with failures still unverified." } else { "" },
             "l3": if plan.l3.is_some() { "Prior investigation overview; exact evidence remains archived." } else { "" },

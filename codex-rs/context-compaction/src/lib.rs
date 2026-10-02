@@ -30,30 +30,44 @@ pub enum CompactionError {
 pub struct Budget {
     pub window_tokens: usize,
     pub fixed_tokens: usize,
-    pub trigger_percent: usize,
-    pub target_percent: usize,
-    pub minimum_savings_percent: usize,
+    pub reclaim_percent: usize,
+    pub compact_target_percent: usize,
 }
 
 impl Budget {
-    pub fn should_analyze(self, history_tokens: usize) -> bool {
-        self.fixed_tokens.saturating_add(history_tokens)
-            >= self.window_tokens.saturating_mul(self.trigger_percent) / 100
+    pub fn required_savings(self) -> usize {
+        self.window_tokens
+            .saturating_mul(self.reclaim_percent)
+            .div_ceil(100)
+            .max(1)
     }
 
     pub fn history_target(self) -> usize {
-        (self.window_tokens.saturating_mul(self.target_percent) / 100)
+        (self
+            .window_tokens
+            .saturating_mul(self.compact_target_percent)
+            / 100)
             .saturating_sub(self.fixed_tokens)
     }
 
     pub fn useful(self, before_tokens: usize, after_tokens: usize) -> bool {
         let saved = before_tokens.saturating_sub(after_tokens);
-        saved > 0
-            && saved
-                >= self
-                    .window_tokens
-                    .saturating_mul(self.minimum_savings_percent)
-                    / 100
+        saved >= self.required_savings()
+    }
+
+    /// An optimistic bound: all remaining growth could be removable tool output.
+    /// Callers include protected-but-unmarked outputs that can become eligible later.
+    pub fn can_reach(
+        self,
+        pending_savings: usize,
+        unmarked_upper_bound: usize,
+        current_total: usize,
+        hard_limit: usize,
+    ) -> bool {
+        pending_savings
+            .saturating_add(unmarked_upper_bound)
+            .saturating_add(hard_limit.saturating_sub(current_total))
+            >= self.required_savings()
     }
 }
 
