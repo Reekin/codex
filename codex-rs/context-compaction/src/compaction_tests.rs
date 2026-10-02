@@ -53,6 +53,7 @@ fn tier_promotion_keeps_harness_instructions_and_environment_verbatim() {
         .collect();
     let mut original = instructions.clone();
     original.extend(history());
+    original.insert(3, item(json!({"type":"reasoning","id":"hidden_thought","summary":[],"encrypted_content":"opaque"})));
     let costs: Vec<_> = original
         .iter()
         .map(|entry| match &entry.item {
@@ -68,6 +69,13 @@ fn tier_promotion_keeps_harness_instructions_and_environment_verbatim() {
         instructions.as_slice()
     );
     assert!(plan.max_fragment_bytes > 0);
+    assert!(
+        plan.l2
+            .iter()
+            .chain(plan.l3.iter())
+            .all(|range| range.first_item_id != "hidden_thought"
+                && range.last_item_id != "hidden_thought")
+    );
 }
 
 #[test]

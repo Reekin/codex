@@ -144,7 +144,27 @@ async fn keep_shorten_drop_preserves_dialogue_pairs_and_recalls_originals() -> R
     let archive = RecallArchive::load(&path, Some(test.home.path())).await?;
     let decisions = model.decisions();
     assert_eq!(decisions.len(), 4);
+    let classifier = bodies
+        .iter()
+        .find(|body| analysis_payload(body, CLASSIFY).is_some())
+        .expect("classification request");
+    let visible_ids = classifier["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|item| {
+            let text = item["output"].as_str()?;
+            let labelled = text.strip_prefix("LOCAL_COMPACTION_SOURCE\n")?;
+            let header: Value = serde_json::from_str(labelled.split_once('\n')?.0).unwrap();
+            Some(header["item_id"].clone())
+        })
+        .collect::<Vec<_>>();
+    assert!(!installed.to_string().contains("LOCAL_COMPACTION_SOURCE"));
     for decision in &decisions {
+        assert!(
+            visible_ids.contains(&decision["id"]),
+            "model must see a label on the actual evidence"
+        );
         let query = serde_json::from_value(
             json!({"action":"read_item","item_id":decision["id"],"start_char":0,"max_chars":500}),
         )?;

@@ -47,6 +47,16 @@ class Model(http.server.ThreadingHTTPServer):
         self.requests.append(body)
         payload = analysis_payload(body, "LOCAL_COMPACTION_CLASSIFY")
         if payload is not None:
+            visible_ids = set()
+            for item in body.get("input", []):
+                text = item.get("output")
+                if isinstance(text, str) and text.startswith(
+                    "LOCAL_COMPACTION_SOURCE\n"
+                ):
+                    visible_ids.add(json.loads(text.split("\n", 2)[1])["item_id"])
+            assert set(payload["eligible_ids"]).issubset(visible_ids), (
+                "tool IDs must label model-visible evidence"
+            )
             decisions = []
             for index, item_id in enumerate(payload["eligible_ids"]):
                 action = ["keep", "shorten", "drop"][index % 3]

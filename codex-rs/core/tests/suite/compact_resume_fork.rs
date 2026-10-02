@@ -20,9 +20,9 @@ async fn snapshot_rollback_followup_turn_trims_context_updates() -> Result<()> {
     use codex_protocol::config_types::Settings;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ThreadSettingsOverrides;
+    use core_test_support::context_snapshot;
     use core_test_support::context_snapshot::ContextSnapshotOptions;
     use core_test_support::context_snapshot::ContextSnapshotRenderMode;
-    use core_test_support::context_snapshot;
     use core_test_support::responses::ev_assistant_message;
     use core_test_support::responses::ev_completed;
     use core_test_support::responses::ev_response_created;
