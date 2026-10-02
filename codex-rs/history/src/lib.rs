@@ -46,6 +46,9 @@ pub struct ResponseItemEnvelope {
 ///
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 pub struct CodexHarnessMetadata {
+    /// Durable source range of a locally compacted result or chronological tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_compaction: Option<LocalCompactionSource>,
     /// Whether a developer message was supplied by an app-server client.
     #[serde(default)]
     pub client_authored: bool,
@@ -70,6 +73,23 @@ pub struct CodexHarnessMetadata {
     /// Copied parent context stays model-visible but must not become child-local authorization.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inherited_user_message: bool,
+}
+
+/// Local archive addresses survive replacement views and repeated tier promotion.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+pub struct LocalCompactionSource {
+    pub first_item_id: String,
+    pub last_item_id: String,
+    pub kind: LocalCompactionKind,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalCompactionKind {
+    ToolResult,
+    CondensedDialogue,
+    OldestOverview,
+    ConstraintsLedger,
 }
 
 impl ResponseItemEnvelope {

@@ -49,6 +49,7 @@ codex-execpolicy = { workspace = true }
 codex-git-utils = { workspace = true }
 codex-guardian-context = { workspace = true }
 codex-history = { workspace = true }
+codex-context-compaction = { workspace = true }
 codex-hooks = { workspace = true }
 codex-http-client = { workspace = true }
 codex-install-context = { workspace = true }
