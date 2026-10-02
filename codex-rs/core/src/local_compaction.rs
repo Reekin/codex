@@ -281,12 +281,11 @@ async fn prepared_state(
     let mut state = sess.get_local_compaction_state().await;
     if !state.restored {
         state.restored = true;
-        if let Some(path) = marks::path(sess, &context.turn.config) {
-            let history = sess.clone_history().await;
-            let mut staged = marks::load(path, history.annotated_items()).await;
-            staged.merge(std::mem::take(&mut state.staged));
-            state.staged = staged;
-        }
+        let history = sess.clone_history().await;
+        let mut staged =
+            marks::restore(sess, &context.turn.config, history.annotated_items()).await;
+        staged.merge(std::mem::take(&mut state.staged));
+        state.staged = staged;
     }
     let completed = state.background.as_ref().and_then(|task| {
         task.completed

@@ -13,6 +13,7 @@ use crate::local_compaction::LocalCompactionState;
 use codex_history::CompactedItem;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RolloutItem;
+use codex_protocol::ThreadId;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -38,6 +39,15 @@ impl Session {
     pub(crate) async fn lock_local_compaction_boundary(&self) -> tokio::sync::OwnedMutexGuard<()> {
         let boundary = self.state.lock().await.local_compaction.boundary();
         boundary.lock_owned().await
+    }
+
+    /// The thread this one was forked from, whose validated tool marks it may inherit.
+    pub(crate) async fn forked_from_thread_id(&self) -> Option<ThreadId> {
+        self.state
+            .lock()
+            .await
+            .session_configuration
+            .forked_from_thread_id
     }
 
     /// Out-of-turn cleanup reports against the running turn when there is one.

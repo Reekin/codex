@@ -1,14 +1,19 @@
 //! Durable validated tool marks.
 //!
 //! Each validated batch appends one JSON line. Restoring replays the latest decision per record
-//! and keeps only records that are still present with unchanged content.
+//! and keeps only records that are still present with unchanged content. A forked thread also
+//! reads its parent's marks and copies the still-valid ones into its own file, so later resumes
+//! and further forks do not depend on the parent.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 
 use codex_context_compaction::Decision;
 use codex_context_compaction::StagedDecisions;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::ThreadId;
 use serde::Deserialize;
 use serde::Serialize;
 use sha1::Digest;
@@ -27,13 +32,15 @@ struct Mark {
 /// Only threads with a rollout can resume; ephemeral threads keep marks in memory.
 pub(super) fn path(sess: &Session, config: &Config) -> Option<PathBuf> {
     sess.live_thread()?;
-    Some(
-        config
-            .codex_home
-            .as_path()
-            .join("local_compaction")
-            .join(format!("{}.jsonl", sess.thread_id)),
-    )
+    Some(thread_path(config, sess.thread_id))
+}
+
+fn thread_path(config: &Config, thread_id: ThreadId) -> PathBuf {
+    config
+        .codex_home
+        .as_path()
+        .join("local_compaction")
+        .join(format!("{thread_id}.jsonl"))
 }
 
 pub(super) async fn append(path: PathBuf, decisions: &StagedDecisions) {
@@ -67,28 +74,29 @@ pub(super) async fn append(path: PathBuf, decisions: &StagedDecisions) {
     }
 }
 
-pub(super) async fn load(path: PathBuf, current: &[ResponseItemEnvelope]) -> StagedDecisions {
-    let text = match tokio::fs::read_to_string(&path).await {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return StagedDecisions::default();
-        }
-        Err(error) => {
-            tracing::warn!(%error, path = %path.display(), "cannot read local tool marks");
-            return StagedDecisions::default();
-        }
+/// Restores this thread's marks, plus still-valid marks inherited from the thread it forked from.
+pub(super) async fn restore(
+    sess: &Session,
+    config: &Config,
+    current: &[ResponseItemEnvelope],
+) -> StagedDecisions {
+    let Some(own) = path(sess, config) else {
+        return StagedDecisions::default();
     };
     let mut latest = HashMap::new();
-    // A torn final line from an interrupted append loses only that batch.
-    for marks in text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Vec<Mark>>(line).ok())
-    {
-        for mark in marks {
+    let mut inherited = HashSet::new();
+    if let Some(parent) = sess.forked_from_thread_id().await {
+        for mark in read(&thread_path(config, parent)).await {
+            inherited.insert(mark.decision.id().to_string());
             latest.insert(mark.decision.id().to_string(), mark);
         }
     }
-    StagedDecisions::from_marks(
+    // The thread's own decisions are newer than anything it inherited.
+    for mark in read(&own).await {
+        inherited.remove(mark.decision.id());
+        latest.insert(mark.decision.id().to_string(), mark);
+    }
+    let restored = StagedDecisions::from_marks(
         current
             .iter()
             .filter_map(|item| {
@@ -96,7 +104,32 @@ pub(super) async fn load(path: PathBuf, current: &[ResponseItemEnvelope]) -> Sta
                 (mark.fingerprint == fingerprint(item)).then(|| (item.clone(), mark.decision))
             })
             .collect(),
-    )
+    );
+    let adopted = StagedDecisions::from_marks(
+        restored
+            .marks()
+            .filter(|(_, decision)| inherited.contains(decision.id()))
+            .map(|(item, decision)| (item.clone(), decision.clone()))
+            .collect(),
+    );
+    append(own, &adopted).await;
+    restored
+}
+
+async fn read(path: &Path) -> Vec<Mark> {
+    let text = match tokio::fs::read_to_string(path).await {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(error) => {
+            tracing::warn!(%error, path = %path.display(), "cannot read local tool marks");
+            return Vec::new();
+        }
+    };
+    // A torn final line from an interrupted append loses only that batch.
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Vec<Mark>>(line).ok())
+        .flatten()
+        .collect()
 }
 
 fn fingerprint(item: &ResponseItemEnvelope) -> String {

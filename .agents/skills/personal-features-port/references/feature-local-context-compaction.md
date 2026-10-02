@@ -23,8 +23,9 @@ keep original local records queryable without a hosted notes service.
   input, and disjoint tool cleanup do not invalidate a batch. Only unchanged, still-present records
   can receive a result. Invalid JSON, duplicate/foreign IDs, and oversized replacements cannot
   modify the live view. Failed marking is nonfatal and cannot cause a tight retry loop. Validated
-  results are persisted immediately, before any cleanup; resume restores those whose records are
-  still present and unchanged, so they are neither lost nor sent for marking again.
+  results are persisted immediately, before any cleanup; resume and fork restore those whose records
+  are still present and unchanged, so they are neither lost nor sent for marking again. A fork keeps
+  its own copy of inherited marks and never writes to its parent's.
 - **REQ-3**: At safe request boundaries, apply completed marks when they release at least the
   configured share of the whole usable window (default 30 percentage points). Thus 50% to 30% is
   insufficient and 70% to 40% qualifies. No total-occupancy target or 50% trigger governs tool cleanup.
@@ -97,9 +98,9 @@ keep original local records queryable without a hosted notes service.
    rewrite, normal progress, independent usage, and no stale result install (REQ-1,2,5,7).
 6. Resume/fork after cleanup and read originals with model tools and CLI. Compare forced-local and
    native-remote routes, and round-trip configuration (REQ-8,9).
-7. Validate marks below the savings requirement, restart, and verify identical status without new
-   marking requests. Apply manually through the app-server methods, including on the packaged
-   binary; verify the release, the next request's view, and a no-op second apply (REQ-2,10).
+7. Validate marks below the savings requirement, restart and fork, and verify identical status
+   without new marking requests. Apply manually through the app-server methods, including on the
+   packaged binary; verify the release, the next request's view, and a no-op second apply (REQ-2,10).
 
 ## Integration Contract
 
