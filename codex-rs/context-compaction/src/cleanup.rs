@@ -26,7 +26,7 @@ pub enum Decision {
 }
 
 impl Decision {
-    fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         match self {
             Self::Keep { id } | Self::Shorten { id, .. } | Self::Drop { id } => id,
         }
@@ -75,6 +75,26 @@ impl StagedDecisions {
     /// Only unchanged records count as marked; unrelated edits do not invalidate decisions.
     pub fn contains(&self, item: &ResponseItemEnvelope) -> bool {
         self.source.iter().any(|source| source.item == item.item)
+    }
+
+    /// Validated decisions paired with the exact records they were made for.
+    pub fn marks(&self) -> impl Iterator<Item = (&ResponseItemEnvelope, &Decision)> {
+        self.decisions.iter().filter_map(|decision| {
+            self.source
+                .iter()
+                .find(|item| {
+                    item.item
+                        .id()
+                        .is_some_and(|id| id.as_str() == decision.id())
+                })
+                .map(|item| (item, decision))
+        })
+    }
+
+    /// Rebuilds durable decisions for records the caller verified as unchanged.
+    pub fn from_marks(marks: Vec<(ResponseItemEnvelope, Decision)>) -> Self {
+        let (source, decisions) = marks.into_iter().unzip();
+        Self { source, decisions }
     }
 
     /// Optimistic removable view includes completed results that can age out of protection.

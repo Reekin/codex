@@ -213,5 +213,7 @@ pub use exec_policy::load_exec_policy;
 pub use installation_id::resolve_installation_id;
 pub mod compact;
 mod local_compaction;
+pub use local_compaction::ToolCleanupOutcome;
+pub use local_compaction::ToolCleanupStatus;
 mod memory_usage;
 pub mod otel_init;

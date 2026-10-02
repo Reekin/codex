@@ -1,6 +1,13 @@
 //! Private background marking and atomic installation at ordinary sampling boundaries.
 
+mod marks;
 mod request;
+mod tool_cleanup;
+
+pub use tool_cleanup::ToolCleanupOutcome;
+pub use tool_cleanup::ToolCleanupStatus;
+pub(crate) use tool_cleanup::apply_tool_cleanup;
+pub(crate) use tool_cleanup::tool_cleanup_status;
 
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::InitialContextInjection;
@@ -12,6 +19,7 @@ use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
+use crate::session::turn_context::TurnContext;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
@@ -21,8 +29,10 @@ use codex_context_compaction::StagedDecisions;
 use codex_context_compaction::TierPlan;
 use codex_context_compaction::eligible_results;
 use codex_history::ResponseItemEnvelope;
+use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::user_input::UserInput;
@@ -42,8 +52,12 @@ pub(crate) enum AnalysisKind {
 pub(crate) struct LocalCompactionState {
     pub(crate) generation: u64,
     staged: StagedDecisions,
+    /// Durable marks are replayed once per full window, after resume or full compaction.
+    restored: bool,
     background: Option<Arc<BackgroundMarking>>,
     retry_after: Option<Instant>,
+    /// Serializes automatic and manual tool cleanup; survives full-window resets.
+    boundary: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug)]
@@ -75,65 +89,41 @@ impl LocalCompactionState {
         }
         *self = Self {
             generation: self.generation.wrapping_add(1),
+            boundary: Arc::clone(&self.boundary),
             ..Self::default()
         };
     }
+
+    pub(crate) fn boundary(&self) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(&self.boundary)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum CleanupTrigger {
+    Savings(Budget),
+    Manual,
+}
+
+/// Whether tool marking and full compaction use the local pipeline for this model.
+pub(crate) fn uses_local_route(turn: &TurnContext, model_info: &ModelInfo) -> bool {
+    turn.config.local_compaction.force_local
+        || crate::compaction_policy::remote_compaction_support(
+            turn.provider.capabilities().remote_compaction,
+            model_info,
+        ) == RemoteCompactionSupport::Unsupported
 }
 
 pub(crate) async fn maybe_clean_history(
     sess: &Arc<Session>,
     step: &Arc<StepContext>,
 ) -> CodexResult<bool> {
+    let _boundary = sess.lock_local_compaction_boundary().await;
     let context = LocalCompactionContext::from_step(Arc::clone(step));
     let budget = budget(sess, &context).await;
-    let mut state = sess.get_local_compaction_state().await;
-    let completed = state.background.as_ref().and_then(|task| {
-        task.completed
-            .lock()
-            .expect("marking result lock")
-            .value
-            .take()
-    });
-    if let Some(completed) = completed {
-        state.background = None;
-        match completed {
-            Ok(decisions) => {
-                state.staged.merge(decisions);
-            }
-            Err(error) => {
-                tracing::warn!(%error, "background local marking failed");
-                state.retry_after = Some(Instant::now() + Duration::from_secs(60));
-            }
-        }
-    }
-    // No model await between this snapshot and the persistence CAS.
-    let history = sess.clone_history().await;
-    let source = history.annotated_items();
-    state.staged.retain_current(source);
-    let before_tokens = history_tokens(source);
-    let replacement = state.staged.apply(source).map_err(invalid)?;
-    let after_tokens = history_tokens(&replacement);
-    let mut installed = false;
-    if budget.useful(before_tokens, after_tokens) {
-        installed = sess
-            .install_local_compaction(
-                source,
-                history
-                    .conversation_history_snapshot()
-                    .user_message_revision(),
-                state.generation,
-                replacement,
-                sess.reference_context_item().await,
-                None,
-                checkpoint(&context, None),
-                // Tool cleanup has a savings threshold, not a target occupancy.
-                usize::MAX,
-            )
-            .await?;
-        if installed {
-            sess.recompute_token_usage(&context.turn).await;
-        }
-    }
+    let mut state = prepared_state(sess, &context).await;
+    let installed =
+        install_marks(sess, &context, &mut state, CleanupTrigger::Savings(budget)).await? > 0;
     let history = sess.clone_history().await;
     let source = history.annotated_items();
     state.staged.retain_current(source);
@@ -243,7 +233,15 @@ pub(crate) async fn maybe_clean_history(
                         )
                         .await?;
                     }
-                    StagedDecisions::parse_candidates(source, &ids, &response.json).map_err(invalid)
+                    let decisions = StagedDecisions::parse_candidates(source, &ids, &response.json)
+                        .map_err(invalid)?;
+                    if let Some(path) = weak
+                        .upgrade()
+                        .and_then(|sess| marks::path(&sess, &context.turn.config))
+                    {
+                        marks::append(path, &decisions).await;
+                    }
+                    Ok(decisions)
                 }
                 .await;
                 *result_slot.lock().expect("marking result lock") = MarkingResult {
@@ -266,6 +264,84 @@ pub(crate) async fn maybe_clean_history(
     // A concurrent full-window reset owns the new generation and discards this batch.
     sess.set_local_compaction_state(state).await;
     Ok(installed)
+}
+
+/// Restores durable marks and takes a finished background batch. Callers hold the boundary lock.
+async fn prepared_state(
+    sess: &Arc<Session>,
+    context: &LocalCompactionContext,
+) -> LocalCompactionState {
+    let mut state = sess.get_local_compaction_state().await;
+    if !state.restored {
+        state.restored = true;
+        if let Some(path) = marks::path(sess, &context.turn.config) {
+            let history = sess.clone_history().await;
+            let mut staged = marks::load(path, history.annotated_items()).await;
+            staged.merge(std::mem::take(&mut state.staged));
+            state.staged = staged;
+        }
+    }
+    let completed = state.background.as_ref().and_then(|task| {
+        task.completed
+            .lock()
+            .expect("marking result lock")
+            .value
+            .take()
+    });
+    if let Some(completed) = completed {
+        state.background = None;
+        match completed {
+            Ok(decisions) => {
+                state.staged.merge(decisions);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "background local marking failed");
+                state.retry_after = Some(Instant::now() + Duration::from_secs(60));
+            }
+        }
+    }
+    state
+}
+
+/// Installs the marked view and returns the released history tokens, or zero if unchanged.
+async fn install_marks(
+    sess: &Arc<Session>,
+    context: &LocalCompactionContext,
+    state: &mut LocalCompactionState,
+    trigger: CleanupTrigger,
+) -> CodexResult<usize> {
+    // No model await between this snapshot and the persistence CAS.
+    let history = sess.clone_history().await;
+    let source = history.annotated_items();
+    state.staged.retain_current(source);
+    let before_tokens = history_tokens(source);
+    let replacement = state.staged.apply(source).map_err(invalid)?;
+    let after_tokens = history_tokens(&replacement);
+    let wanted = match trigger {
+        CleanupTrigger::Savings(budget) => budget.useful(before_tokens, after_tokens),
+        CleanupTrigger::Manual => after_tokens < before_tokens,
+    };
+    if !wanted
+        || !sess
+            .install_local_compaction(
+                source,
+                history
+                    .conversation_history_snapshot()
+                    .user_message_revision(),
+                state.generation,
+                replacement,
+                sess.reference_context_item().await,
+                None,
+                checkpoint(context, None),
+                // Tool cleanup has a savings threshold, not a target occupancy.
+                usize::MAX,
+            )
+            .await?
+    {
+        return Ok(0);
+    }
+    sess.recompute_token_usage(&context.turn).await;
+    Ok(before_tokens - after_tokens)
 }
 
 pub(crate) async fn run_pipeline(

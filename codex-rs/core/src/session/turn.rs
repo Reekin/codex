@@ -423,14 +423,12 @@ pub(crate) async fn run_turn(
 
             // All prior tool results and newly accepted user direction are recorded before
             // staging or installing a local view for the next normal model request.
-            if (turn_context.config.local_compaction.force_local
-                || crate::compaction_policy::remote_compaction_support(
-                    turn_context.provider.capabilities().remote_compaction,
-                    &step_context.settings.model_info,
-                ) == RemoteCompactionSupport::Unsupported)
-                && crate::local_compaction::maybe_clean_history(&sess, &step_context)
-                    .or_cancel(&cancellation_token)
-                    .await??
+            if crate::local_compaction::uses_local_route(
+                &turn_context,
+                &step_context.settings.model_info,
+            ) && crate::local_compaction::maybe_clean_history(&sess, &step_context)
+                .or_cancel(&cancellation_token)
+                .await??
                 && run_pending_session_start_hooks(&sess, &turn_context).await
             {
                 return Err(CodexErr::TurnAborted);
@@ -527,11 +525,10 @@ pub(crate) async fn run_turn(
                     );
                 }
 
-                let local_route = turn_context.config.local_compaction.force_local
-                    || crate::compaction_policy::remote_compaction_support(
-                        turn_context.provider.capabilities().remote_compaction,
-                        &step_context.settings.model_info,
-                    ) == RemoteCompactionSupport::Unsupported;
+                let local_route = crate::local_compaction::uses_local_route(
+                    &turn_context,
+                    &step_context.settings.model_info,
+                );
                 let should_roll_over = needs_follow_up
                     && (token_limit_reached
                         || (!local_route && sess.take_new_context_window_request().await));
@@ -1307,11 +1304,8 @@ async fn run_auto_compact(
     let turn_context = &step_context.turn;
     let _profile_guard = turn_context.turn_timing_state.begin_compaction();
     sess.cancel_local_compaction().await;
-    let local_route = turn_context.config.local_compaction.force_local
-        || crate::compaction_policy::remote_compaction_support(
-            turn_context.provider.capabilities().remote_compaction,
-            &step_context.settings.model_info,
-        ) == RemoteCompactionSupport::Unsupported;
+    let local_route =
+        crate::local_compaction::uses_local_route(turn_context, &step_context.settings.model_info);
     if !local_route && turn_context.config.features.enabled(Feature::TokenBudget) {
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.

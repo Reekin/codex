@@ -34,6 +34,20 @@ impl Session {
         }
     }
 
+    /// Held across a cleanup cycle so automatic and manual cleanup cannot overwrite each other.
+    pub(crate) async fn lock_local_compaction_boundary(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        let boundary = self.state.lock().await.local_compaction.boundary();
+        boundary.lock_owned().await
+    }
+
+    /// Out-of-turn cleanup reports against the running turn when there is one.
+    pub(crate) async fn local_compaction_turn(self: &Arc<Self>) -> Arc<TurnContext> {
+        match self.active_turn_context_and_cancellation_token().await {
+            Some((turn, _)) => turn,
+            None => self.new_default_turn().await,
+        }
+    }
+
     pub(crate) async fn cancel_local_compaction(&self) {
         let mut state = self.state.lock().await;
         state.local_compaction.reset_window();
