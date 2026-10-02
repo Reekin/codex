@@ -357,6 +357,8 @@ def run(binary):
                 )
                 == 1
             ), "multiple marking jobs ran concurrently"
+            held = rpc.request("thread/toolCleanup/read", {"threadId": thread["id"]})
+            assert held["status"]["enabled"] and held["status"]["marking"], held
             assert not any(
                 analysis_payload(body, "LOCAL_COMPACTION_SUMMARIZE") is not None
                 for body in model.requests
@@ -383,28 +385,37 @@ def run(binary):
                     foreground_usage,
                     ready,
                 )
-            # Drive actual sampling boundaries until the validated replacement is visible.
-            # A sent HTTP response alone does not prove the client consumed its final event.
-            for _ in range(32):
-                rpc.turn(thread["id"], "Continue with the validated tool evidence.")
-                ordinary = [
-                    body
-                    for body in model.requests
-                    if analysis_payload(body, "LOCAL_COMPACTION_CLASSIFY") is None
-                    and analysis_payload(body, "LOCAL_COMPACTION_SUMMARIZE") is None
-                ]
-                if any(
-                    "recall_read_item" in str(item.get("output", ""))
-                    for item in ordinary[-1].get("input", [])
-                    if item.get("type") == "function_call_output"
-                ):
-                    break
-            else:
-                raise AssertionError(
-                    "completed marking never installed at sampling boundaries"
-                )
+            # No turn runs between the ready barrier and these calls, so the manual
+            # request, not a sampling boundary, installs the validated marks.
+            marked = rpc.request("thread/toolCleanup/read", {"threadId": thread["id"]})
+            marked = marked["status"]
+            assert not marked["marking"] and marked["pendingSavingsTokens"] > 0, marked
+            applied = rpc.request(
+                "thread/toolCleanup/apply", {"threadId": thread["id"]}
+            )
+            assert applied["releasedTokens"] == marked["pendingSavingsTokens"], applied
+            assert applied["status"]["pendingSavingsTokens"] == 0, applied
+            rpc.turn(thread["id"], "Continue with the cleaned tool evidence.")
+            ordinary = [
+                body
+                for body in model.requests
+                if analysis_payload(body, "LOCAL_COMPACTION_CLASSIFY") is None
+                and analysis_payload(body, "LOCAL_COMPACTION_SUMMARIZE") is None
+            ]
+            assert any(
+                "recall_read_item" in str(item.get("output", ""))
+                for item in ordinary[-1].get("input", [])
+                if item.get("type") == "function_call_output"
+            ), "manual tool cleanup was not visible to the next request"
             rpc.close()
             rpc = None
+            marks = root / "home" / "local_compaction" / f"{thread['id']}.jsonl"
+            persisted = sorted(
+                mark["decision"]["id"]
+                for line in marks.read_text(encoding="utf-8").splitlines()
+                for mark in json.loads(line)
+            )
+            assert persisted == sorted(d["id"] for d in model.decisions), persisted
             rollouts = list((root / "home" / "sessions").rglob("rollout-*.jsonl"))
             assert len(rollouts) == 1, rollouts
             records = [
@@ -412,7 +423,7 @@ def run(binary):
                 for line in rollouts[0].read_text(encoding="utf-8").splitlines()
             ]
             compacted = [r["payload"] for r in records if r["type"] == "compacted"]
-            assert compacted, "automatic compaction did not install a checkpoint"
+            assert compacted, "tool cleanup did not install a checkpoint"
             assert model.decisions, "no tool classification request observed"
             original = next(
                 r["payload"]
@@ -445,6 +456,8 @@ def run(binary):
             model.phase = "recall"
             rpc = Rpc(binary, root, model)
             rpc.request("thread/resume", {"threadId": thread["id"]})
+            resumed = rpc.request("thread/toolCleanup/read", {"threadId": thread["id"]})
+            assert resumed["status"]["pendingSavingsTokens"] == 0, resumed
             rpc.turn(
                 thread["id"],
                 "Read the original archived evidence using local recall, then finish.",
@@ -468,6 +481,8 @@ def run(binary):
                 "model_recall_after_resume": True,
                 "foreground_completed_while_marking_held": True,
                 "background_billing_preserves_foreground_occupancy": True,
+                "manual_tool_cleanup_rpc": True,
+                "marks_persisted": True,
             }
         except Exception:
             print(
