@@ -22,7 +22,9 @@ keep original local records queryable without a hosted notes service.
 - **REQ-2**: Results are stored by stable record ID and original content. Appended messages, new user
   input, and disjoint tool cleanup do not invalidate a batch. Only unchanged, still-present records
   can receive a result. Invalid JSON, duplicate/foreign IDs, and oversized replacements cannot
-  modify the live view. Failed marking is nonfatal and cannot cause a tight retry loop.
+  modify the live view. Failed marking is nonfatal and cannot cause a tight retry loop. Validated
+  results are persisted immediately, before any cleanup; resume restores those whose records are
+  still present and unchanged, so they are neither lost nor sent for marking again.
 - **REQ-3**: At safe request boundaries, apply completed marks when they release at least the
   configured share of the whole usable window (default 30 percentage points). Thus 50% to 30% is
   insufficient and 70% to 40% qualifies. No total-occupancy target or 50% trigger governs tool cleanup.
@@ -55,6 +57,12 @@ keep original local records queryable without a hosted notes service.
   this pipeline and bypass hosted-notes rollover. Configuration separately controls marking batch
   size, reclaim percentage, and preferred full-compaction occupancy. Obsolete occupancy-trigger and
   minimum-savings options have no fallback path. Custom guidance supplements the structured protocol.
+- **REQ-10**: App-server clients can read, for a loaded thread, whether marking runs on its current
+  route, whether a batch is in flight, the estimated release of all current validated marks, and the
+  automatic cleanup requirement. Clients can request immediate tool cleanup that applies every
+  validated mark regardless of that requirement. It does not await in-flight marking, send model
+  requests, or start full compaction, and it reports the estimated release (zero when nothing
+  changes) together with the refreshed status.
 
 ## Portability Constraints
 
@@ -72,6 +80,7 @@ keep original local records queryable without a hosted notes service.
 - Model transport and separate usage accounting.
 - Original automatic/manual compaction dispatch and persisted history installation.
 - Local archive tools, CLI, configuration, and resume.
+- Durable mark storage and the app-server status/cleanup methods.
 
 ## P0 Acceptance
 
@@ -88,6 +97,9 @@ keep original local records queryable without a hosted notes service.
    rewrite, normal progress, independent usage, and no stale result install (REQ-1,2,5,7).
 6. Resume/fork after cleanup and read originals with model tools and CLI. Compare forced-local and
    native-remote routes, and round-trip configuration (REQ-8,9).
+7. Validate marks below the savings requirement, restart, and verify identical status without new
+   marking requests. Apply manually through app-server and the packaged CLI; verify the release,
+   the next request's view, and a no-op second apply (REQ-2,10).
 
 ## Integration Contract
 
