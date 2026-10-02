@@ -5240,6 +5240,28 @@
       ],
       "type": "object"
     },
+    "ThreadToolCleanupApplyParams": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadToolCleanupReadParams": {
+      "properties": {
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadTurnsListParams": {
       "properties": {
         "cursor": {
@@ -6473,6 +6495,56 @@
         "params"
       ],
       "title": "Thread/tokenUsage/readRequest",
+      "type": "object"
+    },
+    {
+      "description": "Read validated tool-result marks against the automatic cleanup requirement.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/toolCleanup/read"
+          ],
+          "title": "Thread/toolCleanup/readRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadToolCleanupReadParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/toolCleanup/readRequest",
+      "type": "object"
+    },
+    {
+      "description": "Apply every validated tool-result mark now, ignoring the automatic savings requirement.",
+      "properties": {
+        "id": {
+          "$ref": "#/definitions/RequestId"
+        },
+        "method": {
+          "enum": [
+            "thread/toolCleanup/apply"
+          ],
+          "title": "Thread/toolCleanup/applyRequestMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadToolCleanupApplyParams"
+        }
+      },
+      "required": [
+        "id",
+        "method",
+        "params"
+      ],
+      "title": "Thread/toolCleanup/applyRequest",
       "type": "object"
     },
     {

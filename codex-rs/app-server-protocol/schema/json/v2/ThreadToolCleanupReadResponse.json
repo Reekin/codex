@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ThreadToolCleanupStatus": {
+      "description": "Tool-result cleanup progress for a loaded thread's current model route.",
+      "properties": {
+        "enabled": {
+          "description": "Whether background tool marking runs on the current model route.",
+          "type": "boolean"
+        },
+        "marking": {
+          "description": "Whether a background marking request is in flight.",
+          "type": "boolean"
+        },
+        "pendingSavingsTokens": {
+          "description": "Estimated context tokens released by applying every current validated mark.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "requiredSavingsTokens": {
+          "description": "Release required before automatic cleanup applies the marks.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "enabled",
+        "marking",
+        "pendingSavingsTokens",
+        "requiredSavingsTokens"
+      ],
+      "type": "object"
+    }
+  },
+  "properties": {
+    "status": {
+      "$ref": "#/definitions/ThreadToolCleanupStatus"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "title": "ThreadToolCleanupReadResponse",
+  "type": "object"
+}

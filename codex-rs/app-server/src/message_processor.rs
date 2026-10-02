@@ -1371,6 +1371,14 @@ impl MessageProcessor {
             ClientRequest::ThreadTokenUsageRead { params, .. } => {
                 self.thread_processor.thread_token_usage_read(params).await
             }
+            ClientRequest::ThreadToolCleanupRead { params, .. } => {
+                self.thread_processor.thread_tool_cleanup_read(params).await
+            }
+            ClientRequest::ThreadToolCleanupApply { params, .. } => {
+                self.thread_processor
+                    .thread_tool_cleanup_apply(params)
+                    .await
+            }
             ClientRequest::ThreadShellCommand { params, .. } => {
                 self.thread_processor
                     .thread_shell_command(&request_id, params)

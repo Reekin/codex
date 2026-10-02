@@ -902,6 +902,56 @@
           "type": "object"
         },
         {
+          "description": "Read validated tool-result marks against the automatic cleanup requirement.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/toolCleanup/read"
+              ],
+              "title": "Thread/toolCleanup/readRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadToolCleanupReadParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/toolCleanup/readRequest",
+          "type": "object"
+        },
+        {
+          "description": "Apply every validated tool-result mark now, ignoring the automatic savings requirement.",
+          "properties": {
+            "id": {
+              "$ref": "#/definitions/v2/RequestId"
+            },
+            "method": {
+              "enum": [
+                "thread/toolCleanup/apply"
+              ],
+              "title": "Thread/toolCleanup/applyRequestMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadToolCleanupApplyParams"
+            }
+          },
+          "required": [
+            "id",
+            "method",
+            "params"
+          ],
+          "title": "Thread/toolCleanup/applyRequest",
+          "type": "object"
+        },
+        {
           "description": "Append raw Responses API items to the thread history without starting a user turn.",
           "properties": {
             "id": {
@@ -24291,6 +24341,94 @@
           "turnId"
         ],
         "title": "ThreadTokenUsageUpdatedNotification",
+        "type": "object"
+      },
+      "ThreadToolCleanupApplyParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "threadId"
+        ],
+        "title": "ThreadToolCleanupApplyParams",
+        "type": "object"
+      },
+      "ThreadToolCleanupApplyResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "releasedTokens": {
+            "description": "Estimated context tokens released; zero when no mark could shorten the history.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "status": {
+            "$ref": "#/definitions/v2/ThreadToolCleanupStatus"
+          }
+        },
+        "required": [
+          "releasedTokens",
+          "status"
+        ],
+        "title": "ThreadToolCleanupApplyResponse",
+        "type": "object"
+      },
+      "ThreadToolCleanupReadParams": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "threadId"
+        ],
+        "title": "ThreadToolCleanupReadParams",
+        "type": "object"
+      },
+      "ThreadToolCleanupReadResponse": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "status": {
+            "$ref": "#/definitions/v2/ThreadToolCleanupStatus"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "ThreadToolCleanupReadResponse",
+        "type": "object"
+      },
+      "ThreadToolCleanupStatus": {
+        "description": "Tool-result cleanup progress for a loaded thread's current model route.",
+        "properties": {
+          "enabled": {
+            "description": "Whether background tool marking runs on the current model route.",
+            "type": "boolean"
+          },
+          "marking": {
+            "description": "Whether a background marking request is in flight.",
+            "type": "boolean"
+          },
+          "pendingSavingsTokens": {
+            "description": "Estimated context tokens released by applying every current validated mark.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "requiredSavingsTokens": {
+            "description": "Release required before automatic cleanup applies the marks.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "enabled",
+          "marking",
+          "pendingSavingsTokens",
+          "requiredSavingsTokens"
+        ],
         "type": "object"
       },
       "ThreadTurnsListParams": {
