@@ -29,8 +29,10 @@ async fn validated_marks_survive_resume_and_apply_manually() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let model = LocalModel::mount(&server).await;
-    let mut builder = test_codex().with_config(configure_unreached_savings);
-    let test = builder.build_with_auto_env(&server).await?;
+    let test = test_codex()
+        .with_config(configure_unreached_savings)
+        .build_with_auto_env(&server)
+        .await?;
     model.reply(tool_turn());
     model.text("Evidence received.");
     test.submit_text_turn("Collect evidence.").await?;
@@ -69,7 +71,11 @@ async fn validated_marks_survive_resume_and_apply_manually() -> Result<()> {
     assert!(std::fs::read_to_string(&marks)?.contains(SHORTENED));
     let classified = classifier_requests(&model);
 
-    let resumed = builder.restart(&server, &test).await?;
+    // Builders consume their config mutators; resume with a fresh one carrying the same config.
+    let resumed = test_codex()
+        .with_config(configure_unreached_savings)
+        .restart(&server, &test)
+        .await?;
     assert_eq!(resumed.codex.tool_cleanup_status().await?, status);
     model.text("Resumed without reclassifying.");
     resumed.submit_text_turn("After resume.").await?;
