@@ -81,6 +81,28 @@ async fn validated_marks_survive_resume_and_apply_manually() -> Result<()> {
     resumed.submit_text_turn("After resume.").await?;
     assert_eq!(classifier_requests(&model), classified);
 
+    // A fork inherits still-pending marks and keeps its own copy of them.
+    resumed.codex.flush_rollout().await?;
+    let forked = resumed
+        .thread_manager
+        .fork_thread(
+            usize::MAX,
+            resumed.config.clone(),
+            path.clone(),
+            /*thread_source*/ None,
+            /*parent_trace*/ None,
+        )
+        .await?;
+    assert_eq!(forked.thread.tool_cleanup_status().await?, status);
+    let fork_marks = test
+        .config
+        .codex_home
+        .as_path()
+        .join("local_compaction")
+        .join(format!("{}.jsonl", forked.thread_id));
+    assert!(std::fs::read_to_string(&fork_marks)?.contains(SHORTENED));
+    assert_eq!(classifier_requests(&model), classified);
+
     let outcome = resumed.codex.apply_tool_cleanup().await?;
     assert_eq!(
         outcome,
