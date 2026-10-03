@@ -286,7 +286,6 @@ pub(crate) fn configure(config: &mut Config) {
     config.local_compaction.reclaim_percent = 1;
     // Manual/full-compaction fixtures isolate tier planning from background marking.
     config.local_compaction.mark_after_tokens_percent = 99;
-    config.local_compaction.mark_after_records = u16::MAX;
     config.local_compaction.compact_target_percent = 15;
     config.model_context_window = Some(100_000);
     config.model_auto_compact_token_limit = Some(95_000);
@@ -295,7 +294,6 @@ pub(crate) fn configure(config: &mut Config) {
 pub(crate) fn configure_marking(config: &mut Config) {
     configure(config);
     config.local_compaction.mark_after_tokens_percent = 1;
-    config.local_compaction.mark_after_records = 1;
 }
 
 /// Drive real sampling boundaries until background usage has been durably recorded.

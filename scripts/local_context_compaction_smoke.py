@@ -208,7 +208,6 @@ class Rpc:
             "local_compaction.force_local": "true",
             "local_compaction.reclaim_percent": "1",
             "local_compaction.mark_after_tokens_percent": "1",
-            "local_compaction.mark_after_records": "1",
             "local_compaction.compact_target_percent": "30",
             "model_reasoning_effort": '"low"',
             "features.code_mode": "false",

@@ -21,10 +21,12 @@ keep original local records queryable without a hosted notes service.
   prefix is served from the prompt cache. The question names each candidate by its result ID and the
   model-visible call ID. A result's size includes its paired call when that call carries large
   arguments (1,000 bytes or more); such candidates also ask for a one-line call summary. Each batch
-  takes the largest unmarked results first, at most 64 so a full batch of replacements fits the
-  response limit. Shorten includes concise evidence. Batches start
-  after configurable accumulation: 32 records or 5% of the usable window by default. Only one
-  marking request is in flight per session; normal model work does not wait for it.
+  takes the largest unmarked results first and adds results while their worst-case replacements
+  (never larger than the original) fit half the response limit and the candidate list fits its
+  request cap, so many small results share one batch. Shorten includes concise evidence. Because
+  every batch resends the whole context, a batch starts only once unmarked tool volume reaches a
+  configurable share of the usable window (5% by default); record counts never start one. Only
+  one marking request is in flight per session; normal model work does not wait for it.
 - **REQ-2**: Results are stored by stable record ID and original content. Appended messages, new user
   input, and disjoint tool cleanup do not invalidate a batch. Only unchanged, still-present records
   can receive a result. Invalid JSON, duplicate/foreign IDs, and oversized replacements cannot
@@ -67,9 +69,10 @@ keep original local records queryable without a hosted notes service.
   original images as real images on its first page, with an image cursor for the rest; the CLI can
   include them as data URLs on request.
 - **REQ-9**: Provider/model capability routing remains the default. A local preference can force
-  this pipeline and bypass hosted-notes rollover. Configuration separately controls marking batch
-  size, reclaim percentage, and preferred full-compaction occupancy. Obsolete occupancy-trigger and
-  minimum-savings options have no fallback path. Custom guidance supplements the structured protocol.
+  this pipeline and bypass hosted-notes rollover. Configuration separately controls the marking
+  volume threshold, reclaim percentage, and preferred full-compaction occupancy. Obsolete
+  occupancy-trigger, minimum-savings and record-count options have no fallback path. Custom
+  guidance supplements the structured protocol.
 - **REQ-10**: App-server clients can read, for a loaded thread, whether marking runs on its current
   route, whether a batch is in flight, the estimated release of all current validated marks, and the
   automatic cleanup requirement. Clients can request immediate tool cleanup that applies every
