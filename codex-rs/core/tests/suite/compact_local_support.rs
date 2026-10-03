@@ -28,6 +28,7 @@ use wiremock::matchers::path;
 pub(crate) const CLASSIFY: &str = "LOCAL_COMPACTION_CLASSIFY";
 pub(crate) const SUMMARIZE: &str = "LOCAL_COMPACTION_SUMMARIZE";
 pub(crate) const SHORTENED: &str = "verified concise evidence";
+pub(crate) const CALL_SUMMARY: &str = "Rewrote the fixture configuration";
 pub(crate) const LEDGER: &str = "Keep the user's offline-only constraint; verification is pending.";
 
 #[derive(Clone, Default)]
@@ -183,11 +184,15 @@ impl LocalModel {
                             .iter()
                             .position(|action| call_id.contains(action))
                             .unwrap_or(index % 3);
-                        match (&state.analysis, slot) {
+                        let mut decision = match (&state.analysis, slot) {
                             (Analysis::Keep, _) | (_, 0) => json!({"id":id,"action":"keep"}),
                             (_, 1) => json!({"id":id,"action":"shorten","text":SHORTENED}),
                             _ => json!({"id":id,"action":"drop"}),
+                        };
+                        if candidate["summarize_call"] == json!(true) && decision["action"] != "keep" {
+                            decision["call_text"] = json!(CALL_SUMMARY);
                         }
+                        decision
                     }).collect::<Vec<_>>();
                     match state.analysis {
                         Analysis::ForeignId => decisions[0]["id"] = json!("foreign-source-id"),

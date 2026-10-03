@@ -28,6 +28,7 @@ use codex_context_compaction::Budget;
 use codex_context_compaction::StagedDecisions;
 use codex_context_compaction::TierPlan;
 use codex_context_compaction::eligible_results;
+use codex_context_compaction::large_calls;
 use codex_history::ResponseItemEnvelope;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErr;
@@ -146,6 +147,16 @@ async fn clean_and_launch(
         // A tool cleanup can reset body-after-prefix accounting; use the post-cleanup limit.
         let hard_limit = sess.local_compaction_hard_limit(&context).await;
         let eligible = eligible_results(source);
+        // A result's weight includes the large call it is shortened together with.
+        let calls = large_calls(source);
+        let weight = |item: &ResponseItemEnvelope| {
+            item_tokens(&item.item).saturating_add(
+                item.item
+                    .id()
+                    .and_then(|id| calls.get(id.as_str()))
+                    .map_or(0, |&call| item_tokens(&source[call].item)),
+            )
+        };
         let unmarked: Vec<_> = source
             .iter()
             .filter(|item| {
@@ -156,7 +167,7 @@ async fn clean_and_launch(
                         .is_some_and(|id| eligible.iter().any(|eligible| eligible == id.as_str()))
             })
             .collect();
-        let tokens: usize = unmarked.iter().map(|item| item_tokens(&item.item)).sum();
+        let tokens: usize = unmarked.iter().map(|item| weight(*item)).sum();
         let config = &context.turn.config.local_compaction;
         let accumulated = unmarked.len() >= usize::from(config.mark_after_records)
             || tokens
@@ -183,10 +194,14 @@ async fn clean_and_launch(
             // Each batch costs one full-context request; spend it on the largest outputs.
             // The cap bounds the response so a full batch of shortens stays under its limit.
             let mut unmarked = unmarked;
-            unmarked.sort_by_key(|item| std::cmp::Reverse(item_tokens(&item.item)));
+            unmarked.sort_by_key(|item| std::cmp::Reverse(weight(*item)));
             let mut candidates: Vec<_> = unmarked
                 .into_iter()
-                .filter_map(|item| request::Candidate::new(&item.item))
+                .filter_map(|item| {
+                    let mut candidate = request::Candidate::new(&item.item)?;
+                    candidate.summarize_call = calls.contains_key(&candidate.id);
+                    Some(candidate)
+                })
                 .take(64)
                 .collect();
             let source = source.to_vec();

@@ -7,6 +7,7 @@ mod tiers;
 pub use cleanup::Decision;
 pub use cleanup::StagedDecisions;
 pub use cleanup::eligible_results;
+pub use cleanup::large_calls;
 pub use groups::is_user_direction;
 pub use tiers::SummaryOutput;
 pub use tiers::TierPlan;

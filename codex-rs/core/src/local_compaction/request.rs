@@ -39,6 +39,9 @@ pub(super) struct AnalysisResponse {
 pub(super) struct Candidate {
     pub(super) id: String,
     call_id: String,
+    /// The paired call carries large arguments that shorten/drop replace with `call_text`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(super) summarize_call: bool,
 }
 
 impl Candidate {
@@ -59,6 +62,7 @@ impl Candidate {
         Some(Self {
             id: id.to_string(),
             call_id: call_id.clone(),
+            summarize_call: false,
         })
     }
 }
@@ -74,8 +78,9 @@ pub(super) fn classifier(
             json!({
                 "candidates": candidates,
                 "max_replacement_bytes": 2800,
-                "instructions": "Do not call tools and do not continue the task. Privately classify each candidate completed tool result above exactly once as keep, shorten, or drop. Find each result by its call_id in the conversation and answer with its id. Read current dialogue for relevance. Keep evidence needed for active work, unresolved questions, failures and verification. Shorten must preserve useful exact facts. Drop only dispensable output. Do not classify any other result. Return JSON only, with no prose or fences.",
-                "required_output": {"decisions": [{"id": "candidate id", "action": "keep|shorten|drop", "text": "only for shorten"}]},
+                "max_call_text_bytes": 400,
+                "instructions": "Do not call tools and do not continue the task. Privately classify each candidate completed tool result above exactly once as keep, shorten, or drop. Find each result by its call_id in the conversation and answer with its id. Read current dialogue for relevance. Keep evidence needed for active work, unresolved questions, failures and verification. Shorten must preserve useful exact facts. Drop only dispensable output. Shorten and drop remove any images in the result; keep a result only if its images still need to be looked at, and state in shorten text what they showed. Originals stay retrievable. For candidates with summarize_call, shorten and drop also replace the call's arguments: give call_text, one line saying what the call did (for a patch, which files changed and how). Do not classify any other result. Return JSON only, with no prose or fences.",
+                "required_output": {"decisions": [{"id": "candidate id", "action": "keep|shorten|drop", "text": "only for shorten", "call_text": "only with summarize_call, for shorten or drop"}]},
                 "supplemental_guidance": guidance,
             }),
         );
