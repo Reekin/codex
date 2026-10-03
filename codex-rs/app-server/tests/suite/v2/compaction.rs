@@ -461,7 +461,6 @@ async fn thread_tool_cleanup_reports_marks_and_applies_them_on_request() -> Resu
             "model_context_window = 100000\n\
              local_compaction.force_local = true\n\
              local_compaction.reclaim_percent = 50\n\
-             local_compaction.mark_after_records = 1\n\
              local_compaction.mark_after_tokens_percent = 1",
         )
         .write(codex_home.path())?;

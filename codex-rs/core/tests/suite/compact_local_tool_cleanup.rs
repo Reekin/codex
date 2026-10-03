@@ -33,6 +33,42 @@ fn classifier_requests(model: &LocalModel) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn many_small_outputs_are_marked_in_one_batch() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    let test = test_codex()
+        .with_config(configure_unreached_savings)
+        .build_with_auto_env(&server)
+        .await?;
+    // Small outputs leave little room for replacements, so the batch is not cut at a fixed count.
+    let mut events = (0..80)
+        .map(|index| {
+            ev_function_call(
+                &format!("small-{index}"),
+                &format!("small_{index}_{}", "evidence_".repeat(12)),
+                "{}",
+            )
+        })
+        .collect::<Vec<_>>();
+    events.push(ev_completed("small-tools"));
+    model.reply(sse(events));
+    model.text("Small results received.");
+    test.submit_text_turn("Collect small evidence.").await?;
+    model.text("Recent dialogue.");
+    test.submit_text_turn("Continue.").await?;
+    finish_marking(&test, &model, /*expected_batches*/ 1).await?;
+    let batches = model
+        .bodies()
+        .iter()
+        .filter_map(|body| analysis_payload(body, CLASSIFY))
+        .map(|payload| payload["candidates"].as_array().unwrap().len())
+        .collect::<Vec<_>>();
+    assert_eq!(batches, vec![80]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn validated_marks_survive_resume_and_apply_manually() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;

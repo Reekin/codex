@@ -1932,13 +1932,6 @@
           "description": "Use local cleanup even when the provider supports remote compaction.",
           "type": "boolean"
         },
-        "mark_after_records": {
-          "default": 32,
-          "description": "Completed unmarked tool records that can independently start a background batch.",
-          "format": "uint16",
-          "minimum": 0.0,
-          "type": "integer"
-        },
         "mark_after_tokens_percent": {
           "default": 5,
           "description": "Unmarked tool tokens as a percentage of the window that starts a background batch.",
@@ -6608,7 +6601,6 @@
       "default": {
         "compact_target_percent": 30,
         "force_local": false,
-        "mark_after_records": 32,
         "mark_after_tokens_percent": 5,
         "reclaim_percent": 30
       },

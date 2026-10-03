@@ -12,8 +12,6 @@ pub struct LocalCompactionConfig {
     pub reclaim_percent: u8,
     /// Unmarked tool tokens as a percentage of the window that starts a background batch.
     pub mark_after_tokens_percent: u8,
-    /// Completed unmarked tool records that can independently start a background batch.
-    pub mark_after_records: u16,
     /// Preferred total occupancy after full compaction; safe larger results are allowed.
     pub compact_target_percent: u8,
 }
@@ -24,7 +22,6 @@ impl Default for LocalCompactionConfig {
             force_local: false,
             reclaim_percent: 30,
             mark_after_tokens_percent: 5,
-            mark_after_records: 32,
             compact_target_percent: 30,
         }
     }
@@ -43,12 +40,6 @@ impl LocalCompactionConfig {
                     format!("local_compaction.{name} must be between 1 and 99"),
                 ));
             }
-        }
-        if self.mark_after_records == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "local_compaction.mark_after_records must be positive",
-            ));
         }
         Ok(())
     }

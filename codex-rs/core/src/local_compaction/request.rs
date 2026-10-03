@@ -84,6 +84,7 @@ pub(super) fn classifier(
                 "required_output": {"decisions": [{"id": "candidate id", "action": "keep|shorten|drop", "text": "only for shorten", "call_text": "only with summarize_call, for shorten or drop"}]},
                 "supplemental_guidance": guidance,
             }),
+            LocalCompactionRequest::MAX_CLASSIFY_BYTES,
         );
         match request {
             Err(_) if candidates.len() > 1 => {
@@ -103,6 +104,7 @@ pub(super) fn summarizer(plan: &TierPlan, guidance: &str) -> CodexResult<LocalCo
             "required_output": {"l2": "condensed dialogue", "l3": "oldest overview", "ledger": "active constraints and decisions"},
             "supplemental_guidance": guidance,
         }),
+        LocalCompactionRequest::MAX_BYTES,
     )
 }
 
@@ -235,6 +237,7 @@ fn label_source_items(items: &mut [ResponseItem]) -> CodexResult<()> {
                 "item_id": id,
                 "call_item_id": call_key.and_then(|key| calls.get(&key)),
             }),
+            LocalCompactionRequest::MAX_BYTES,
         )?
         .body();
         match item {

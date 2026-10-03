@@ -25,6 +25,9 @@ use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
 use codex_analytics::CompactionTrigger;
 use codex_context_compaction::Budget;
+use codex_context_compaction::MAX_ANALYSIS_BYTES;
+use codex_context_compaction::MAX_CALL_SUMMARY_BYTES;
+use codex_context_compaction::MAX_FRAGMENT_BYTES;
 use codex_context_compaction::StagedDecisions;
 use codex_context_compaction::TierPlan;
 use codex_context_compaction::eligible_results;
@@ -168,14 +171,19 @@ async fn clean_and_launch(
             })
             .collect();
         let tokens: usize = unmarked.iter().map(|item| weight(*item)).sum();
-        let config = &context.turn.config.local_compaction;
-        let accumulated = unmarked.len() >= usize::from(config.mark_after_records)
-            || tokens
-                >= budget
-                    .window_tokens
-                    .saturating_mul(usize::from(config.mark_after_tokens_percent))
-                    .div_ceil(100)
-                    .max(1);
+        // Every batch resends the whole context, so only enough unmarked volume justifies one.
+        let accumulated = tokens
+            >= budget
+                .window_tokens
+                .saturating_mul(usize::from(
+                    context
+                        .turn
+                        .config
+                        .local_compaction
+                        .mark_after_tokens_percent,
+                ))
+                .div_ceil(100)
+                .max(1);
         let total = history_tokens(source);
         let pending = total.saturating_sub(history_tokens(
             &state.staged.apply(source).map_err(invalid)?,
@@ -192,17 +200,32 @@ async fn clean_and_launch(
             )
         {
             // Each batch costs one full-context request; spend it on the largest outputs.
-            // The cap bounds the response so a full batch of shortens stays under its limit.
+            // A replacement is never larger than its original, so small outputs cost little
+            // response space and many fit in one batch; the request cap trims the rest.
             let mut unmarked = unmarked;
             unmarked.sort_by_key(|item| std::cmp::Reverse(weight(*item)));
+            let mut response_bytes = 0_usize;
             let mut candidates: Vec<_> = unmarked
                 .into_iter()
                 .filter_map(|item| {
                     let mut candidate = request::Candidate::new(&item.item)?;
                     candidate.summarize_call = calls.contains_key(&candidate.id);
-                    Some(candidate)
+                    let worst = item_tokens(&item.item)
+                        .saturating_mul(4)
+                        .min(MAX_FRAGMENT_BYTES)
+                        .saturating_add(candidate.id.len() + 64)
+                        .saturating_add(if candidate.summarize_call {
+                            MAX_CALL_SUMMARY_BYTES
+                        } else {
+                            0
+                        });
+                    Some((candidate, worst))
                 })
-                .take(64)
+                .take_while(|(_, worst)| {
+                    response_bytes = response_bytes.saturating_add(*worst);
+                    response_bytes <= MAX_ANALYSIS_BYTES / 2
+                })
+                .map(|(candidate, _)| candidate)
                 .collect();
             let source = source.to_vec();
             let request = match request::classifier(
