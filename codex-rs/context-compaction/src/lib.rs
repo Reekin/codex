@@ -5,6 +5,7 @@ mod groups;
 mod tiers;
 
 pub use cleanup::Decision;
+pub use cleanup::MAX_CALL_SUMMARY_BYTES;
 pub use cleanup::StagedDecisions;
 pub use cleanup::eligible_results;
 pub use cleanup::large_calls;

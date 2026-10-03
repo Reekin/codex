@@ -1,4 +1,5 @@
 use codex_context_compaction::MAX_ANALYSIS_BYTES;
+use codex_context_compaction::MAX_CALL_SUMMARY_BYTES;
 use codex_context_compaction::TierPlan;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
@@ -78,7 +79,7 @@ pub(super) fn classifier(
             json!({
                 "candidates": candidates,
                 "max_replacement_bytes": 2800,
-                "max_call_text_bytes": 400,
+                "max_call_text_bytes": MAX_CALL_SUMMARY_BYTES,
                 "instructions": "Do not call tools and do not continue the task. Privately classify each candidate completed tool result above exactly once as keep, shorten, or drop. Find each result by its call_id in the conversation and answer with its id. Read current dialogue for relevance. Keep evidence needed for active work, unresolved questions, failures and verification. Shorten must preserve useful exact facts. Drop only dispensable output. Shorten and drop remove any images in the result; keep a result only if its images still need to be looked at, and state in shorten text what they showed. Originals stay retrievable. For candidates with summarize_call, shorten and drop also replace the call's arguments: give call_text, one line saying what the call did (for a patch, which files changed and how). Do not classify any other result. Return JSON only, with no prose or fences.",
                 "required_output": {"decisions": [{"id": "candidate id", "action": "keep|shorten|drop", "text": "only for shorten", "call_text": "only with summarize_call, for shorten or drop"}]},
                 "supplemental_guidance": guidance,

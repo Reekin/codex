@@ -203,8 +203,16 @@ impl RecallArchive {
                     kind,
                     dialogue,
                     tool,
+                    // Keep the original field order; swap each image URL for its placeholder.
+                    text: images.iter().enumerate().try_fold(
+                        serde_json::to_string(&item).map_err(io::Error::other)?,
+                        |text, (index, url)| {
+                            let url = serde_json::to_string(url).map_err(io::Error::other)?;
+                            let placeholder = format!("\"[image {}]\"", index + 1);
+                            Ok::<_, io::Error>(text.replacen(&url, &placeholder, 1))
+                        },
+                    )?,
                     images,
-                    text: value.to_string(),
                 });
             }
             // Compacted replacements and event projections are not original response records.

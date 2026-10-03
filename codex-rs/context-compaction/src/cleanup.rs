@@ -29,6 +29,9 @@ pub const MAX_CALL_SUMMARY_BYTES: usize = 400;
 pub enum Decision {
     Keep {
         id: String,
+        /// Accepted and ignored: a kept result leaves its call unchanged.
+        #[serde(default, skip_serializing)]
+        call_text: Option<String>,
     },
     Shorten {
         id: String,
@@ -46,14 +49,17 @@ pub enum Decision {
 impl Decision {
     pub fn id(&self) -> &str {
         match self {
-            Self::Keep { id } | Self::Shorten { id, .. } | Self::Drop { id, .. } => id,
+            Self::Keep { id, .. } | Self::Shorten { id, .. } | Self::Drop { id, .. } => id,
         }
     }
 
+    /// An empty summary means none was given; the call then gets a plain archive reference.
     fn call_text(&self) -> Option<&str> {
         match self {
             Self::Keep { .. } => None,
-            Self::Shorten { call_text, .. } | Self::Drop { call_text, .. } => call_text.as_deref(),
+            Self::Shorten { call_text, .. } | Self::Drop { call_text, .. } => {
+                call_text.as_deref().filter(|text| !text.trim().is_empty())
+            }
         }
     }
 }
@@ -278,11 +284,9 @@ impl StagedDecisions {
             }
             if decision
                 .call_text()
-                .is_some_and(|text| text.is_empty() || text.len() > MAX_CALL_SUMMARY_BYTES)
+                .is_some_and(|text| text.len() > MAX_CALL_SUMMARY_BYTES)
             {
-                return Err(CompactionError::Invalid(
-                    "call summary is empty or oversized",
-                ));
+                return Err(CompactionError::Invalid("call summary is oversized"));
             }
         }
         if seen.len() != allowed.len() {
@@ -368,11 +372,12 @@ impl StagedDecisions {
                             "[Output omitted with {images} images; original item: {id}; use recall_read_item.]"
                         ),
                     };
-                    let shorter = text.len() < output.to_string().len();
-                    if shorter {
+                    // Images always go; otherwise replace only when the text is shorter.
+                    let replace = images > 0 || text.len() < output.to_string().len();
+                    if replace {
                         output.body = FunctionCallOutputBody::Text(text);
                     }
-                    shorter
+                    replace
                 }
                 _ => {
                     return Err(CompactionError::Invalid(
