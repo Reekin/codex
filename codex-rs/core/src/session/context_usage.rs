@@ -4,6 +4,50 @@ use super::turn_context::TurnContext;
 use crate::context_manager::context_usage::PriorReasoning;
 use crate::context_manager::context_usage::RequestOverhead;
 use crate::context_manager::context_usage::context_usage;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::TokenUsage;
+
+/// Tracks whether a sampled response's reported input measures the active context.
+///
+/// Server-side web search runs another model pass inside the same response, and each pass reads
+/// the whole context again, so the provider reports the context several times over. Such usage
+/// still counts toward totals, but the active context is the request's own active usage plus
+/// what the response generated.
+#[derive(Default)]
+pub(crate) struct ResponseContext {
+    request_tokens: i64,
+    server_search: bool,
+}
+
+impl ResponseContext {
+    pub(crate) fn new(request_tokens: i64) -> Self {
+        Self {
+            request_tokens,
+            server_search: false,
+        }
+    }
+
+    pub(crate) fn observe(&mut self, item: &ResponseItem) {
+        self.server_search |= matches!(item, ResponseItem::WebSearchCall { .. });
+    }
+
+    /// Usage that measures the active context after this response.
+    pub(crate) fn active_usage(&self, usage: &TokenUsage) -> TokenUsage {
+        if !self.server_search {
+            return usage.clone();
+        }
+        let input_tokens = usage.input_tokens.min(self.request_tokens);
+        TokenUsage {
+            input_tokens,
+            cached_input_tokens: usage.cached_input_tokens.min(input_tokens),
+            cache_write_input_tokens: usage.cache_write_input_tokens.min(input_tokens),
+            output_tokens: usage.output_tokens,
+            reasoning_output_tokens: usage.reasoning_output_tokens,
+            total_tokens: input_tokens.saturating_add(usage.output_tokens),
+            codex_rollout_budget_units: None,
+        }
+    }
+}
 
 impl Session {
     /// Remembers the tool-definition size of the prompt being sampled.

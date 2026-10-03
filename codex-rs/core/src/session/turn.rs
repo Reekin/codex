@@ -36,6 +36,7 @@ use crate::responses_retry::ResponsesStreamRequest;
 use crate::responses_retry::ResponsesStreamRetryState;
 use crate::responses_retry::handle_retryable_response_stream_error;
 use crate::session::PreviousTurnSettings;
+use crate::session::ResponseContext;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -2373,6 +2374,8 @@ async fn try_run_sampling_request(
     )> = None;
     let mut should_emit_turn_diff = false;
     let mut should_emit_token_count = false;
+    // The request carries exactly the current active context.
+    let mut response_context = ResponseContext::new(sess.get_total_token_usage().await);
     const MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE: usize = 256;
     let mut analytics_tool_call_ids = Vec::new();
     let reasoning_effort = step_context
@@ -2444,6 +2447,7 @@ async fn try_run_sampling_request(
                 }
             }
             ResponseEvent::OutputItemDone(mut item) => {
+                response_context.observe(&item);
                 had_output_item = true;
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
@@ -2728,7 +2732,7 @@ async fn try_run_sampling_request(
                 )
                 .await;
                 let budget_result = sess
-                    .record_token_usage_info(&turn_context, token_usage.as_ref())
+                    .record_token_usage_info(&turn_context, token_usage.as_ref(), &response_context)
                     .await;
                 should_emit_token_count = true;
                 should_emit_turn_diff = true;

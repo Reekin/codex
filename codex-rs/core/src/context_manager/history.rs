@@ -621,9 +621,11 @@ impl ContextManager {
         self.review_history = review_history;
     }
 
+    /// Adds `usage` to the totals; `active_usage` becomes the latest active-context measurement.
     pub(crate) fn update_token_info(
         &mut self,
         usage: &TokenUsage,
+        active_usage: &TokenUsage,
         model_context_window: Option<i64>,
     ) {
         self.token_info = TokenUsageInfo::new_or_append(
@@ -631,6 +633,9 @@ impl ContextManager {
             &Some(usage.clone()),
             model_context_window,
         );
+        if let Some(info) = self.token_info.as_mut() {
+            info.last_token_usage = active_usage.clone();
+        }
     }
 
     // These are local items added after the most recent model-emitted item.

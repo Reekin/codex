@@ -251,6 +251,7 @@ mod turn_input;
 mod turn_suspension;
 mod world_state;
 use self::code_mode_warning::unsupported_code_mode_warning;
+pub(crate) use self::context_usage::ResponseContext;
 #[cfg(test)]
 use self::handlers::submission_dispatch_span;
 use self::handlers::submission_loop;
@@ -4369,7 +4370,7 @@ impl Session {
         token_usage: Option<&TokenUsage>,
     ) -> CodexResult<()> {
         let result = self
-            .record_token_usage_info(turn_context, token_usage)
+            .record_token_usage_info(turn_context, token_usage, &ResponseContext::default())
             .await;
         self.send_token_count_event(turn_context).await;
         result
@@ -4413,17 +4414,22 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
+        response: &ResponseContext,
     ) -> CodexResult<()> {
         if let Some(token_usage) = token_usage {
+            let active_usage = response.active_usage(token_usage);
             let token_info = {
                 let mut state = self.state.lock().await;
-                state
-                    .update_token_info_from_usage(token_usage, turn_context.model_context_window());
+                state.update_token_info_from_usage(
+                    token_usage,
+                    &active_usage,
+                    turn_context.model_context_window(),
+                );
                 if matches!(
                     turn_context.config.model_auto_compact_token_limit_scope,
                     AutoCompactTokenLimitScope::BodyAfterPrefix
                 ) {
-                    state.ensure_auto_compact_window_server_prefill_from_usage(token_usage);
+                    state.ensure_auto_compact_window_server_prefill_from_usage(&active_usage);
                 }
                 state.token_info()
             };

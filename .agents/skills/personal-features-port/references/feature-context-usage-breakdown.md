@@ -21,6 +21,10 @@ ended with, including threads reopened after a restart.
   response plus a local estimate of history items appended after the last model-generated item.
   Auto-compaction, the reported context usage, and the category breakdown all use this same value.
   Reasoning from earlier turns is never re-estimated on top of the provider total.
+  A response that ran a server-side web search reads the context once per internal model pass, so
+  its reported input can be several times the real context. Its full usage still counts toward
+  token totals, but the active context after it is at most the active context the request was sent
+  with plus the response's output.
 - **REQ-2**: Every token usage snapshot that has provider usage carries a context usage record with
   the active context tokens, the active-context token count at which automatic compaction will
   trigger (the smaller of the configured auto-compaction trigger and the model's usable context
@@ -72,6 +76,8 @@ ended with, including threads reopened after a restart.
 1. **Unified accounting**: a thread whose history holds encrypted reasoning from an earlier turn
    starts a new turn. Evidence: automated test showing auto-compaction and the reported context
    tokens equal the provider total plus pending local items, with no reasoning surcharge.
+   A response with a server-side web search that reports inflated input neither raises the
+   reported active context nor triggers compaction, while totals include its full usage.
 2. **Breakdown on a real turn**: run a turn through the app-server against a mock Responses server
    with developer instructions, AGENTS.md, a tool call, and a final message. Evidence: the live
    `thread/tokenUsage/updated` notification has a context usage record whose categories sum to its
