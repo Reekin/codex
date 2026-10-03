@@ -74,9 +74,9 @@ pub async fn mount_local_compaction_sequence(
         let text =
             if let Some(payload) = local_compaction_payload(&body, "LOCAL_COMPACTION_CLASSIFY") {
                 Some(
-                    serde_json::json!({"decisions": payload["eligible_ids"]
-                    .as_array().expect("eligible IDs").iter()
-                    .map(|id| serde_json::json!({"id": id, "action": "drop"}))
+                    serde_json::json!({"decisions": payload["candidates"]
+                    .as_array().expect("candidates").iter()
+                    .map(|candidate| serde_json::json!({"id": candidate["id"], "action": "drop"}))
                     .collect::<Vec<_>>()})
                     .to_string(),
                 )

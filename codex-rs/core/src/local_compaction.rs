@@ -121,7 +121,7 @@ pub(crate) async fn maybe_clean_history(
     let _boundary = sess.lock_local_compaction_boundary().await;
     let context = LocalCompactionContext::from_step(Arc::clone(step));
     let mut state = prepared_state(sess, &context).await;
-    let result = clean_and_launch(sess, context, &mut state).await;
+    let result = clean_and_launch(sess, step, context, &mut state).await;
     // A concurrent full-window reset owns the new generation and discards this batch.
     sess.set_local_compaction_state(state).await;
     result
@@ -129,6 +129,7 @@ pub(crate) async fn maybe_clean_history(
 
 async fn clean_and_launch(
     sess: &Arc<Session>,
+    step: &Arc<StepContext>,
     context: LocalCompactionContext,
     state: &mut LocalCompactionState,
 ) -> CodexResult<()> {
@@ -179,15 +180,18 @@ async fn clean_and_launch(
                 hard_limit,
             )
         {
-            // Bound each request's IDs and response while leaving the rest unmarked.
-            let ids: Vec<_> = unmarked
+            // Each batch costs one full-context request; spend it on the largest outputs.
+            // The cap bounds the response so a full batch of shortens stays under its limit.
+            let mut unmarked = unmarked;
+            unmarked.sort_by_key(|item| std::cmp::Reverse(item_tokens(&item.item)));
+            let mut candidates: Vec<_> = unmarked
                 .into_iter()
+                .filter_map(|item| request::Candidate::new(&item.item))
                 .take(64)
-                .filter_map(|item| item.item.id().map(ToString::to_string))
                 .collect();
             let source = source.to_vec();
             let request = match request::classifier(
-                &ids,
+                &mut candidates,
                 context.turn.config.compact_prompt.as_deref().unwrap_or(""),
             ) {
                 Ok(request) => request,
@@ -197,7 +201,16 @@ async fn clean_and_launch(
                     return Ok(());
                 }
             };
-            let base = sess.get_prompt_base_instructions().await;
+            let ids: Vec<_> = candidates
+                .into_iter()
+                .map(|candidate| candidate.id)
+                .collect();
+            let prompt = request::classifier_prompt(
+                step,
+                sess.get_prompt_base_instructions().await,
+                &source,
+                request,
+            );
             let metadata = sess
                 .responses_metadata(
                     &context.turn,
@@ -221,15 +234,8 @@ async fn clean_and_launch(
             let result_slot = Arc::clone(&completed);
             let task = tokio::spawn(async move {
                 let result = async {
-                    let response = request::infer_json(
-                        base,
-                        &context,
-                        &mut client,
-                        &metadata,
-                        &source,
-                        request,
-                    )
-                    .await?;
+                    let response =
+                        request::infer_json(&prompt, &context, &mut client, &metadata).await?;
                     if let Some(sess) = weak.upgrade() {
                         if let Some(rate_limits) = response.rate_limits {
                             sess.record_rate_limits_info(rate_limits).await;
@@ -395,15 +401,13 @@ pub(crate) async fn run_pipeline(
             )
             .await;
         let mut client = sess.services.model_client.new_session();
-        let mut response = request::infer_json(
-            sess.get_prompt_base_instructions().await,
+        let prompt = request::summarizer_prompt(
             context,
-            &mut client,
-            &metadata,
+            sess.get_prompt_base_instructions().await,
             &source,
             request,
-        )
-        .await?;
+        )?;
+        let mut response = request::infer_json(&prompt, context, &mut client, &metadata).await?;
         if let Some(rate_limits) = response.rate_limits.take() {
             sess.record_rate_limits_info(rate_limits).await;
         }

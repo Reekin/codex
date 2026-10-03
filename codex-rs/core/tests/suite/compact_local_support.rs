@@ -172,10 +172,18 @@ impl LocalModel {
                         return wiremock::ResponseTemplate::new(503)
                             .set_body_json(json!({"error":{"message":"analysis unavailable","type":"server_error"}}));
                     }
-                    let ids = payload["eligible_ids"].as_array().expect("eligible IDs");
-                    assert!(!ids.is_empty(), "classifier needs eligible tool results");
-                    let mut decisions = ids.iter().enumerate().map(|(index, id)| {
-                        match (&state.analysis, index % 3) {
+                    let candidates = payload["candidates"].as_array().expect("candidates");
+                    assert!(!candidates.is_empty(), "classifier needs eligible tool results");
+                    let ids = candidates.iter().map(|candidate| candidate["id"].clone()).collect::<Vec<_>>();
+                    // Fixture calls name their intended action; others rotate by position.
+                    let mut decisions = candidates.iter().enumerate().map(|(index, candidate)| {
+                        let id = &candidate["id"];
+                        let call_id = candidate["call_id"].as_str().unwrap_or_default();
+                        let slot = ["keep", "shorten", "drop"]
+                            .iter()
+                            .position(|action| call_id.contains(action))
+                            .unwrap_or(index % 3);
+                        match (&state.analysis, slot) {
                             (Analysis::Keep, _) | (_, 0) => json!({"id":id,"action":"keep"}),
                             (_, 1) => json!({"id":id,"action":"shorten","text":SHORTENED}),
                             _ => json!({"id":id,"action":"drop"}),
