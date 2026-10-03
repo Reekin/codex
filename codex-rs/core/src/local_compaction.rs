@@ -137,7 +137,7 @@ async fn clean_and_launch(
     context: LocalCompactionContext,
     state: &mut LocalCompactionState,
 ) -> CodexResult<()> {
-    let budget = budget(sess, &context).await;
+    let (budget, scale) = budget(sess, &context).await;
     install_marks(sess, &context, state, CleanupTrigger::Savings(budget)).await?;
     let history = sess.clone_history().await;
     let source = history.annotated_items();
@@ -148,7 +148,7 @@ async fn clean_and_launch(
             .is_none_or(|retry| Instant::now() >= retry)
     {
         // A tool cleanup can reset body-after-prefix accounting; use the post-cleanup limit.
-        let hard_limit = sess.local_compaction_hard_limit(&context).await;
+        let hard_limit = to_estimate(sess.local_compaction_hard_limit(&context).await, scale);
         let eligible = eligible_results(source);
         // A result's weight includes the large call it is shortened together with.
         let calls = large_calls(source);
@@ -408,10 +408,8 @@ pub(crate) async fn run_pipeline(
     let revision = history
         .conversation_history_snapshot()
         .user_message_revision();
-    let budget = budget(sess, context).await;
-    let hard_limit = sess
-        .local_compaction_hard_limit(context)
-        .await
+    let (budget, scale) = budget(sess, context).await;
+    let hard_limit = to_estimate(sess.local_compaction_hard_limit(context).await, scale)
         .min(budget.window_tokens);
     // Leave space for continued work; the preferred ratio may be exceeded.
     let hard_history = hard_limit
@@ -534,7 +532,12 @@ fn checkpoint(
     }
 }
 
-async fn budget(sess: &Session, context: &LocalCompactionContext) -> Budget {
+/// Budgets in local-estimate units, plus provider tokens per estimated token.
+///
+/// Local estimates (about 4 bytes per token) run well below provider counts for code-heavy
+/// history, while the window and the hard limit are provider counts. Converting those two to
+/// estimate units keeps every comparison in one unit.
+async fn budget(sess: &Session, context: &LocalCompactionContext) -> (Budget, f64) {
     let config = &context.turn.config.local_compaction;
     let model = &context.settings.model_info;
     let window_tokens = model
@@ -548,12 +551,46 @@ async fn budget(sess: &Session, context: &LocalCompactionContext) -> Budget {
     } else {
         context.tool_tokens
     };
-    Budget {
-        window_tokens: usize::try_from(window_tokens).unwrap_or(0),
-        fixed_tokens: approx_token_count(&base.text).saturating_add(tool_tokens),
+    let fixed_tokens = approx_token_count(&base.text).saturating_add(tool_tokens);
+    // Ratio of the latest provider-reported context to the estimate of what it was sent.
+    // Models that drop earlier reasoning are not billed for it. Bounded so a stale or
+    // estimated report (for example right after a cleanup) falls back to raw estimates.
+    let estimated = sess
+        .clone_history()
+        .await
+        .annotated_items()
+        .iter()
+        .filter(|item| {
+            model.retains_prior_reasoning
+                || !matches!(
+                    item.item,
+                    codex_protocol::models::ResponseItem::Reasoning { .. }
+                )
+        })
+        .map(|item| item_tokens(&item.item))
+        .sum::<usize>()
+        .saturating_add(fixed_tokens);
+    let reported = sess.get_total_token_usage().await;
+    let scale = if estimated == 0 {
+        1.0
+    } else {
+        (reported as f64 / estimated as f64).clamp(1.0, 2.0)
+    };
+    let budget = Budget {
+        window_tokens: to_estimate(usize::try_from(window_tokens).unwrap_or(0), scale),
+        fixed_tokens,
         reclaim_percent: usize::from(config.reclaim_percent),
         compact_target_percent: usize::from(config.compact_target_percent),
-    }
+    };
+    (budget, scale)
+}
+
+fn to_estimate(tokens: usize, scale: f64) -> usize {
+    (tokens as f64 / scale) as usize
+}
+
+fn to_reported(tokens: usize, scale: f64) -> usize {
+    (tokens as f64 * scale) as usize
 }
 
 fn item_tokens(item: &codex_protocol::models::ResponseItem) -> usize {
