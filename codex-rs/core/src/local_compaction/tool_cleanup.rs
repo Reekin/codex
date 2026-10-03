@@ -11,6 +11,7 @@ use super::history_tokens;
 use super::install_marks;
 use super::invalid;
 use super::prepared_state;
+use super::to_reported;
 use super::uses_local_route;
 use crate::compact::LocalCompactionContext;
 use crate::session::session::Session;
@@ -51,10 +52,12 @@ pub(crate) async fn apply_tool_cleanup(sess: &Arc<Session>) -> CodexResult<ToolC
     let context = LocalCompactionContext::from_turn(sess.local_compaction_turn().await);
     let mut state = prepared_state(sess, &context).await;
     let result = async {
+        // Measured before cleanup replaces the provider-reported usage with an estimate.
+        let (_, scale) = budget(sess, &context).await;
         let released_tokens =
             install_marks(sess, &context, &mut state, CleanupTrigger::Manual).await?;
         Ok(ToolCleanupOutcome {
-            released_tokens,
+            released_tokens: to_reported(released_tokens, scale),
             status: status(sess, &context, &mut state).await?,
         })
     }
@@ -74,10 +77,12 @@ async fn status(
     let pending_savings_tokens = history_tokens(source).saturating_sub(history_tokens(
         &state.staged.apply(source).map_err(invalid)?,
     ));
+    // Reported in provider tokens, the same unit as context usage.
+    let (budget, scale) = budget(sess, context).await;
     Ok(ToolCleanupStatus {
         enabled: uses_local_route(&context.turn, &context.settings.model_info),
         marking: state.background.is_some(),
-        pending_savings_tokens,
-        required_savings_tokens: budget(sess, context).await.required_savings(),
+        pending_savings_tokens: to_reported(pending_savings_tokens, scale),
+        required_savings_tokens: to_reported(budget.required_savings(), scale),
     })
 }

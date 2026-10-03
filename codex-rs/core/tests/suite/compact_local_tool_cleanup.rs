@@ -6,7 +6,9 @@ use codex_core::ToolCleanupOutcome;
 use codex_core::ToolCleanupStatus;
 use codex_core::config::Config;
 use codex_protocol::models::ResponseItem;
+use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
@@ -65,6 +67,63 @@ async fn many_small_outputs_are_marked_in_one_batch() -> Result<()> {
         .map(|payload| payload["candidates"].as_array().unwrap().len())
         .collect::<Vec<_>>();
     assert_eq!(batches, vec![80]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cleanup_status_follows_provider_token_counts() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    let test = test_codex()
+        .with_config(configure_unreached_savings)
+        .build_with_auto_env(&server)
+        .await?;
+    model.reply(tool_turn());
+    model.text("Evidence received.");
+    test.submit_text_turn("Collect evidence.").await?;
+    model.text("Recent dialogue.");
+    test.submit_text_turn("Continue.").await?;
+    finish_marking(&test, &model, /*expected_batches*/ 1).await?;
+    let mut estimated = test.codex.tool_cleanup_status().await?;
+    for _ in 0..100 {
+        if !estimated.marking {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        estimated = test.codex.tool_cleanup_status().await?;
+    }
+    assert!(estimated.pending_savings_tokens > 0);
+
+    // The provider counts this context well above the local estimate.
+    model.reply(sse(vec![
+        ev_assistant_message("counted", "Counted by the provider."),
+        ev_completed_with_tokens("counted", /*total_tokens*/ 60_000),
+    ]));
+    test.submit_text_turn("Report provider usage.").await?;
+    let reported = test.codex.tool_cleanup_status().await?;
+    assert!(
+        reported.pending_savings_tokens > estimated.pending_savings_tokens,
+        "{estimated:?} -> {reported:?}"
+    );
+    assert!(
+        reported.pending_savings_tokens <= estimated.pending_savings_tokens * 2,
+        "{estimated:?} -> {reported:?}"
+    );
+    // The requirement is a share of the provider-counted window either way.
+    assert!(
+        reported
+            .required_savings_tokens
+            .abs_diff(estimated.required_savings_tokens)
+            <= 2,
+        "{estimated:?} -> {reported:?}"
+    );
+    assert!(
+        model
+            .bodies()
+            .iter()
+            .all(|body| analysis_payload(body, SUMMARIZE).is_none())
+    );
     Ok(())
 }
 

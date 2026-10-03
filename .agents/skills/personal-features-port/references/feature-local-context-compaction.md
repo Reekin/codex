@@ -41,6 +41,10 @@ keep original local records queryable without a hosted notes service.
   Shorten and drop remove a result's images and say how many were removed. A large paired call keeps
   its record type, name and call ID; only its arguments become the summary (a JSON object for
   function calls, plain text for free-form calls) with the original ID.
+  Savings, thresholds and budgets are compared in one unit: local size estimates are scaled by the
+  ratio of the latest provider-reported context to its estimate (excluding earlier reasoning the
+  model does not keep), bounded to 1x-2x so a missing or estimated report falls back to raw
+  estimates. App-server cleanup status reports provider-scale tokens.
 - **REQ-4**: Before launching a batch, bound achievable savings by known pending savings, potentially
   removable unmarked results, and remaining growth before the ordinary hard limit. If even that
   optimistic bound is below the cleanup requirement, skip marking. Count currently protected output
