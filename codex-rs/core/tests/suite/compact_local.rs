@@ -137,23 +137,46 @@ async fn keep_shorten_drop_preserves_dialogue_pairs_and_recalls_originals() -> R
         .iter()
         .find(|body| analysis_payload(body, CLASSIFY).is_some())
         .expect("classification request");
-    let visible_ids = classifier["input"]
+    // The classifier repeats the ordinary request verbatim and only appends its question,
+    // so the provider can serve the shared prefix from its prompt cache.
+    let classifier_input = classifier["input"].as_array().unwrap();
+    let prefix = &classifier_input[..classifier_input.len() - 1];
+    assert!(
+        bodies.iter().any(|body| {
+            analysis_payload(body, CLASSIFY).is_none()
+                && body["tools"] == classifier["tools"]
+                && body["instructions"] == classifier["instructions"]
+                && body["input"].as_array().unwrap().starts_with(prefix)
+        }),
+        "classifier must reuse an ordinary request prefix"
+    );
+    assert!(!classifier.to_string().contains("LOCAL_COMPACTION_SOURCE"));
+    // Candidates are visible tool results, largest first.
+    let candidates = analysis_payload(classifier, CLASSIFY).unwrap()["candidates"]
         .as_array()
         .unwrap()
+        .clone();
+    let sizes = candidates
         .iter()
-        .filter_map(|item| {
-            let text = item["output"].as_str()?;
-            let labelled = text.strip_prefix("LOCAL_COMPACTION_SOURCE\n")?;
-            let header: Value = serde_json::from_str(labelled.split_once('\n')?.0).unwrap();
-            Some(header["item_id"].clone())
+        .map(|candidate| {
+            prefix
+                .iter()
+                .find(|item| {
+                    item["type"] == "function_call_output"
+                        && item["call_id"] == candidate["call_id"]
+                })
+                .expect("candidate call ID is visible")["output"]
+                .to_string()
+                .len()
         })
         .collect::<Vec<_>>();
-    assert!(!installed.to_string().contains("LOCAL_COMPACTION_SOURCE"));
+    assert!(sizes.windows(2).all(|pair| pair[0] >= pair[1]), "{sizes:?}");
+    let candidate_ids = candidates
+        .iter()
+        .map(|candidate| candidate["id"].clone())
+        .collect::<Vec<_>>();
     for decision in &decisions {
-        assert!(
-            visible_ids.contains(&decision["id"]),
-            "model must see a label on the actual evidence"
-        );
+        assert!(candidate_ids.contains(&decision["id"]));
         let query = serde_json::from_value(
             json!({"action":"read_item","item_id":decision["id"],"start_char":0,"max_chars":500}),
         )?;
@@ -748,11 +771,11 @@ async fn keep_marks_survive_new_user_input_and_only_new_ids_are_classified() -> 
         .collect::<Vec<_>>();
     assert_eq!(batches.len(), 2);
     assert!(
-        batches[1]["eligible_ids"]
+        batches[1]["candidates"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|id| !first_ids.contains(id))
+            .all(|candidate| !first_ids.contains(&candidate["id"]))
     );
     test.codex.flush_rollout().await?;
     assert!(checkpoints(&test.codex.rollout_path().unwrap())?.is_empty());

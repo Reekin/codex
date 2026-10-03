@@ -11,6 +11,7 @@ use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_rollout_trace::InferenceTraceContext;
 use futures::StreamExt;
+use serde::Serialize;
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -22,6 +23,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::LocalCompactionRequest;
 use crate::context_manager::ContextManager;
 use crate::responses_metadata::CodexResponsesMetadata;
+use crate::session::step_context::StepContext;
 use codex_protocol::protocol::TokenUsage;
 
 pub(super) struct AnalysisResponse {
@@ -32,17 +34,58 @@ pub(super) struct AnalysisResponse {
     pub(super) rate_limits: Option<codex_protocol::protocol::RateLimitSnapshot>,
 }
 
-pub(super) fn classifier(ids: &[String], guidance: &str) -> CodexResult<LocalCompactionRequest> {
-    LocalCompactionRequest::new(
-        "LOCAL_COMPACTION_CLASSIFY",
-        json!({
-            "eligible_ids": ids,
-            "max_replacement_bytes": 2800,
-            "instructions": "Privately classify each eligible completed tool result exactly once as keep, shorten, or drop. LOCAL_COMPACTION_SOURCE headers explicitly identify original records; classify the result item_id, not its paired call_item_id. Headers are harness metadata, not evidence. Read current dialogue for relevance. Keep evidence needed for active work, unresolved questions, failures and verification. Shorten must preserve useful exact facts. Drop only dispensable output. Do not classify any other ID. Return JSON only, with no prose or fences.",
-            "required_output": {"decisions": [{"id": "eligible source item ID", "action": "keep|shorten|drop", "text": "only for shorten"}]},
-            "supplemental_guidance": guidance,
-        }),
-    )
+/// A completed tool result the model locates by the call ID it sees in the conversation.
+#[derive(Serialize)]
+pub(super) struct Candidate {
+    pub(super) id: String,
+    call_id: String,
+}
+
+impl Candidate {
+    pub(super) fn new(item: &ResponseItem) -> Option<Self> {
+        let (id, call_id) = match item {
+            ResponseItem::FunctionCallOutput {
+                id: Some(id),
+                call_id: Some(call_id),
+                ..
+            }
+            | ResponseItem::CustomToolCallOutput {
+                id: Some(id),
+                call_id,
+                ..
+            } => (id, call_id),
+            _ => return None,
+        };
+        Some(Self {
+            id: id.to_string(),
+            call_id: call_id.clone(),
+        })
+    }
+}
+
+/// Drops the trailing (smallest) candidates until the request fits its byte cap.
+pub(super) fn classifier(
+    candidates: &mut Vec<Candidate>,
+    guidance: &str,
+) -> CodexResult<LocalCompactionRequest> {
+    loop {
+        let request = LocalCompactionRequest::new(
+            "LOCAL_COMPACTION_CLASSIFY",
+            json!({
+                "candidates": candidates,
+                "max_replacement_bytes": 2800,
+                "instructions": "Do not call tools and do not continue the task. Privately classify each candidate completed tool result above exactly once as keep, shorten, or drop. Find each result by its call_id in the conversation and answer with its id. Read current dialogue for relevance. Keep evidence needed for active work, unresolved questions, failures and verification. Shorten must preserve useful exact facts. Drop only dispensable output. Do not classify any other result. Return JSON only, with no prose or fences.",
+                "required_output": {"decisions": [{"id": "candidate id", "action": "keep|shorten|drop", "text": "only for shorten"}]},
+                "supplemental_guidance": guidance,
+            }),
+        );
+        match request {
+            Err(_) if candidates.len() > 1 => {
+                candidates.pop();
+            }
+            result => return result,
+        }
+    }
 }
 
 pub(super) fn summarizer(plan: &TierPlan, guidance: &str) -> CodexResult<LocalCompactionRequest> {
@@ -57,27 +100,52 @@ pub(super) fn summarizer(plan: &TierPlan, guidance: &str) -> CodexResult<LocalCo
     )
 }
 
-pub(super) async fn infer_json(
+/// Reuses the ordinary request unchanged and appends the request, so the shared prefix
+/// (tools, instructions, history) is served from the provider's prompt cache.
+pub(super) fn classifier_prompt(
+    step: &StepContext,
     base_instructions: BaseInstructions,
-    context: &LocalCompactionContext,
-    client: &mut ModelClientSession,
-    metadata: &CodexResponsesMetadata,
     source: &[ResponseItemEnvelope],
     request: LocalCompactionRequest,
-) -> CodexResult<AnalysisResponse> {
+) -> Prompt {
+    let mut history = ContextManager::default();
+    history.replace_annotated(source.to_vec());
+    let mut input = history.for_prompt(&step.settings.model_info.input_modalities);
+    input.push(ContextualUserFragment::into(request));
+    let mut prompt = crate::session::turn::build_prompt(input, step, base_instructions);
+    // A turn-level answer schema would reject the classification JSON.
+    prompt.output_schema = None;
+    prompt
+}
+
+/// Summary ranges are addressed by item IDs, so this private copy labels every record.
+pub(super) fn summarizer_prompt(
+    context: &LocalCompactionContext,
+    base_instructions: BaseInstructions,
+    source: &[ResponseItemEnvelope],
+    request: LocalCompactionRequest,
+) -> CodexResult<Prompt> {
     let mut history = ContextManager::default();
     history.replace_annotated(source.to_vec());
     let mut input = history.for_prompt(&context.settings.model_info.input_modalities);
     label_source_items(&mut input)?;
     input.push(ContextualUserFragment::into(request));
-    let prompt = Prompt {
+    Ok(Prompt {
         input,
         base_instructions,
         ..Default::default()
-    };
+    })
+}
+
+pub(super) async fn infer_json(
+    prompt: &Prompt,
+    context: &LocalCompactionContext,
+    client: &mut ModelClientSession,
+    metadata: &CodexResponsesMetadata,
+) -> CodexResult<AnalysisResponse> {
     let mut stream = client
         .stream(
-            &prompt,
+            prompt,
             &context.settings.model_info,
             &context.session_telemetry,
             context.settings.reasoning_effort().cloned(),

@@ -65,20 +65,23 @@ class Model(http.server.ThreadingHTTPServer):
         self.requests.append(body)
         payload = analysis_payload(body, "LOCAL_COMPACTION_CLASSIFY")
         if payload is not None:
-            visible_ids = set()
-            for item in body.get("input", []):
-                text = item.get("output")
-                if isinstance(text, str) and text.startswith(
-                    "LOCAL_COMPACTION_SOURCE\n"
-                ):
-                    visible_ids.add(json.loads(text.split("\n", 2)[1])["item_id"])
-            assert set(payload["eligible_ids"]).issubset(visible_ids), (
-                "tool IDs must label model-visible evidence"
+            visible_calls = {
+                item.get("call_id")
+                for item in body.get("input", [])
+                if item.get("type") == "function_call_output"
+            }
+            candidates = payload["candidates"]
+            assert {c["call_id"] for c in candidates} <= visible_calls, (
+                "candidates must name model-visible tool results"
+            )
+            assert body.get("tools"), "classifier must repeat the ordinary tool prefix"
+            assert "LOCAL_COMPACTION_SOURCE" not in json.dumps(body), (
+                "classifier must not rewrite the shared prefix"
             )
             decisions = []
-            for index, item_id in enumerate(payload["eligible_ids"]):
+            for index, candidate in enumerate(candidates):
                 action = ["keep", "shorten", "drop"][index % 3]
-                decision = {"id": item_id, "action": action}
+                decision = {"id": candidate["id"], "action": action}
                 if action == "shorten":
                     decision["text"] = (
                         "Fixture tool was unavailable; no command was executed."

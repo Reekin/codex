@@ -15,9 +15,12 @@ keep original local records queryable without a hosted notes service.
 ## Stable Contract
 
 - **REQ-1**: A separate background request uses the current step's model and inference settings to
-  classify completed, unmarked tool results as keep, shorten, or drop. Requests contain current
-  conversation and explicit model-readable source IDs. Shorten includes concise evidence. Batches
-  start after configurable accumulation: 32 records or 5% of the usable window by default. Only one
+  classify completed, unmarked tool results as keep, shorten, or drop. It repeats the next ordinary
+  request's instructions, tools and history unchanged and only appends the question, so the shared
+  prefix is served from the prompt cache. The question names each candidate by its result ID and the
+  model-visible call ID. Each batch takes the largest unmarked results first, at most 64 so a full
+  batch of replacements fits the response limit. Shorten includes concise evidence. Batches start
+  after configurable accumulation: 32 records or 5% of the usable window by default. Only one
   marking request is in flight per session; normal model work does not wait for it.
 - **REQ-2**: Results are stored by stable record ID and original content. Appended messages, new user
   input, and disjoint tool cleanup do not invalidate a batch. Only unchanged, still-present records
@@ -86,7 +89,8 @@ keep original local records queryable without a hosted notes service.
 ## P0 Acceptance
 
 1. Hold a marking response open while ordinary model work completes. Verify current model settings,
-   visible IDs, one in-flight batch, and unchanged live dialogue (REQ-1,2,5).
+   an unchanged ordinary-request prefix, largest-first candidates with visible call IDs, one
+   in-flight batch, and unchanged live dialogue (REQ-1,2,5).
 2. Accumulate validated savings: 50 to 30 must not rewrite; 70 to 40 may rewrite. Newer unmarked
    results and concurrent batch targets survive; originals remain queryable (REQ-2,3,7,8).
 3. Exercise feasible/impossible bounds, future eligibility of protected results, and a changed
