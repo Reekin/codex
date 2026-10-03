@@ -745,13 +745,11 @@ fn total_token_usage_includes_all_items_after_last_model_generated_item() {
         reasoning_with_encrypted_content(/*len*/ 4_000),
         assistant_msg("already counted by API"),
     ]);
-    history.update_token_info(
-        &TokenUsage {
-            total_tokens: 100,
-            ..Default::default()
-        },
-        /*model_context_window*/ None,
-    );
+    let usage = TokenUsage {
+        total_tokens: 100,
+        ..Default::default()
+    };
+    history.update_token_info(&usage, &usage, /*model_context_window*/ None);
     let added_user = user_msg("new user message");
     let added_tool_output = custom_tool_call_output("tool-tail", "new tool output");
     history.record_items(

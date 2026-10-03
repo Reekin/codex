@@ -226,9 +226,11 @@ impl SessionState {
     pub(crate) fn update_token_info_from_usage(
         &mut self,
         usage: &TokenUsage,
+        active_usage: &TokenUsage,
         model_context_window: Option<i64>,
     ) {
-        self.history.update_token_info(usage, model_context_window);
+        self.history
+            .update_token_info(usage, active_usage, model_context_window);
     }
 
     pub(crate) fn ensure_auto_compact_window_server_prefill_from_usage(
