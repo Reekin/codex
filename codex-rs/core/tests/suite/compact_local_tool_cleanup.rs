@@ -5,10 +5,18 @@ use anyhow::Result;
 use codex_core::ToolCleanupOutcome;
 use codex_core::ToolCleanupStatus;
 use codex_core::config::Config;
+use codex_protocol::models::ResponseItem;
+use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call;
+use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
+use serde_json::json;
+
+const SCREENSHOT: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
 /// Marks are validated, but the automatic savings requirement is far out of reach.
 fn configure_unreached_savings(config: &mut Config) {
@@ -131,5 +139,106 @@ async fn validated_marks_survive_resume_and_apply_manually() -> Result<()> {
     resumed.codex.flush_rollout().await?;
     assert_eq!(checkpoints(&path)?.len(), 1);
     assert_eq!(classifier_requests(&model), classified);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn screenshots_and_large_calls_are_cleaned_and_images_recalled() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    let test = test_codex()
+        .with_config(configure_unreached_savings)
+        .build_with_auto_env(&server)
+        .await?;
+    model.text("Ready.");
+    test.submit_text_turn("Start the GUI check.").await?;
+    let patch = format!(
+        "*** Begin Patch\n{}*** End Patch",
+        "+fixture line\n".repeat(200)
+    );
+    let items: Vec<ResponseItem> = serde_json::from_value(json!([
+        {"type":"function_call","id":"fc_shot","call_id":"drop-shot","name":"js","arguments":"{}"},
+        {"type":"function_call_output","id":"fco_shot","call_id":"drop-shot","output":[
+            {"type":"input_text","text":"Screenshot of the settings page. ".repeat(10)},
+            {"type":"input_image","image_url":SCREENSHOT}
+        ]},
+        {"type":"custom_tool_call","id":"ctc_patch","call_id":"shorten-patch","name":"apply_patch","input":patch},
+        {"type":"custom_tool_call_output","id":"ctco_patch","call_id":"shorten-patch","output":"Success. Updated config.toml"}
+    ]))?;
+    test.codex.inject_response_items(items).await?;
+    model.text("Noted.");
+    test.submit_text_turn("Continue.").await?;
+    finish_marking(&test, &model, /*expected_batches*/ 1).await?;
+    let batch = model
+        .bodies()
+        .iter()
+        .find_map(|body| analysis_payload(body, CLASSIFY))
+        .expect("classification request");
+    let summarize = batch["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| (candidate["id"].clone(), candidate["summarize_call"].clone()))
+        .collect::<Vec<_>>();
+    assert!(summarize.contains(&(json!("ctco_patch"), json!(true))));
+    assert!(summarize.contains(&(json!("fco_shot"), Value::Null)));
+
+    let mut status = test.codex.tool_cleanup_status().await?;
+    for _ in 0..100 {
+        if !status.marking {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        status = test.codex.tool_cleanup_status().await?;
+    }
+    assert!(test.codex.apply_tool_cleanup().await?.released_tokens > 0);
+
+    model.text("Using the cleaned view.");
+    test.submit_text_turn("Continue with the cleaned view.")
+        .await?;
+    let body = model.ordinary_bodies().pop().unwrap();
+    let input = body["input"].as_array().unwrap();
+    let item = |kind: &str, call_id: &str| {
+        input
+            .iter()
+            .find(|item| item["type"] == kind && item["call_id"] == call_id)
+            .cloned()
+            .expect("paired record stays in history")
+    };
+    let shot = item("function_call_output", "drop-shot");
+    assert!(!shot.to_string().contains("input_image"));
+    assert!(shot.to_string().contains("1 images"));
+    let call = item("custom_tool_call", "shorten-patch");
+    assert!(call["input"].as_str().unwrap().starts_with(CALL_SUMMARY));
+    assert_eq!(call["name"], "apply_patch");
+    // The short patch result stays as is; only its large call shrinks.
+    assert_eq!(
+        item("custom_tool_call_output", "shorten-patch")["output"],
+        "Success. Updated config.toml"
+    );
+
+    // The model can still look at the original screenshot.
+    model.reply(sse(vec![
+        ev_function_call(
+            "recall-shot",
+            "recall_read_item",
+            &json!({"item_id":"fco_shot"}).to_string(),
+        ),
+        ev_completed("recall-call"),
+    ]));
+    model.text("Screenshot reviewed.");
+    test.submit_text_turn("Look at the earlier screenshot.")
+        .await?;
+    let body = model.ordinary_bodies().pop().unwrap();
+    let recalled = body["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output" && item["call_id"] == "recall-shot")
+        .expect("recall output")
+        .to_string();
+    assert!(recalled.contains("[image 1]"));
+    assert!(recalled.contains("input_image") && recalled.contains(SCREENSHOT));
     Ok(())
 }

@@ -15,11 +15,14 @@ keep original local records queryable without a hosted notes service.
 ## Stable Contract
 
 - **REQ-1**: A separate background request uses the current step's model and inference settings to
-  classify completed, unmarked tool results as keep, shorten, or drop. It repeats the next ordinary
+  classify completed, unmarked tool results, including results with images, as keep, shorten, or
+  drop. It repeats the next ordinary
   request's instructions, tools and history unchanged and only appends the question, so the shared
   prefix is served from the prompt cache. The question names each candidate by its result ID and the
-  model-visible call ID. Each batch takes the largest unmarked results first, at most 64 so a full
-  batch of replacements fits the response limit. Shorten includes concise evidence. Batches start
+  model-visible call ID. A result's size includes its paired call when that call carries large
+  arguments (1,000 bytes or more); such candidates also ask for a one-line call summary. Each batch
+  takes the largest unmarked results first, at most 64 so a full batch of replacements fits the
+  response limit. Shorten includes concise evidence. Batches start
   after configurable accumulation: 32 records or 5% of the usable window by default. Only one
   marking request is in flight per session; normal model work does not wait for it.
 - **REQ-2**: Results are stored by stable record ID and original content. Appended messages, new user
@@ -33,6 +36,9 @@ keep original local records queryable without a hosted notes service.
   configured share of the whole usable window (default 30 percentage points). Thus 50% to 30% is
   insufficient and 70% to 40% qualifies. No total-occupancy target or 50% trigger governs tool cleanup.
   Dialogue, call/result pairing, and unmarked output stay intact. Replacements expose original IDs.
+  Shorten and drop remove a result's images and say how many were removed. A large paired call keeps
+  its record type, name and call ID; only its arguments become the summary (a JSON object for
+  function calls, plain text for free-form calls) with the original ID.
 - **REQ-4**: Before launching a batch, bound achievable savings by known pending savings, potentially
   removable unmarked results, and remaining growth before the ordinary hard limit. If even that
   optimistic bound is below the cleanup requirement, skip marking. Count currently protected output
@@ -57,6 +63,9 @@ keep original local records queryable without a hosted notes service.
 - **REQ-8**: Recall tools and CLI share bounded local listing/search, turn detail selection, and
   original-item pagination. Installed views and source references survive resume; inherited history
   respects fork boundaries. Output and every injected fragment have hard size limits below 10k tokens.
+  Original images appear in item text as numbered placeholders. Reading an item attaches up to four
+  original images as real images on its first page, with an image cursor for the rest; the CLI can
+  include them as data URLs on request.
 - **REQ-9**: Provider/model capability routing remains the default. A local preference can force
   this pipeline and bypass hosted-notes rollover. Configuration separately controls marking batch
   size, reclaim percentage, and preferred full-compaction occupancy. Obsolete occupancy-trigger and
@@ -105,6 +114,9 @@ keep original local records queryable without a hosted notes service.
 7. Validate marks below the savings requirement, restart and fork, and verify identical status
    without new marking requests. Apply manually through the app-server methods, including on the
    packaged binary; verify the release, the next request's view, and a no-op second apply (REQ-2,10).
+8. Mark a screenshot result and a large free-form call. Verify the summary request flag, image
+   removal with a count, the call keeping its name and ID with the summary as arguments, and recall
+   returning the original image to the model (REQ-1,3,8).
 
 ## Integration Contract
 

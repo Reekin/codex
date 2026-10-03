@@ -16,6 +16,8 @@ use serde_json::json;
 use crate::RolloutItem;
 
 const MAX_PAGE_BYTES: usize = 8000;
+/// Original images attached to one ReadItem page.
+pub const MAX_IMAGES_PER_READ: usize = 4;
 
 /// All offsets are zero-based; character offsets count Unicode scalar values, not bytes.
 #[derive(Debug, Deserialize, Serialize)]
@@ -51,6 +53,9 @@ pub enum RecallQuery {
         start_char: usize,
         #[serde(default = "default_chars")]
         max_chars: usize,
+        /// First image to attach; defaults to the first image on the page at `start_char` 0.
+        #[serde(default)]
+        image_offset: Option<usize>,
     },
 }
 
@@ -80,6 +85,8 @@ struct OriginalItem {
     kind: String,
     dialogue: bool,
     tool: bool,
+    /// Image URLs, shown in `text` as `[image N]` placeholders (1-based).
+    images: Vec<String>,
     text: String,
 }
 
@@ -168,7 +175,9 @@ impl RecallArchive {
                     return Ok(());
                 }
                 let item = envelope.item;
-                let value = serde_json::to_value(&item).map_err(io::Error::other)?;
+                let mut value = serde_json::to_value(&item).map_err(io::Error::other)?;
+                let mut images = Vec::new();
+                extract_images(&mut value, &mut images);
                 let kind = value["type"].as_str().unwrap_or("unknown").to_owned();
                 let id = item
                     .id()
@@ -194,7 +203,16 @@ impl RecallArchive {
                     kind,
                     dialogue,
                     tool,
-                    text: serde_json::to_string(&item).map_err(io::Error::other)?,
+                    // Keep the original field order; swap each image URL for its placeholder.
+                    text: images.iter().enumerate().try_fold(
+                        serde_json::to_string(&item).map_err(io::Error::other)?,
+                        |text, (index, url)| {
+                            let url = serde_json::to_string(url).map_err(io::Error::other)?;
+                            let placeholder = format!("\"[image {}]\"", index + 1);
+                            Ok::<_, io::Error>(text.replacen(&url, &placeholder, 1))
+                        },
+                    )?,
+                    images,
                 });
             }
             // Compacted replacements and event projections are not original response records.
@@ -270,6 +288,7 @@ impl RecallArchive {
                 item_id,
                 start_char,
                 max_chars,
+                image_offset,
             } => {
                 let item = self
                     .items
@@ -279,12 +298,18 @@ impl RecallArchive {
                         io::Error::other("item is not present in the original archive")
                     })?;
                 let total_chars = item.text.chars().count();
+                let images = attached_images(item, start_char, image_offset);
+                let image_count = item.images.len();
+                let next_image = (images.end < image_count).then_some(images.end);
+                let first_image = (!images.is_empty()).then_some(images.start + 1);
                 let make_page = |count| {
                     let text = slice_chars(&item.text, start_char, count);
                     let end = start_char.saturating_add(text.chars().count());
                     json!({"item_id": item.id, "turn_id": item.turn_id, "text": text,
                         "start_char": start_char, "total_chars": total_chars,
-                        "next_char": (end < total_chars).then_some(end)})
+                        "next_char": (end < total_chars).then_some(end),
+                        "image_count": image_count, "attached_from_image": first_image,
+                        "next_image": next_image})
                 };
                 let mut low = 0;
                 let mut high = max_chars
@@ -308,6 +333,65 @@ impl RecallArchive {
                 Ok(page)
             }
         }
+    }
+
+    /// Original images belonging to a ReadItem page, in `[image N]` order.
+    pub fn read_item_images(&self, query: &RecallQuery) -> Vec<String> {
+        let RecallQuery::ReadItem {
+            item_id,
+            start_char,
+            image_offset,
+            ..
+        } = query
+        else {
+            return Vec::new();
+        };
+        self.items
+            .iter()
+            .find(|item| item.id == *item_id)
+            .map(|item| item.images[attached_images(item, *start_char, *image_offset)].to_vec())
+            .unwrap_or_default()
+    }
+}
+
+/// Images ride with the first text page unless the caller pages through them explicitly.
+fn attached_images(
+    item: &OriginalItem,
+    start_char: usize,
+    image_offset: Option<usize>,
+) -> std::ops::Range<usize> {
+    let start = match image_offset {
+        Some(offset) => offset.min(item.images.len()),
+        None if start_char == 0 => 0,
+        None => item.images.len(),
+    };
+    start
+        ..start
+            .saturating_add(MAX_IMAGES_PER_READ)
+            .min(item.images.len())
+}
+
+/// Moves every `image_url` string out of the JSON and leaves a numbered placeholder.
+fn extract_images(value: &mut Value, images: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                if key == "image_url"
+                    && let Value::String(url) = entry
+                {
+                    images.push(std::mem::take(url));
+                    *entry = Value::String(format!("[image {}]", images.len()));
+                } else {
+                    extract_images(entry, images);
+                }
+            }
+        }
+        Value::Array(entries) => {
+            for entry in entries {
+                extract_images(entry, images);
+            }
+        }
+        _ => {}
     }
 }
 

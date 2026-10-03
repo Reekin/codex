@@ -9,6 +9,7 @@ use crate::Budget;
 use crate::StagedDecisions;
 use crate::TierPlan;
 use crate::eligible_results;
+use crate::large_calls;
 
 fn item(value: serde_json::Value) -> ResponseItemEnvelope {
     ResponseItemEnvelope::new(serde_json::from_value(value).unwrap())
@@ -145,7 +146,7 @@ fn staged_decisions_preserve_new_outputs_and_user_direction() {
 }
 
 #[test]
-fn opaque_and_multimodal_results_are_not_classifier_candidates() {
+fn image_results_are_candidates_and_opaque_results_are_not() {
     let mut source = history();
     source[2] = item(
         json!({"type":"function_call_output","id":"result_0","call_id":"c0","output":[{"type":"input_image","image_url":"data:image/png;base64,AAAA"}]}),
@@ -153,7 +154,93 @@ fn opaque_and_multimodal_results_are_not_classifier_candidates() {
     source[4] = item(
         json!({"type":"function_call_output","id":"result_1","call_id":"c1","output":[{"type":"encrypted_content","encrypted_content":"opaque"}]}),
     );
-    assert_eq!(eligible_results(&source), vec!["result_2"]);
+    assert_eq!(eligible_results(&source), vec!["result_0", "result_2"]);
+}
+
+#[test]
+fn cleanup_strips_images_and_summarizes_large_paired_calls() {
+    let mut source = history();
+    let screenshot = format!("data:image/png;base64,{}", "A".repeat(4000));
+    source[2] = item(
+        json!({"type":"function_call_output","id":"result_0","call_id":"c0","output":[
+            {"type":"input_text","text":"Screenshot of the settings page."},
+            {"type":"input_image","image_url":screenshot},
+            {"type":"input_image","image_url":screenshot}
+        ]}),
+    );
+    let patch = format!("*** Begin Patch\n{}*** End Patch", "+line\n".repeat(400));
+    source[3] = item(
+        json!({"type":"custom_tool_call","id":"call_1","call_id":"c1","name":"apply_patch","input":patch}),
+    );
+    source[4] = item(
+        json!({"type":"custom_tool_call_output","id":"result_1","call_id":"c1","output":"long evidence ".repeat(200)}),
+    );
+    let script = json!({"code": "x".repeat(2000)}).to_string();
+    source[5] = item(
+        json!({"type":"function_call","id":"call_2","call_id":"c2","name":"js","arguments":script}),
+    );
+    assert_eq!(
+        large_calls(&source),
+        [("result_1".to_string(), 3), ("result_2".to_string(), 5)].into()
+    );
+    let stage = StagedDecisions::parse(source.clone(), &json!({"decisions":[
+        {"id":"result_0","action":"drop"},
+        {"id":"result_1","action":"shorten","text":"Patch applied.","call_text":"Rewrote config.toml"},
+        {"id":"result_2","action":"drop"}
+    ]}).to_string()).unwrap();
+    let replacement = stage.apply(&source).unwrap();
+
+    let ResponseItem::FunctionCallOutput { output, .. } = &replacement[2].item else {
+        panic!("tool result")
+    };
+    assert_eq!(
+        output.body,
+        FunctionCallOutputBody::Text(
+            "[Output omitted with 2 images; original item: result_0; use recall_read_item.]"
+                .to_string()
+        )
+    );
+    let ResponseItem::CustomToolCall { input, call_id, .. } = &replacement[3].item else {
+        panic!("custom call")
+    };
+    assert_eq!(
+        (input.as_str(), call_id.as_str()),
+        (
+            "Rewrote config.toml\n[Original item: call_1; use recall_read_item.]",
+            "c1"
+        )
+    );
+    // Function arguments stay a JSON object so providers can still parse the call.
+    let ResponseItem::FunctionCall { arguments, .. } = &replacement[5].item else {
+        panic!("function call")
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(arguments).unwrap(),
+        json!({"summary": "[Arguments omitted; original item: call_2; use recall_read_item.]"})
+    );
+    for index in [2, 4, 6] {
+        assert!(
+            replacement[index]
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.local_compaction.is_some())
+        );
+    }
+    // The optimistic bound counts the same image and call reductions.
+    let bound = StagedDecisions::default().optimistic_replacement(&source);
+    assert!(
+        matches!(&bound[3].item, ResponseItem::CustomToolCall { input, .. } if input.len() < 200)
+    );
+    assert!(
+        matches!(&bound[2].item, ResponseItem::FunctionCallOutput { output, .. } if output.content_items().is_none())
+    );
+
+    let oversized = json!({"decisions":[
+        {"id":"result_0","action":"keep"},{"id":"result_2","action":"keep"},
+        {"id":"result_1","action":"drop","call_text":"x".repeat(401)}
+    ]})
+    .to_string();
+    assert!(StagedDecisions::parse(source, &oversized).is_err());
 }
 
 #[test]

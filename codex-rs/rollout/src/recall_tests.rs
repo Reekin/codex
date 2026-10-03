@@ -22,7 +22,59 @@ fn read(item_id: &str, start_char: usize, max_chars: usize) -> RecallQuery {
         item_id: item_id.into(),
         start_char,
         max_chars,
+        image_offset: None,
     }
+}
+
+#[test]
+fn images_become_placeholders_and_page_separately() {
+    let mut archive = RecallArchive::default();
+    let images: Vec<_> = (1..=6)
+        .map(|index| format!("data:image/png;base64,{}", "A".repeat(index * 1000)))
+        .collect();
+    let mut content = vec![json!({"type":"input_text","text":"screenshot taken"})];
+    content.extend(
+        images
+            .iter()
+            .map(|url| json!({"type":"input_image","image_url":url})),
+    );
+    let output = serde_json::from_value::<codex_protocol::models::ResponseItem>(json!({
+        "type":"function_call_output", "id":"fco_shot", "call_id":"call_shot", "output":content
+    }))
+    .unwrap();
+    archive
+        .record(RolloutItem::ResponseItem(output.into()), "1")
+        .unwrap();
+
+    let first = read("fco_shot", 0, 8000);
+    let page = archive.query(read("fco_shot", 0, 8000)).unwrap();
+    let text = page["text"].as_str().unwrap();
+    assert!(text.contains("[image 1]") && text.contains("[image 6]"));
+    assert!(!text.contains("base64"));
+    assert_eq!(
+        (
+            &page["image_count"],
+            &page["attached_from_image"],
+            &page["next_image"]
+        ),
+        (&json!(6), &json!(1), &json!(4))
+    );
+    assert_eq!(archive.read_item_images(&first), images[..4].to_vec());
+
+    // Later text pages do not repeat images; image_offset pages through the rest.
+    assert!(
+        archive
+            .read_item_images(&read("fco_shot", 5, 10))
+            .is_empty()
+    );
+    let rest = RecallQuery::ReadItem {
+        item_id: "fco_shot".into(),
+        start_char: 0,
+        max_chars: 10,
+        image_offset: Some(4),
+    };
+    assert_eq!(archive.read_item_images(&rest), images[4..].to_vec());
+    assert_eq!(archive.query(rest).unwrap()["next_image"], Value::Null);
 }
 
 #[test]

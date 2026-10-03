@@ -16,13 +16,21 @@ pub struct RecallCommand {
     /// JSON query: action=list_turns|search|read_turn|read_item, with the model tool's arguments.
     #[arg(long)]
     query: String,
+    /// For read_item, add the page's original images (data URLs) as an `images` array.
+    #[arg(long)]
+    images: bool,
 }
 
 impl RecallCommand {
     pub async fn run(self) -> anyhow::Result<()> {
         let query: RecallQuery = serde_json::from_str(&self.query)?;
         let archive = RecallArchive::load(&self.rollout, self.codex_home.as_deref()).await?;
-        println!("{}", archive.query(query)?);
+        let images = archive.read_item_images(&query);
+        let mut page = archive.query(query)?;
+        if self.images {
+            page["images"] = images.into();
+        }
+        println!("{page}");
         Ok(())
     }
 }

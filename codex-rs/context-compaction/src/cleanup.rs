@@ -6,9 +6,11 @@ use codex_history::LocalCompactionSource;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::json;
 
 use crate::CompactionError;
 use crate::MAX_FRAGMENT_BYTES;
@@ -17,18 +19,47 @@ use crate::groups::call_key;
 use crate::groups::output_key;
 use crate::groups::protected_start;
 
+/// Calls carrying at least this much argument text are shortened together with their result.
+pub const LARGE_CALL_BYTES: usize = 1_000;
+/// A call summary replaces the call's arguments; it is a single short line.
+pub const MAX_CALL_SUMMARY_BYTES: usize = 400;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Decision {
-    Keep { id: String },
-    Shorten { id: String, text: String },
-    Drop { id: String },
+    Keep {
+        id: String,
+        /// Accepted and ignored: a kept result leaves its call unchanged.
+        #[serde(default, skip_serializing)]
+        call_text: Option<String>,
+    },
+    Shorten {
+        id: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_text: Option<String>,
+    },
+    Drop {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_text: Option<String>,
+    },
 }
 
 impl Decision {
     pub fn id(&self) -> &str {
         match self {
-            Self::Keep { id } | Self::Shorten { id, .. } | Self::Drop { id } => id,
+            Self::Keep { id, .. } | Self::Shorten { id, .. } | Self::Drop { id, .. } => id,
+        }
+    }
+
+    /// An empty summary means none was given; the call then gets a plain archive reference.
+    fn call_text(&self) -> Option<&str> {
+        match self {
+            Self::Keep { .. } => None,
+            Self::Shorten { call_text, .. } | Self::Drop { call_text, .. } => {
+                call_text.as_deref().filter(|text| !text.trim().is_empty())
+            }
         }
     }
 }
@@ -51,6 +82,76 @@ pub fn eligible_results(items: &[ResponseItemEnvelope]) -> Vec<String> {
     completed_results(&items[..protected])
 }
 
+/// Maps each tool result ID to the index of its paired call when that call carries at least
+/// `LARGE_CALL_BYTES` of arguments. Such calls are shortened together with their result.
+pub fn large_calls(items: &[ResponseItemEnvelope]) -> HashMap<String, usize> {
+    let mut calls = HashMap::new();
+    let mut large = HashMap::new();
+    for (index, envelope) in items.iter().enumerate() {
+        if let Some(key) = call_key(&envelope.item)
+            && call_arguments(&envelope.item).is_some_and(|text| text.len() >= LARGE_CALL_BYTES)
+        {
+            calls.insert(key, index);
+        }
+        if let Some(key) = output_key(&envelope.item)
+            && let Some(call) = calls.remove(&key)
+            && let Some(id) = envelope.item.id()
+        {
+            large.insert(id.to_string(), call);
+        }
+    }
+    large
+}
+
+fn call_arguments(item: &ResponseItem) -> Option<&str> {
+    match item {
+        ResponseItem::FunctionCall { arguments, .. } => Some(arguments),
+        ResponseItem::CustomToolCall { input, .. } => Some(input),
+        _ => None,
+    }
+}
+
+/// Replaces call arguments in place, keeping the call's type, name and pairing ID.
+fn shorten_call(item: &mut ResponseItem, summary: Option<&str>) -> bool {
+    let (id, arguments, function) = match item {
+        ResponseItem::FunctionCall {
+            id: Some(id),
+            arguments,
+            ..
+        } => (id.to_string(), arguments, true),
+        ResponseItem::CustomToolCall {
+            id: Some(id),
+            input,
+            ..
+        } => (id.to_string(), input, false),
+        _ => return false,
+    };
+    let text = match summary {
+        Some(summary) => format!("{summary}\n[Original item: {id}; use recall_read_item.]"),
+        None => format!("[Arguments omitted; original item: {id}; use recall_read_item.]"),
+    };
+    // Providers parse function arguments as a JSON object; free-form input stays plain text.
+    let text = if function {
+        json!({ "summary": text }).to_string()
+    } else {
+        text
+    };
+    if text.len() >= arguments.len() {
+        return false;
+    }
+    *arguments = text;
+    true
+}
+
+fn image_count(output: &FunctionCallOutputPayload) -> usize {
+    output.content_items().map_or(0, |parts| {
+        parts
+            .iter()
+            .filter(|part| matches!(part, FunctionCallOutputContentItem::InputImage { .. }))
+            .count()
+    })
+}
+
 fn completed_results(items: &[ResponseItemEnvelope]) -> Vec<String> {
     let calls: HashSet<_> = items
         .iter()
@@ -63,7 +164,7 @@ fn completed_results(items: &[ResponseItemEnvelope]) -> Vec<String> {
             || envelope.metadata.as_ref().and_then(|metadata| metadata.local_compaction.as_ref()).is_some()
             || !matches!(item,
                 ResponseItem::FunctionCallOutput { output, .. } | ResponseItem::CustomToolCallOutput { output, .. }
-                if output.content_items().is_none_or(|parts| parts.iter().all(|part| matches!(part, FunctionCallOutputContentItem::InputText { .. }))))
+                if output.content_items().is_none_or(|parts| parts.iter().all(|part| matches!(part, FunctionCallOutputContentItem::InputText { .. } | FunctionCallOutputContentItem::InputImage { .. }))))
         {
             return None;
         }
@@ -98,25 +199,30 @@ impl StagedDecisions {
     }
 
     /// Optimistic removable view includes completed results that can age out of protection.
-    /// Calls, archive references, known keeps and already installed reductions remain intact.
+    /// Small calls, archive references, known keeps and installed reductions remain intact.
     pub fn optimistic_replacement(
         &self,
         current: &[ResponseItemEnvelope],
     ) -> Vec<ResponseItemEnvelope> {
         let candidates: HashSet<_> = completed_results(current).into_iter().collect();
+        let calls = large_calls(current);
         let mut result = current.to_vec();
-        for item in &mut result {
-            if self.contains(item)
-                || !item
+        for index in 0..result.len() {
+            if self.contains(&result[index])
+                || !result[index]
                     .item
                     .id()
                     .is_some_and(|id| candidates.contains(id.as_str()))
             {
                 continue;
             }
-            let id = item.item.id().expect("candidate has ID").to_string();
+            let id = result[index]
+                .item
+                .id()
+                .expect("candidate has ID")
+                .to_string();
             if let ResponseItem::FunctionCallOutput { output, .. }
-            | ResponseItem::CustomToolCallOutput { output, .. } = &mut item.item
+            | ResponseItem::CustomToolCallOutput { output, .. } = &mut result[index].item
             {
                 // The original-ID reference is mandatory; a future concise replacement
                 // can be smaller than the drop notice. Omit optional prose for this bound.
@@ -124,6 +230,9 @@ impl StagedDecisions {
                 if reference.len() < output.to_string().len() {
                     output.body = FunctionCallOutputBody::Text(reference);
                 }
+            }
+            if let Some(&call) = calls.get(&id) {
+                shorten_call(&mut result[call].item, /*summary*/ None);
             }
         }
         result
@@ -173,6 +282,12 @@ impl StagedDecisions {
                     "replacement text is empty or oversized",
                 ));
             }
+            if decision
+                .call_text()
+                .is_some_and(|text| text.len() > MAX_CALL_SUMMARY_BYTES)
+            {
+                return Err(CompactionError::Invalid("call summary is oversized"));
+            }
         }
         if seen.len() != allowed.len() {
             return Err(CompactionError::Invalid(
@@ -207,23 +322,25 @@ impl StagedDecisions {
         self.decisions.extend(newer.decisions);
     }
 
-    /// Preserve calls and IDs, replacing dropped output with a small archive reference.
+    /// Preserve call/result pairing and IDs. Shortened and dropped results lose their images and
+    /// bulky text; a large paired call keeps its record but its arguments become a summary.
     pub fn apply(
         &self,
         current: &[ResponseItemEnvelope],
     ) -> Result<Vec<ResponseItemEnvelope>, CompactionError> {
         let eligible: HashSet<_> = eligible_results(current).into_iter().collect();
+        let calls = large_calls(current);
         let decisions: HashMap<_, _> = self
             .decisions
             .iter()
             .map(|decision| (decision.id(), decision))
             .collect();
         let mut replacement = current.to_vec();
-        for envelope in &mut replacement {
-            if !self.contains(envelope) {
+        for index in 0..replacement.len() {
+            if !self.contains(&replacement[index]) {
                 continue;
             }
-            let Some(id) = envelope.item.id().map(ToString::to_string) else {
+            let Some(id) = replacement[index].item.id().map(ToString::to_string) else {
                 continue;
             };
             let Some(decision) = decisions.get(id.as_str()) else {
@@ -232,34 +349,54 @@ impl StagedDecisions {
             if !eligible.contains(&id) {
                 continue;
             }
-            let text = match decision {
+            let summary = match decision {
                 Decision::Keep { .. } => continue,
-                Decision::Shorten { text, .. } => {
-                    format!("{text}\n[Original item: {id}; use recall_read_item.]")
-                }
-                Decision::Drop { .. } => {
-                    format!("[Output omitted; original item: {id}; use recall_read_item.]")
-                }
+                Decision::Shorten { text, .. } => Some(text),
+                Decision::Drop { .. } => None,
             };
-            match &mut envelope.item {
+            let mut changed = match &mut replacement[index].item {
                 ResponseItem::FunctionCallOutput { output, .. }
                 | ResponseItem::CustomToolCallOutput { output, .. } => {
-                    if text.len() >= output.to_string().len() {
-                        continue;
+                    let images = image_count(output);
+                    let text = match (summary, images) {
+                        (Some(text), 0) => {
+                            format!("{text}\n[Original item: {id}; use recall_read_item.]")
+                        }
+                        (Some(text), images) => format!(
+                            "{text}\n[{images} images omitted. Original item: {id}; use recall_read_item.]"
+                        ),
+                        (None, 0) => {
+                            format!("[Output omitted; original item: {id}; use recall_read_item.]")
+                        }
+                        (None, images) => format!(
+                            "[Output omitted with {images} images; original item: {id}; use recall_read_item.]"
+                        ),
+                    };
+                    // Images always go; otherwise replace only when the text is shorter.
+                    let replace = images > 0 || text.len() < output.to_string().len();
+                    if replace {
+                        output.body = FunctionCallOutputBody::Text(text);
                     }
-                    output.body = FunctionCallOutputBody::Text(text);
-                    envelope.metadata.get_or_insert_default().local_compaction =
-                        Some(LocalCompactionSource {
-                            first_item_id: id.clone(),
-                            last_item_id: id,
-                            kind: LocalCompactionKind::ToolResult,
-                        });
+                    replace
                 }
                 _ => {
                     return Err(CompactionError::Invalid(
                         "decision target is no longer a tool result",
                     ));
                 }
+            };
+            if let Some(&call) = calls.get(&id) {
+                changed |= shorten_call(&mut replacement[call].item, decision.call_text());
+            }
+            if changed {
+                replacement[index]
+                    .metadata
+                    .get_or_insert_default()
+                    .local_compaction = Some(LocalCompactionSource {
+                    first_item_id: id.clone(),
+                    last_item_id: id,
+                    kind: LocalCompactionKind::ToolResult,
+                });
             }
         }
         Ok(replacement)
