@@ -5,7 +5,7 @@ use http::Method;
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
@@ -84,7 +84,7 @@ pub struct Request {
     pub body: Option<RequestBody>,
     pub compression: RequestCompression,
     pub timeout: Option<Duration>,
-    pub(crate) slow_upload_retry_claimed: Arc<AtomicBool>,
+    pub(crate) slow_upload_retries: Arc<AtomicU32>,
 }
 
 impl Request {
@@ -96,7 +96,7 @@ impl Request {
             body: None,
             compression: RequestCompression::None,
             timeout: None,
-            slow_upload_retry_claimed: Arc::new(AtomicBool::new(false)),
+            slow_upload_retries: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -115,14 +115,16 @@ impl Request {
         self
     }
 
-    pub(crate) fn claim_slow_upload_retry(&self) -> bool {
-        self.slow_upload_retry_claimed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+    /// Records a stalled upload attempt and returns its 1-based attempt number.
+    ///
+    /// The counter is shared by every clone of this request, so the
+    /// fresh-connection retry budget spans all transport attempts.
+    pub(crate) fn record_slow_upload_retry(&self) -> u32 {
+        self.slow_upload_retries.fetch_add(1, Ordering::AcqRel) + 1
     }
 
-    pub(crate) fn slow_upload_retry_claimed(&self) -> bool {
-        self.slow_upload_retry_claimed.load(Ordering::Acquire)
+    pub(crate) fn slow_upload_retries(&self) -> u32 {
+        self.slow_upload_retries.load(Ordering::Acquire)
     }
 
     /// Prepares the body once and stores the exact bytes that will be sent.

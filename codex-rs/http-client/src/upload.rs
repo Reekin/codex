@@ -16,6 +16,7 @@ const UPLOAD_GRACE_PERIOD: Duration = Duration::from_secs(10);
 const UPLOAD_SAMPLE_PERIOD: Duration = Duration::from_secs(5);
 const MIN_UPLOAD_BYTES_PER_SECOND: usize = 256 * 1024;
 const MAX_PROJECTED_REMAINING: Duration = Duration::from_secs(30);
+const MAX_FRESH_CONNECTION_RETRIES: u32 = 3;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct UploadPolicy {
@@ -25,6 +26,10 @@ pub(crate) struct UploadPolicy {
     pub(crate) sample_period: Duration,
     pub(crate) min_bytes_per_second: usize,
     pub(crate) max_projected_remaining: Duration,
+    /// Stalled attempts that may be replaced by a fresh connection. Every
+    /// attempt within this budget is monitored; the attempt after the budget
+    /// is exhausted runs unmonitored to completion.
+    pub(crate) max_fresh_connection_retries: u32,
 }
 
 impl Default for UploadPolicy {
@@ -36,6 +41,7 @@ impl Default for UploadPolicy {
             sample_period: UPLOAD_SAMPLE_PERIOD,
             min_bytes_per_second: MIN_UPLOAD_BYTES_PER_SECOND,
             max_projected_remaining: MAX_PROJECTED_REMAINING,
+            max_fresh_connection_retries: MAX_FRESH_CONNECTION_RETRIES,
         }
     }
 }

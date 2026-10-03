@@ -66,7 +66,7 @@ impl ReqwestTransport {
 
     fn build(&self, req: Request) -> Result<BuiltRequest, TransportError> {
         let monitor_upload = matches!(req.body.as_ref(), Some(RequestBody::EncodedJson(_)))
-            && !req.slow_upload_retry_claimed();
+            && req.slow_upload_retries() < self.upload_policy.max_fresh_connection_retries;
         let prepared = req.prepare_body_for_send().map_err(TransportError::Build)?;
 
         let Request {
@@ -76,7 +76,7 @@ impl ReqwestTransport {
             body: _,
             compression: _,
             timeout,
-            slow_upload_retry_claimed: _,
+            slow_upload_retries: _,
         } = req;
 
         let mut builder = self.client.request(
@@ -138,20 +138,23 @@ impl ReqwestTransport {
             } = self.build(req.clone())?;
             let result = send_once(builder, upload_monitor).await;
             match result {
+                // Only monitored attempts stall, so the retry budget still has room.
                 Err(TransportError::SlowUpload {
                     total_bytes,
                     submitted_bytes,
                     elapsed,
                     bytes_per_second,
                     estimated_remaining,
-                }) if req.claim_slow_upload_retry() => {
+                }) => {
+                    let attempt = req.record_slow_upload_retry();
                     warn!(
+                        attempt,
+                        max_attempts = self.upload_policy.max_fresh_connection_retries + 1,
                         total_bytes,
                         submitted_bytes,
                         elapsed_ms = elapsed.as_millis(),
                         bytes_per_second,
                         estimated_remaining_ms = estimated_remaining.as_millis(),
-                        fresh_connection_retry = true,
                         "large request upload stalled; retrying after dropping the incomplete connection"
                     );
                 }
