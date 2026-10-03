@@ -13,20 +13,16 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::SubscriberExt;
 
 #[tokio::test]
-async fn stalled_large_upload_retries_once_on_a_fresh_connection() {
+async fn stalled_large_upload_retries_on_a_fresh_connection() {
     let listener = bind_test_listener();
     let address = listener
         .local_addr()
         .expect("listener should have an address");
     let server = std::thread::spawn(move || {
-        let mut first = accept_with_deadline(&listener);
-        let first_content_length = read_content_length(&mut first);
-        std::thread::sleep(Duration::from_millis(250));
-        drop(first);
+        let first_content_length = stall_connection(&listener);
 
         let mut second = accept_with_deadline(&listener);
         let second_content_length = read_content_length(&mut second);
-        std::thread::sleep(Duration::from_millis(150));
         let second_body_bytes = read_body(&mut second, second_content_length);
         write_ok(&mut second);
         assert_no_additional_connection(&listener);
@@ -42,6 +38,39 @@ async fn stalled_large_upload_retries_once_on_a_fresh_connection() {
     let (first_content_length, second_body_bytes) = server.join().expect("server should finish");
     assert!(first_content_length > 16 * 1024 * 1024);
     assert_eq!(second_body_bytes, first_content_length);
+}
+
+#[tokio::test]
+async fn stalled_retries_are_monitored_until_the_budget_is_exhausted() {
+    let listener = bind_test_listener();
+    let address = listener
+        .local_addr()
+        .expect("listener should have an address");
+    let server = std::thread::spawn(move || {
+        // Each dropped connection fails the request unless the client already
+        // canceled that attempt, so success proves every retry was monitored.
+        let stalled_content_lengths: Vec<usize> =
+            (0..3).map(|_| stall_connection(&listener)).collect();
+
+        let mut last = accept_with_deadline(&listener);
+        let last_content_length = read_content_length(&mut last);
+        std::thread::sleep(Duration::from_millis(250));
+        let last_body_bytes = read_body(&mut last, last_content_length);
+        write_ok(&mut last);
+        assert_no_additional_connection(&listener);
+        (stalled_content_lengths, last_body_bytes)
+    });
+
+    let request = prepared_json_request(address, 16 * 1024 * 1024);
+    let response = upload_transport(test_upload_policy())
+        .execute(request.clone())
+        .await
+        .expect("the attempt after the retry budget should run to completion");
+
+    assert_eq!(response.body, Bytes::from_static(b"ok"));
+    let (stalled_content_lengths, last_body_bytes) = server.join().expect("server should finish");
+    assert_eq!(stalled_content_lengths, vec![last_body_bytes; 3]);
+    assert_eq!(request.slow_upload_retries(), 3);
 }
 
 #[tokio::test]
@@ -189,6 +218,7 @@ fn test_upload_policy() -> UploadPolicy {
         sample_period: Duration::from_millis(25),
         min_bytes_per_second: 1024,
         max_projected_remaining: Duration::from_millis(10),
+        max_fresh_connection_retries: 3,
     }
 }
 
@@ -263,6 +293,16 @@ fn read_body(stream: &mut TcpStream, content_length: usize) -> usize {
         assert!(bytes > 0, "request body ended before content-length");
         remaining -= bytes;
     }
+    content_length
+}
+
+/// Accepts a connection, stops reading its body long enough for the client
+/// to detect a stall, then drops it. Returns the announced content length.
+fn stall_connection(listener: &TcpListener) -> usize {
+    let mut stream = accept_with_deadline(listener);
+    let content_length = read_content_length(&mut stream);
+    std::thread::sleep(Duration::from_millis(250));
+    drop(stream);
     content_length
 }
 
