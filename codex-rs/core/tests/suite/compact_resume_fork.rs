@@ -297,20 +297,15 @@ async fn repeated_tiers_preserve_constraints_recent_dialogue_and_resume() -> Res
         assert!(installed.contains(LEDGER));
         assert!(installed.contains("Recent original instruction must survive verbatim."));
         assert!(installed.contains("Recent original answer must survive verbatim."));
-        assert!(!installed.contains("tiers-private"));
-        // Each generated tier is bounded, and old promotions do not accumulate one entry per turn.
-        let tier_items = bodies.last().unwrap()["input"]
+        // One bounded summary replaces earlier summaries instead of accumulating per compaction.
+        let summaries = bodies.last().unwrap()["input"]
             .as_array()
             .unwrap()
             .iter()
-            .filter(|item| {
-                item.to_string()
-                    .contains("Earlier dialogue and concise evidence")
-                    || item.to_string().contains("Oldest conversation overview")
-            })
+            .filter(|item| item.to_string().contains("Earlier conversation:"))
             .collect::<Vec<_>>();
-        assert!(tier_items.len() <= 3);
-        for item in tier_items {
+        assert_eq!(summaries.len(), 1);
+        for item in summaries {
             assert!(item.to_string().len() < 12_000);
         }
     }

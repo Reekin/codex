@@ -28,19 +28,27 @@ use codex_context_compaction::Budget;
 use codex_context_compaction::MAX_ANALYSIS_BYTES;
 use codex_context_compaction::MAX_CALL_SUMMARY_BYTES;
 use codex_context_compaction::MAX_FRAGMENT_BYTES;
+use codex_context_compaction::MAX_SUMMARY_BYTES;
 use codex_context_compaction::StagedDecisions;
-use codex_context_compaction::TierPlan;
+use codex_context_compaction::WindowPlan;
+use codex_context_compaction::dropped_reasoning;
 use codex_context_compaction::eligible_results;
 use codex_context_compaction::large_calls;
+use codex_history::LocalCompactionKind;
+use codex_history::LocalCompactionSource;
 use codex_history::ResponseItemEnvelope;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::user_input::UserInput;
+use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
+use codex_utils_output_truncation::approx_tokens_from_byte_count;
+use codex_utils_output_truncation::truncate_text;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -105,7 +113,8 @@ impl LocalCompactionState {
 
 #[derive(Clone, Copy)]
 enum CleanupTrigger {
-    Savings(Budget),
+    /// Install only when the configured share of the window is released.
+    Savings,
     Manual,
 }
 
@@ -138,7 +147,7 @@ async fn clean_and_launch(
     state: &mut LocalCompactionState,
 ) -> CodexResult<()> {
     let (budget, scale) = budget(sess, &context).await;
-    install_marks(sess, &context, state, CleanupTrigger::Savings(budget)).await?;
+    install_marks(sess, &context, state, CleanupTrigger::Savings).await?;
     let history = sess.clone_history().await;
     let source = history.annotated_items();
     state.staged.retain_current(source);
@@ -184,12 +193,15 @@ async fn clean_and_launch(
                 ))
                 .div_ceil(100)
                 .max(1);
-        let total = history_tokens(source);
-        let pending = total.saturating_sub(history_tokens(
-            &state.staged.apply(source).map_err(invalid)?,
-        ));
-        let upper =
-            total.saturating_sub(history_tokens(&state.staged.optimistic_replacement(source)));
+        let reasoning = reasoning_budget(&context, budget);
+        let model = &context.settings.model_info;
+        let total = visible_tokens(source, model);
+        let pending =
+            total.saturating_sub(history_tokens(&cleaned(&state.staged, source, reasoning)?));
+        let upper = total.saturating_sub(history_tokens(&trim_reasoning(
+            state.staged.optimistic_replacement(source),
+            reasoning,
+        )));
         if !unmarked.is_empty()
             && accumulated
             && budget.can_reach(
@@ -243,10 +255,11 @@ async fn clean_and_launch(
                 .into_iter()
                 .map(|candidate| candidate.id)
                 .collect();
-            let prompt = request::classifier_prompt(
-                step,
+            let prompt = request::private_prompt(
+                Some(step),
                 sess.get_prompt_base_instructions().await,
                 &source,
+                &step.settings.model_info,
                 request,
             );
             let metadata = sess
@@ -364,11 +377,12 @@ async fn install_marks(
     let history = sess.clone_history().await;
     let source = history.annotated_items();
     state.staged.retain_current(source);
-    let before_tokens = history_tokens(source);
-    let replacement = state.staged.apply(source).map_err(invalid)?;
+    let (budget, _) = budget(sess, context).await;
+    let before_tokens = visible_tokens(source, &context.settings.model_info);
+    let replacement = cleaned(&state.staged, source, reasoning_budget(context, budget))?;
     let after_tokens = history_tokens(&replacement);
     let wanted = match trigger {
-        CleanupTrigger::Savings(budget) => budget.useful(before_tokens, after_tokens),
+        CleanupTrigger::Savings => budget.useful(before_tokens, after_tokens),
         CleanupTrigger::Manual => after_tokens < before_tokens,
     };
     if !wanted
@@ -401,6 +415,9 @@ pub(crate) async fn run_pipeline(
     injection: InitialContextInjection,
     metadata: CompactionTurnMetadata,
 ) -> CodexResult<bool> {
+    let _boundary = sess.lock_local_compaction_boundary().await;
+    // Validated marks, including a finished batch, clean the window that stays verbatim.
+    let mut staged = prepared_state(sess, context).await.staged;
     sess.cancel_local_compaction().await;
     let generation = sess.get_local_compaction_state().await.generation;
     let history = sess.clone_history().await;
@@ -408,17 +425,34 @@ pub(crate) async fn run_pipeline(
     let revision = history
         .conversation_history_snapshot()
         .user_message_revision();
+    staged.retain_current(&source);
     let (budget, scale) = budget(sess, context).await;
     let hard_limit = to_estimate(sess.local_compaction_hard_limit(context).await, scale)
         .min(budget.window_tokens);
-    // Leave space for continued work; the preferred ratio may be exceeded.
+    // Leave space for continued work.
     let hard_history = hard_limit
         .saturating_sub(budget.fixed_tokens)
         .saturating_sub(1);
-    let costs: Vec<_> = source.iter().map(|item| item_tokens(&item.item)).collect();
-    let plan =
-        TierPlan::new(&source, budget.history_target(), hard_history, &costs).map_err(invalid)?;
-    let max_history = plan.result_budget_tokens.min(hard_history);
+    // Tool cleanup keeps records in place, so plan on original indices; trimmed reasoning
+    // costs nothing.
+    let applied = staged.apply(&source).map_err(invalid)?;
+    let mut costs: Vec<_> = applied.iter().map(|item| item_tokens(&item.item)).collect();
+    let dropped = dropped_reasoning(&applied, reasoning_budget(context, budget), &costs);
+    for (cost, dropped) in costs.iter_mut().zip(&dropped) {
+        if *dropped {
+            *cost = 0;
+        }
+    }
+    // The summary and its wrapper are bounded in bytes, measured by the same estimator.
+    let summary_tokens = usize::try_from(approx_tokens_from_byte_count(MAX_SUMMARY_BYTES + 512))
+        .unwrap_or(usize::MAX);
+    let plan = WindowPlan::new(
+        &source,
+        &costs,
+        budget.history_target().min(hard_history),
+        summary_tokens,
+    )
+    .map_err(invalid)?;
     let supplemental = input
         .into_iter()
         .filter_map(|item| match item {
@@ -427,9 +461,19 @@ pub(crate) async fn run_pipeline(
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let guidance = if supplemental.is_empty() {
+        context
+            .turn
+            .config
+            .compact_prompt
+            .clone()
+            .unwrap_or_default()
+    } else {
+        supplemental
+    };
     let mut observed_response = None;
-    let fragments = if plan.l2.is_some() || plan.l3.is_some() {
-        let request = request::summarizer(&plan, &supplemental)?;
+    let summary = if let Some(range) = &plan.summarized {
+        let request = request::summary(&guidance)?;
         let metadata = sess
             .responses_metadata(
                 &context.turn,
@@ -437,12 +481,14 @@ pub(crate) async fn run_pipeline(
             )
             .await;
         let mut client = sess.services.model_client.new_session();
-        let prompt = request::summarizer_prompt(
-            context,
+        // Everything before the cut is a prefix of the ordinary request.
+        let prompt = request::private_prompt(
+            context.step.as_deref(),
             sess.get_prompt_base_instructions().await,
-            &source,
+            &source[..plan.cut],
+            &context.settings.model_info,
             request,
-        )?;
+        );
         let mut response = request::infer_json(&prompt, context, &mut client, &metadata).await?;
         if let Some(rate_limits) = response.rate_limits.take() {
             sess.record_rate_limits_info(rate_limits).await;
@@ -454,28 +500,51 @@ pub(crate) async fn run_pipeline(
             AnalysisKind::Full,
         )
         .await?;
-        let fragments = plan.parse(&response.json).map_err(invalid)?;
-        observed_response = Some(response);
-        fragments
-    } else {
-        Vec::new()
-    };
-    let mut replacement = plan.retained_prefix;
-    for fragment in fragments {
+        let text = response.json.trim();
+        if text.is_empty() {
+            return Err(invalid("the summary is empty"));
+        }
+        let text = truncate_text(text, TruncationPolicy::Bytes(MAX_SUMMARY_BYTES));
+        let summarized = LocalCompactionSource {
+            first_item_id: range.first_item_id.clone(),
+            last_item_id: range.last_item_id.clone(),
+            kind: LocalCompactionKind::OldestOverview,
+        };
         let mut envelope =
             ResponseItemEnvelope::new(ContextualUserFragment::into(LocalCompactionFragment {
-                text: fragment.text,
-                source: fragment.source.clone(),
+                text,
+                source: summarized.clone(),
             }));
-        envelope.metadata.get_or_insert_default().local_compaction = Some(fragment.source);
+        envelope.metadata.get_or_insert_default().local_compaction = Some(summarized);
         envelope.item.set_turn_id_if_missing(&context.turn.sub_id);
-        replacement.push(envelope);
+        observed_response = Some(response);
+        Some(envelope)
+    } else {
+        None
+    };
+    let mut replacement: Vec<_> = plan
+        .kept_instructions
+        .iter()
+        .map(|index| source[*index].clone())
+        .collect();
+    replacement.extend(summary);
+    replacement.extend(plan.kept_input.map(|index| source[index].clone()));
+    // The cleaned current window stays verbatim and is summarized by the next compaction.
+    for (mut item, dropped) in applied.into_iter().zip(dropped).skip(plan.cut) {
+        if !dropped {
+            item.metadata.get_or_insert_default().previous_window = true;
+            replacement.push(item);
+        }
     }
-    replacement.extend(plan.retained_tail);
-    if history_tokens(&replacement) > max_history {
-        return Err(invalid("tier result exceeds its safe history budget"));
+    if history_tokens(&replacement) > hard_history {
+        return Err(invalid("compacted history exceeds its safe budget"));
     }
-    if replacement == source {
+    // Marking the window alone is not worth a checkpoint; the next compaction starts here.
+    if replacement
+        .iter()
+        .map(|item| &item.item)
+        .eq(source.iter().map(|item| &item.item))
+    {
         return Ok(false);
     }
     let baseline = match injection {
@@ -496,7 +565,7 @@ pub(crate) async fn run_pipeline(
                     .as_ref()
                     .map(|response| response.response_id.clone()),
             ),
-            max_history,
+            hard_history,
         )
         .await?;
     if installed {
@@ -553,22 +622,9 @@ async fn budget(sess: &Session, context: &LocalCompactionContext) -> (Budget, f6
     };
     let fixed_tokens = approx_token_count(&base.text).saturating_add(tool_tokens);
     // Ratio of the latest provider-reported context to the estimate of what it was sent.
-    // Models that drop earlier reasoning are not billed for it. Bounded so a stale or
-    // estimated report (for example right after a cleanup) falls back to raw estimates.
-    let estimated = sess
-        .clone_history()
-        .await
-        .annotated_items()
-        .iter()
-        .filter(|item| {
-            model.retains_prior_reasoning
-                || !matches!(
-                    item.item,
-                    codex_protocol::models::ResponseItem::Reasoning { .. }
-                )
-        })
-        .map(|item| item_tokens(&item.item))
-        .sum::<usize>()
+    // Bounded so a stale or estimated report (for example right after a cleanup) falls back
+    // to raw estimates.
+    let estimated = visible_tokens(sess.clone_history().await.annotated_items(), model)
         .saturating_add(fixed_tokens);
     let reported = sess.get_total_token_usage().await;
     let scale = if estimated == 0 {
@@ -581,8 +637,60 @@ async fn budget(sess: &Session, context: &LocalCompactionContext) -> (Budget, f6
         fixed_tokens,
         reclaim_percent: usize::from(config.reclaim_percent),
         compact_target_percent: usize::from(config.compact_target_percent),
+        keep_reasoning_percent: usize::from(config.keep_reasoning_percent),
     };
     (budget, scale)
+}
+
+/// Earlier turns' reasoning that cleanup keeps. Models that drop it themselves are sent none
+/// of it, so removing it locally changes nothing they see.
+fn reasoning_budget(context: &LocalCompactionContext, budget: Budget) -> usize {
+    if context.settings.model_info.retains_prior_reasoning {
+        budget.reasoning_tokens()
+    } else {
+        0
+    }
+}
+
+/// Removes trimmed reasoning from a view that keeps every other record in place.
+fn trim_reasoning(
+    items: Vec<ResponseItemEnvelope>,
+    keep_tokens: usize,
+) -> Vec<ResponseItemEnvelope> {
+    let costs: Vec<_> = items.iter().map(|item| item_tokens(&item.item)).collect();
+    let dropped = dropped_reasoning(&items, keep_tokens, &costs);
+    items
+        .into_iter()
+        .zip(dropped)
+        .filter_map(|(item, dropped)| (!dropped).then_some(item))
+        .collect()
+}
+
+/// The history after applying validated marks and trimming earlier reasoning.
+fn cleaned(
+    staged: &StagedDecisions,
+    items: &[ResponseItemEnvelope],
+    reasoning_tokens: usize,
+) -> CodexResult<Vec<ResponseItemEnvelope>> {
+    Ok(trim_reasoning(
+        staged.apply(items).map_err(invalid)?,
+        reasoning_tokens,
+    ))
+}
+
+/// Estimated tokens the model is sent; earlier turns' reasoning does not count for models
+/// that drop it.
+fn visible_tokens(items: &[ResponseItemEnvelope], model: &ModelInfo) -> usize {
+    if model.retains_prior_reasoning {
+        return history_tokens(items);
+    }
+    let costs: Vec<_> = items.iter().map(|item| item_tokens(&item.item)).collect();
+    let dropped = dropped_reasoning(items, 0, &costs);
+    costs
+        .into_iter()
+        .zip(dropped)
+        .filter_map(|(cost, dropped)| (!dropped).then_some(cost))
+        .sum()
 }
 
 fn to_estimate(tokens: usize, scale: f64) -> usize {
@@ -593,7 +701,7 @@ fn to_reported(tokens: usize, scale: f64) -> usize {
     (tokens as f64 * scale) as usize
 }
 
-fn item_tokens(item: &codex_protocol::models::ResponseItem) -> usize {
+fn item_tokens(item: &ResponseItem) -> usize {
     usize::try_from(estimate_item_token_count(item)).unwrap_or(0)
 }
 

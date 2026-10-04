@@ -1921,8 +1921,8 @@
       "description": "Background marking, reclaim thresholds, and full-compaction budgets.",
       "properties": {
         "compact_target_percent": {
-          "default": 30,
-          "description": "Preferred total occupancy after full compaction; safe larger results are allowed.",
+          "default": 50,
+          "description": "Occupancy full compaction keeps the cleaned current window within; beyond it the window's oldest part is summarized too.",
           "format": "uint8",
           "minimum": 0.0,
           "type": "integer"
@@ -1931,6 +1931,13 @@
           "default": false,
           "description": "Use local cleanup even when the provider supports remote compaction.",
           "type": "boolean"
+        },
+        "keep_reasoning_percent": {
+          "default": 5,
+          "description": "Window percentage of newest earlier-turn reasoning kept when tool marks are applied.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": "integer"
         },
         "mark_after_tokens_percent": {
           "default": 5,
@@ -6599,8 +6606,9 @@
         }
       ],
       "default": {
-        "compact_target_percent": 30,
+        "compact_target_percent": 50,
         "force_local": false,
+        "keep_reasoning_percent": 5,
         "mark_after_tokens_percent": 5,
         "reclaim_percent": 30
       },

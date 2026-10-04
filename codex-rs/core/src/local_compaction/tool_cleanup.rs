@@ -7,12 +7,14 @@ use codex_protocol::error::Result as CodexResult;
 use super::CleanupTrigger;
 use super::LocalCompactionState;
 use super::budget;
+use super::cleaned;
 use super::history_tokens;
 use super::install_marks;
-use super::invalid;
 use super::prepared_state;
+use super::reasoning_budget;
 use super::to_reported;
 use super::uses_local_route;
+use super::visible_tokens;
 use crate::compact::LocalCompactionContext;
 use crate::session::session::Session;
 
@@ -23,7 +25,8 @@ pub struct ToolCleanupStatus {
     pub enabled: bool,
     /// Whether a background marking request is in flight.
     pub marking: bool,
-    /// Estimated history tokens released by applying every current validated mark.
+    /// Estimated history tokens released by applying every current validated mark and
+    /// trimming earlier turns' reasoning.
     pub pending_savings_tokens: usize,
     /// Release required before automatic tool cleanup applies the marks.
     pub required_savings_tokens: usize,
@@ -74,11 +77,12 @@ async fn status(
     let history = sess.clone_history().await;
     let source = history.annotated_items();
     state.staged.retain_current(source);
-    let pending_savings_tokens = history_tokens(source).saturating_sub(history_tokens(
-        &state.staged.apply(source).map_err(invalid)?,
-    ));
     // Reported in provider tokens, the same unit as context usage.
     let (budget, scale) = budget(sess, context).await;
+    let pending_savings_tokens =
+        visible_tokens(source, &context.settings.model_info).saturating_sub(history_tokens(
+            &cleaned(&state.staged, source, reasoning_budget(context, budget))?,
+        ));
     Ok(ToolCleanupStatus {
         enabled: uses_local_route(&context.turn, &context.settings.model_info),
         marking: state.background.is_some(),

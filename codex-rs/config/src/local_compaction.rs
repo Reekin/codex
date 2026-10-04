@@ -12,8 +12,10 @@ pub struct LocalCompactionConfig {
     pub reclaim_percent: u8,
     /// Unmarked tool tokens as a percentage of the window that starts a background batch.
     pub mark_after_tokens_percent: u8,
-    /// Preferred total occupancy after full compaction; safe larger results are allowed.
+    /// Occupancy full compaction keeps the cleaned current window within; beyond it the window's oldest part is summarized too.
     pub compact_target_percent: u8,
+    /// Window percentage of newest earlier-turn reasoning kept when tool marks are applied.
+    pub keep_reasoning_percent: u8,
 }
 
 impl Default for LocalCompactionConfig {
@@ -22,7 +24,8 @@ impl Default for LocalCompactionConfig {
             force_local: false,
             reclaim_percent: 30,
             mark_after_tokens_percent: 5,
-            compact_target_percent: 30,
+            compact_target_percent: 50,
+            keep_reasoning_percent: 5,
         }
     }
 }
@@ -33,6 +36,7 @@ impl LocalCompactionConfig {
             ("reclaim_percent", self.reclaim_percent),
             ("mark_after_tokens_percent", self.mark_after_tokens_percent),
             ("compact_target_percent", self.compact_target_percent),
+            ("keep_reasoning_percent", self.keep_reasoning_percent),
         ] {
             if !(1..100).contains(&percent) {
                 return Err(std::io::Error::new(

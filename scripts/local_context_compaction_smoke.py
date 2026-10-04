@@ -91,21 +91,11 @@ class Model(http.server.ThreadingHTTPServer):
             self.mark_started.set()
             assert self.release_mark.wait(30), "marking gate was not released"
             return [assistant(json.dumps({"decisions": decisions}))]
-        payload = analysis_payload(body, "LOCAL_COMPACTION_SUMMARIZE")
-        if payload is not None:
+        if analysis_payload(body, "LOCAL_COMPACTION_SUMMARIZE") is not None:
             return [
                 assistant(
-                    json.dumps(
-                        {
-                            "l2": "Fixture tools were unavailable; verification is pending."
-                            if payload["plan"]["l2"]
-                            else "",
-                            "l3": "Earlier fixture work used unavailable tools; originals remain queryable."
-                            if payload["plan"]["l3"]
-                            else "",
-                            "ledger": "Use only the isolated fixture and preserve the offline-only constraint.",
-                        }
-                    )
+                    "Earlier fixture work used unavailable tools; verification is pending. "
+                    "Use only the isolated fixture and preserve the offline-only constraint."
                 )
             ]
         if self.phase == "tools":

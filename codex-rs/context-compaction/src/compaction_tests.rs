@@ -1,4 +1,3 @@
-use codex_history::LocalCompactionKind;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseItem;
@@ -7,7 +6,7 @@ use serde_json::json;
 
 use crate::Budget;
 use crate::StagedDecisions;
-use crate::TierPlan;
+use crate::dropped_reasoning;
 use crate::eligible_results;
 use crate::large_calls;
 
@@ -37,47 +36,6 @@ fn history() -> Vec<ResponseItemEnvelope> {
         "Checking the newest result.",
     ));
     items
-}
-
-#[test]
-fn tier_promotion_keeps_harness_instructions_and_environment_verbatim() {
-    let instructions: Vec<_> = ["agents_md.instructions", "environments.environment_context"]
-        .into_iter()
-        .enumerate()
-        .map(|(index, kind)| {
-            item(json!({
-                "type":"message", "id":format!("instructions_{index}"), "role":"user",
-                "content":[{"type":"input_text","text":format!("Canonical {kind} remains exact.")}],
-                "internal_chat_message_metadata_passthrough":{"content_item_kinds":[kind]}
-            }))
-        })
-        .collect();
-    let mut original = instructions.clone();
-    original.extend(history());
-    original.insert(3, item(json!({"type":"reasoning","id":"hidden_thought","summary":[],"encrypted_content":"opaque"})));
-    let costs: Vec<_> = original
-        .iter()
-        .map(|entry| match &entry.item {
-            ResponseItem::FunctionCallOutput {
-                call_id: Some(id), ..
-            } if id != "c3" => 10_000,
-            _ => 100,
-        })
-        .collect();
-    let plan =
-        TierPlan::new(&original, 5_000, 10_000, &costs).expect("older evidence can be promoted");
-    assert_eq!(
-        &plan.retained_prefix[..instructions.len()],
-        instructions.as_slice()
-    );
-    assert!(plan.max_fragment_bytes > 0);
-    assert!(
-        plan.l2
-            .iter()
-            .chain(plan.l3.iter())
-            .all(|range| range.first_item_id != "hidden_thought"
-                && range.last_item_id != "hidden_thought")
-    );
 }
 
 #[test]
@@ -354,8 +312,10 @@ fn cleanup_uses_window_percentage_points_and_optimistic_headroom() {
         fixed_tokens: 4_000,
         reclaim_percent: 30,
         compact_target_percent: 30,
+        keep_reasoning_percent: 5,
     };
     assert_eq!(budget.history_target(), 2_000);
+    assert_eq!(budget.reasoning_tokens(), 1_000);
     assert_eq!(budget.required_savings(), 6_000);
     // Fixed 4k + history6k=50%; a drop to total30% only saves20 percentage points.
     assert!(!budget.useful(6_000, 2_000));
@@ -367,54 +327,35 @@ fn cleanup_uses_window_percentage_points_and_optimistic_headroom() {
 }
 
 #[test]
-fn repeated_tiers_merge_old_ranges_and_bound_the_ledger() {
-    let mut source = history();
-    for round in 0..3 {
-        // Older groups cost enough to require promotion while the newest group fits.
-        let mut costs = vec![1_000; source.len()];
-        let len = costs.len();
-        costs[len - 3..].fill(20);
-        costs[0] = 20;
-        let plan = TierPlan::new(&source, 2_000, 10_000, &costs).unwrap();
-        let fragments = plan.parse(&json!({
-            "l2": if plan.l2.is_some() { "Older dialogue, with failures still unverified." } else { "" },
-            "l3": if plan.l3.is_some() { "Prior investigation overview; exact evidence remains archived." } else { "" },
-            "ledger": "Database stays read-only; verify errors before reporting success."
-        }).to_string()).unwrap();
-        assert!(
-            plan.parse(
-                &json!({"l2":"x".repeat(plan.max_fragment_bytes + 1),"l3":"x","ledger":"x"})
-                    .to_string()
-            )
-            .is_err()
-        );
-        let mut next = plan.retained_prefix;
-        for (index, fragment) in fragments.into_iter().enumerate() {
-            let mut envelope = message(&format!("summary_{round}_{index}"), "user", &fragment.text);
-            envelope.metadata.get_or_insert_default().local_compaction = Some(fragment.source);
-            next.push(envelope);
-        }
-        next.extend(plan.retained_tail);
-        assert_eq!(
-            next.iter()
-                .filter(|item| item
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.local_compaction.as_ref())
-                    .is_some_and(|source| source.kind == LocalCompactionKind::ConstraintsLedger))
-                .count(),
-            1
-        );
-        let active_user = source
-            .iter()
-            .rfind(|item| crate::is_user_direction(&item.item))
-            .unwrap();
-        assert!(next.contains(active_user));
-        next.push(message(
-            &format!("user_next_{round}"),
-            "user",
-            "Continue the read-only investigation.",
-        ));
-        source = next;
-    }
+fn reasoning_trim_keeps_the_current_turn_and_the_newest_earlier_reasoning() {
+    let reasoning = |id: &str| {
+        item(
+            json!({"type":"reasoning","id":id,"summary":[],"content":[{"type":"reasoning_text","text":"thinking"}],"encrypted_content":""}),
+        )
+    };
+    let items = vec![
+        message("user_1", "user", "First request."),
+        reasoning("old"),
+        message("assistant_1", "assistant", "Done."),
+        message("user_2", "user", "Second request."),
+        reasoning("previous"),
+        message("assistant_2", "assistant", "Done again."),
+        message("user_3", "user", "Third request."),
+        reasoning("current"),
+        reasoning("current_more"),
+    ];
+    let costs = vec![100; items.len()];
+    // The current turn exceeds the budget alone and is kept; earlier reasoning beyond it goes.
+    assert_eq!(
+        dropped_reasoning(&items, 150, &costs),
+        vec![false, true, false, false, true, false, false, false, false]
+    );
+    assert_eq!(
+        dropped_reasoning(&items, 300, &costs),
+        vec![false, true, false, false, false, false, false, false, false]
+    );
+    assert_eq!(
+        dropped_reasoning(&items, usize::MAX, &costs),
+        vec![false; items.len()]
+    );
 }

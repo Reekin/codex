@@ -16,6 +16,7 @@ use crate::CompactionError;
 use crate::MAX_FRAGMENT_BYTES;
 use crate::bounded_json;
 use crate::groups::call_key;
+use crate::groups::is_user_direction;
 use crate::groups::output_key;
 use crate::groups::protected_start;
 
@@ -80,6 +81,29 @@ pub struct StagedDecisions {
 pub fn eligible_results(items: &[ResponseItemEnvelope]) -> Vec<String> {
     let protected = protected_start(items);
     completed_results(&items[..protected])
+}
+
+/// Marks reasoning records to remove: earlier turns' reasoning beyond the newest `keep_tokens`.
+/// The current turn's reasoning always stays, since providers require it within a tool-call
+/// sequence; it still counts toward the budget.
+pub fn dropped_reasoning(
+    items: &[ResponseItemEnvelope],
+    keep_tokens: usize,
+    costs: &[usize],
+) -> Vec<bool> {
+    let turn_start = items
+        .iter()
+        .rposition(|item| is_user_direction(&item.item))
+        .unwrap_or(0);
+    let mut kept = 0usize;
+    let mut dropped = vec![false; items.len()];
+    for index in (0..items.len()).rev() {
+        if matches!(items[index].item, ResponseItem::Reasoning { .. }) {
+            kept = kept.saturating_add(costs[index]);
+            dropped[index] = index < turn_start && kept > keep_tokens;
+        }
+    }
+    dropped
 }
 
 /// Maps each tool result ID to the index of its paired call when that call carries at least

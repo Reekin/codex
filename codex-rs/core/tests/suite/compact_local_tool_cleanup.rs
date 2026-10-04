@@ -10,6 +10,7 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_function_call;
+use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
@@ -335,5 +336,58 @@ async fn screenshots_and_large_calls_are_cleaned_and_images_recalled() -> Result
         .to_string();
     assert!(recalled.contains("[image 1]"));
     assert!(recalled.contains("input_image") && recalled.contains(SCREENSHOT));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_cleanup_trims_earlier_turn_reasoning_beyond_its_share() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    let test = test_codex()
+        .with_config(|config| {
+            configure_unreached_savings(config);
+            config.local_compaction.keep_reasoning_percent = 1;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let thinking = "earlier deliberation ".repeat(800);
+    for turn in ["first", "second"] {
+        model.reply(sse(vec![
+            ev_reasoning_item(&format!("reasoning-{turn}"), &["Thinking."], &[&thinking]),
+            ev_assistant_message(&format!("answer-{turn}"), "Answered."),
+            ev_completed(&format!("response-{turn}")),
+        ]));
+        test.submit_text_turn(&format!("Question {turn}.")).await?;
+    }
+    model.text("No deliberation needed.");
+    test.submit_text_turn("Question third.").await?;
+    let reasoning = |body: &Value| {
+        body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["type"] == "reasoning")
+            .count()
+    };
+    // The model keeps earlier reasoning, so later requests still carry both earlier turns'.
+    assert!(
+        model
+            .ordinary_bodies()
+            .last()
+            .is_some_and(|body| reasoning(body) == 2)
+    );
+    let status = test.codex.tool_cleanup_status().await?;
+    assert!(status.pending_savings_tokens > 0, "{status:?}");
+    assert!(test.codex.apply_tool_cleanup().await?.released_tokens > 0);
+    model.reply(sse(vec![
+        ev_reasoning_item("reasoning-current", &["Thinking."], &[&thinking]),
+        ev_function_call("current-call", "unavailable", "{}"),
+        ev_completed("response-current"),
+    ]));
+    model.text("Continued.");
+    test.submit_text_turn("Question fourth.").await?;
+    // Earlier turns' reasoning is gone; the current turn's stays within its tool loop.
+    assert_eq!(reasoning(model.ordinary_bodies().last().unwrap()), 1);
     Ok(())
 }

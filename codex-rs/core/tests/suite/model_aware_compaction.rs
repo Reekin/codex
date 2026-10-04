@@ -113,13 +113,14 @@ async fn mid_turn_cleanup_uses_activated_model_settings_and_keeps_pending_work()
     let analysis = bodies
         .iter()
         .find(|body| analysis_payload(body, SUMMARIZE).is_some())
-        .expect("mid-turn tier analysis");
+        .expect("mid-turn summary request");
     assert_eq!(analysis["model"], "local-model");
     assert_eq!(analysis["reasoning"]["summary"], "detailed");
+    // The summary request reuses the ordinary request's prefix up to the kept window.
     assert!(
         analysis
             .to_string()
-            .contains("Switch model while preserving pending work.")
+            .contains("Keep the offline-only constraint.")
     );
     let final_request = bodies.last().unwrap();
     assert_eq!(final_request["model"], "local-model");
