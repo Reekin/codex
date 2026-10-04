@@ -360,6 +360,8 @@ async fn tool_cleanup_trims_earlier_turn_reasoning_beyond_its_share() -> Result<
         ]));
         test.submit_text_turn(&format!("Question {turn}.")).await?;
     }
+    model.text("No deliberation needed.");
+    test.submit_text_turn("Question third.").await?;
     let reasoning = |body: &Value| {
         body["input"]
             .as_array()
@@ -368,12 +370,12 @@ async fn tool_cleanup_trims_earlier_turn_reasoning_beyond_its_share() -> Result<
             .filter(|item| item["type"] == "reasoning")
             .count()
     };
-    // The model keeps earlier reasoning, so the second request still carries the first turn's.
+    // The model keeps earlier reasoning, so later requests still carry both earlier turns'.
     assert!(
         model
             .ordinary_bodies()
             .last()
-            .is_some_and(|body| reasoning(body) == 1)
+            .is_some_and(|body| reasoning(body) == 2)
     );
     let status = test.codex.tool_cleanup_status().await?;
     assert!(status.pending_savings_tokens > 0, "{status:?}");
@@ -384,7 +386,7 @@ async fn tool_cleanup_trims_earlier_turn_reasoning_beyond_its_share() -> Result<
         ev_completed("response-current"),
     ]));
     model.text("Continued.");
-    test.submit_text_turn("Third question.").await?;
+    test.submit_text_turn("Question fourth.").await?;
     // Earlier turns' reasoning is gone; the current turn's stays within its tool loop.
     assert_eq!(reasoning(model.ordinary_bodies().last().unwrap()), 1);
     Ok(())

@@ -47,6 +47,7 @@ use codex_protocol::protocol::RawResponseCompletedEvent;
 use codex_protocol::user_input::UserInput;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
+use codex_utils_output_truncation::approx_tokens_from_byte_count;
 use codex_utils_output_truncation::truncate_text;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -442,8 +443,8 @@ pub(crate) async fn run_pipeline(
             *cost = 0;
         }
     }
-    // A summary is bounded in bytes, which also bounds its tokens; allow for its wrapper.
-    let summary_tokens = MAX_SUMMARY_BYTES + 512;
+    // The summary and its wrapper are bounded in bytes, measured by the same estimator.
+    let summary_tokens = approx_tokens_from_byte_count(MAX_SUMMARY_BYTES + 512);
     let plan = WindowPlan::new(
         &source,
         &costs,

@@ -5,6 +5,7 @@ use codex_protocol::models::ResponseItem;
 use crate::CompactionError;
 use crate::groups::is_user_direction;
 use crate::groups::pinned;
+use crate::groups::protected_start;
 use crate::groups::safe_cuts;
 
 /// First and last original records a summary covers.
@@ -18,6 +19,7 @@ pub struct SourceRange {
 /// previous window (L2) of the next full compaction. Earlier summaries and the previous window
 /// are summarized into one handoff summary (L3). When the cleaned current window alone exceeds
 /// the budget, its oldest part is summarized as well, so repeated compaction always converges.
+/// The newest work group (latest user input or tool call onward) is never summarized.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowPlan {
     /// Records before this index are summarized, except the kept ones below.
@@ -58,7 +60,7 @@ impl WindowPlan {
             .filter(|cut| *cut <= boundary)
             .max()
             .unwrap_or(0);
-        let last_cut = cuts.last().copied().unwrap_or(0);
+        let last_cut = protected_start(items).max(window_start);
         let active_input = items
             .iter()
             .rposition(|item| !pinned(item) && !is_summary(item) && is_user_direction(&item.item));
