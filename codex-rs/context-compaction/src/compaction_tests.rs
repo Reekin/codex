@@ -5,6 +5,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 use crate::Budget;
+use crate::Decision;
 use crate::StagedDecisions;
 use crate::dropped_reasoning;
 use crate::eligible_results;
@@ -70,19 +71,51 @@ fn cleanup_preserves_dialogue_pairs_ids_and_error_status_in_one_long_turn() {
 }
 
 #[test]
-fn invalid_analysis_is_rejected_as_a_whole() {
+fn analysis_keeps_usable_decisions_and_rejects_unreadable_json() {
     let source = history();
-    for decisions in [
-        json!([{"id":"result_0","action":"drop"},{"id":"foreign","action":"keep"}]),
-        json!([{"id":"result_0","action":"drop"},{"id":"result_0","action":"keep"}]),
-        json!([{"id":"result_3","action":"drop"}]),
-        json!([{"id":"result_0","action":"shorten","text":"x".repeat(3001)}]),
-    ] {
-        assert!(
-            StagedDecisions::parse(source.clone(), &json!({"decisions":decisions}).to_string())
-                .is_err()
-        );
-    }
+    let parse = |decisions: serde_json::Value| {
+        StagedDecisions::parse(source.clone(), &json!({"decisions":decisions}).to_string())
+    };
+    // Foreign, repeated, protected and malformed entries are ignored; the drop still counts.
+    let staged = parse(json!([
+        {"id":"result_0","action":"drop"},
+        {"id":"foreign","action":"keep"},
+        {"id":"result_0","action":"keep"},
+        {"id":"result_3","action":"drop"},
+        {"id":"result_1","action":"rewrite"},
+    ]))
+    .unwrap();
+    let marked: Vec<_> = staged
+        .marks()
+        .map(|(_, decision)| decision.clone())
+        .collect();
+    assert_eq!(
+        marked,
+        vec![serde_json::from_value(json!({"id":"result_0","action":"drop"})).unwrap()]
+    );
+    // Oversized text is cut to its limit; an empty shortening becomes a drop.
+    let staged = parse(json!([
+        {"id":"result_0","action":"shorten","text":"x".repeat(5_000),"call_text":"y".repeat(900)},
+        {"id":"result_1","action":"shorten","text":"  "},
+    ]))
+    .unwrap();
+    let marked: Vec<_> = staged
+        .marks()
+        .map(|(_, decision)| decision.clone())
+        .collect();
+    let Decision::Shorten {
+        text, call_text, ..
+    } = &marked[0]
+    else {
+        panic!("shortened result: {marked:?}");
+    };
+    assert!(text.len() + "result_0".len() + 64 <= crate::MAX_FRAGMENT_BYTES);
+    assert_eq!(
+        call_text.as_deref().map(str::len),
+        Some(crate::MAX_CALL_SUMMARY_BYTES)
+    );
+    assert!(matches!(&marked[1], Decision::Drop { id, .. } if id == "result_1"));
+    assert!(parse(json!([{"id":"foreign","action":"drop"}])).is_err());
     assert!(StagedDecisions::parse(source.clone(), "not JSON").is_err());
     assert_eq!(source, history());
 }

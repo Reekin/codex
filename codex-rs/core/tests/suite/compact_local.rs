@@ -217,16 +217,12 @@ async fn keep_shorten_drop_preserves_dialogue_pairs_and_recalls_originals() -> R
     Ok(())
 }
 
-#[test_case::test_case(Analysis::Malformed; "malformed JSON")]
-#[test_case::test_case(Analysis::ForeignId; "foreign source ID")]
-#[test_case::test_case(Analysis::DuplicateId; "duplicate source ID")]
-#[test_case::test_case(Analysis::Oversized; "oversized replacement")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rejected_analysis_does_not_change_history(analysis: Analysis) -> Result<()> {
+async fn unreadable_analysis_does_not_change_history() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let model = LocalModel::mount(&server).await;
-    model.analysis(analysis);
+    model.analysis(Analysis::Malformed);
     let gate = MarkGate::start(&server).await?;
     let base_url = gate.base_url.clone();
     let test = test_codex()
@@ -272,6 +268,42 @@ async fn rejected_analysis_does_not_change_history(analysis: Analysis) -> Result
             .iter()
             .all(|body| analysis_payload(body, SUMMARIZE).is_none()),
         "marking failure must not escalate into full compaction"
+    );
+    Ok(())
+}
+
+#[test_case::test_case(Analysis::ForeignId; "foreign source ID")]
+#[test_case::test_case(Analysis::DuplicateId; "duplicate source ID")]
+#[test_case::test_case(Analysis::Oversized; "oversized replacement")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn flawed_analysis_still_applies_its_usable_decisions(analysis: Analysis) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    model.analysis(analysis);
+    let test = test_codex()
+        .with_config(configure_marking)
+        .build_with_auto_env(&server)
+        .await?;
+    seed_tools(&test, &model).await?;
+    finish_marking(&test, &model, /*expected_batches*/ 1).await?;
+    model.text("Continue with the cleaned view.");
+    test.submit_text_turn("Continue after partial cleanup.")
+        .await?;
+    let after = model.ordinary_bodies().last().unwrap().clone();
+    assert_dialogue(&after);
+    // The largest candidate carries the flaw; the other decisions still install.
+    assert!(
+        output(&after, "original-drop")
+            .to_string()
+            .contains("Output omitted"),
+        "{}",
+        output(&after, "original-drop")
+    );
+    assert!(
+        output(&after, "original-keep")
+            .to_string()
+            .contains("keep_evidence_")
     );
     Ok(())
 }
