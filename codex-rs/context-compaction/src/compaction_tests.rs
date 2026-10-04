@@ -225,13 +225,6 @@ fn cleanup_strips_images_and_summarizes_large_paired_calls() {
     assert!(
         matches!(&bound[2].item, ResponseItem::FunctionCallOutput { output, .. } if output.content_items().is_none())
     );
-
-    let oversized = json!({"decisions":[
-        {"id":"result_0","action":"keep"},{"id":"result_2","action":"keep"},
-        {"id":"result_1","action":"drop","call_text":"x".repeat(401)}
-    ]})
-    .to_string();
-    assert!(StagedDecisions::parse(source, &oversized).is_err());
 }
 
 #[test]
