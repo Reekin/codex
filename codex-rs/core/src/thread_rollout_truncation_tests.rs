@@ -259,6 +259,25 @@ fn truncate_rollout_after_turn_id_rejects_in_progress_turn() {
 }
 
 #[test]
+fn truncates_rollout_through_superseded_turn_before_next_turn_start() {
+    let rollout = vec![
+        turn_started("turn-1"),
+        response_item(user_msg("orphaned")),
+        response_item(developer_msg("before next turn")),
+        turn_started("turn-2"),
+        turn_completed("turn-2"),
+    ];
+
+    let truncated = truncate_rollout_after_turn_id(rollout.clone(), "turn-1")
+        .expect("truncate through superseded turn-1");
+
+    assert_eq!(
+        serde_json::to_value(&truncated).unwrap(),
+        serde_json::to_value(&rollout[..3]).unwrap()
+    );
+}
+
+#[test]
 fn truncates_rollout_from_start_before_nth_user_only() {
     let items = [
         user_msg("u1"),

@@ -1239,6 +1239,15 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_turn_started(&mut self, payload: &TurnStartedEvent) {
+        // A thread runs one turn at a time, so a turn still open when another one starts was cut
+        // off without a terminal record (for example by a crash) and can no longer finish.
+        if let Some(turn) = self.current_turn.as_mut().filter(|turn| {
+            turn.id != payload.turn_id && matches!(turn.status, TurnStatus::InProgress)
+        }) {
+            turn.status = TurnStatus::Interrupted;
+            let changed_turn = ThreadHistoryTurnChange::from_pending_turn(turn);
+            self.record_changed_turn(changed_turn);
+        }
         self.finish_current_turn();
         let turn = self
             .new_turn(Some(payload.turn_id.clone()))
@@ -4899,6 +4908,113 @@ mod tests {
                 }],
                 removed_turn_ids: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn turn_start_interrupts_superseded_in_progress_turn() {
+        let turn_started = |turn_id: &str, started_at: i64| {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: turn_id.into(),
+                trace_id: None,
+                started_at: Some(started_at),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }))
+        };
+        let user_message = |message: &str| {
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
+                message: message.into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+                ..Default::default()
+            }))
+        };
+        let items = vec![
+            turn_started("turn-a", 10),
+            user_message("orphaned"),
+            turn_started("turn-b", 30),
+            user_message("next"),
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: "turn-b".into(),
+                started_at: Some(30),
+                last_agent_message: None,
+                error: None,
+                completed_at: Some(40),
+                duration_ms: Some(10_000),
+                time_to_first_token_ms: None,
+            })),
+        ];
+
+        let mut builder = ThreadHistoryBuilder::new();
+        builder.handle_rollout_item_with_changes(&items[0]);
+        builder.handle_rollout_item_with_changes(&items[1]);
+        assert_eq!(
+            builder.handle_rollout_item_with_changes(&items[2]),
+            ThreadHistoryChangeSet {
+                changed_items: Vec::new(),
+                changed_turns: vec![
+                    ThreadHistoryTurnChange {
+                        turn_id: "turn-a".into(),
+                        status: TurnStatus::Interrupted,
+                        error: None,
+                        started_at: Some(10),
+                        completed_at: None,
+                        duration_ms: None,
+                    },
+                    ThreadHistoryTurnChange {
+                        turn_id: "turn-b".into(),
+                        status: TurnStatus::InProgress,
+                        error: None,
+                        started_at: Some(30),
+                        completed_at: None,
+                        duration_ms: None,
+                    },
+                ],
+                removed_turn_ids: Vec::new(),
+            }
+        );
+
+        assert_eq!(
+            build_turns_from_rollout_items(&items),
+            vec![
+                Turn {
+                    id: "turn-a".into(),
+                    items_view: TurnItemsView::Full,
+                    items: vec![ThreadItem::UserMessage {
+                        id: "item-1".into(),
+                        client_id: None,
+                        content: vec![UserInput::Text {
+                            text: "orphaned".into(),
+                            text_elements: Vec::new(),
+                        }],
+                    }],
+                    status: TurnStatus::Interrupted,
+                    error: None,
+                    started_at: Some(10),
+                    completed_at: None,
+                    duration_ms: None,
+                },
+                Turn {
+                    id: "turn-b".into(),
+                    items_view: TurnItemsView::Full,
+                    items: vec![ThreadItem::UserMessage {
+                        id: "item-2".into(),
+                        client_id: None,
+                        content: vec![UserInput::Text {
+                            text: "next".into(),
+                            text_elements: Vec::new(),
+                        }],
+                    }],
+                    status: TurnStatus::Completed,
+                    error: None,
+                    started_at: Some(30),
+                    completed_at: Some(40),
+                    duration_ms: Some(10_000),
+                },
+            ]
         );
     }
 
