@@ -68,7 +68,19 @@ impl Decision {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Analysis {
-    decisions: Vec<Decision>,
+    /// Entries are validated one by one, so one malformed entry costs only itself.
+    decisions: Vec<serde_json::Value>,
+}
+
+/// Cuts `text` to at most `max` bytes at a character boundary.
+fn truncate_to(text: &mut String, max: usize) {
+    if text.len() > max {
+        let end = (0..=max)
+            .rev()
+            .find(|index| text.is_char_boundary(*index))
+            .unwrap_or(0);
+        text.truncate(end);
+    }
 }
 
 /// In-memory speculation only. Installation must compare the source under the history lock.
@@ -275,7 +287,9 @@ impl StagedDecisions {
             .retain(|decision| ids.contains(decision.id()));
     }
 
-    /// Validate the complete response before making any decision available to the adapter.
+    /// Keeps every usable decision of a response. Unparseable JSON rejects the batch; a decision
+    /// for a foreign or repeated ID is ignored, an oversized text is cut to its limit, an empty
+    /// shortening becomes a drop, and a result without a decision stays unmarked.
     pub fn parse(source: Vec<ResponseItemEnvelope>, json: &str) -> Result<Self, CompactionError> {
         let eligible = eligible_results(&source);
         Self::parse_candidates(source, &eligible, json)
@@ -292,42 +306,58 @@ impl StagedDecisions {
         if !allowed.is_subset(&eligible) {
             return Err(CompactionError::Invalid("candidate is not eligible"));
         }
-        let mut seen = HashSet::new();
-        for decision in &analysis.decisions {
-            if !allowed.contains(decision.id()) || !seen.insert(decision.id()) {
-                return Err(CompactionError::Invalid(
-                    "foreign, protected or duplicate result ID",
-                ));
-            }
-            if let Decision::Shorten { text, .. } = decision
-                && (text.is_empty() || text.len() + decision.id().len() + 64 > MAX_FRAGMENT_BYTES)
+        let mut decisions: Vec<Decision> = Vec::new();
+        for entry in analysis.decisions {
+            let Ok(decision) = serde_json::from_value::<Decision>(entry) else {
+                continue;
+            };
+            if !allowed.contains(decision.id())
+                || decisions.iter().any(|kept| kept.id() == decision.id())
             {
-                return Err(CompactionError::Invalid(
-                    "replacement text is empty or oversized",
-                ));
+                continue;
             }
-            if decision
-                .call_text()
-                .is_some_and(|text| text.len() > MAX_CALL_SUMMARY_BYTES)
+            let mut decision = match decision {
+                Decision::Shorten {
+                    id,
+                    call_text,
+                    text,
+                } if text.trim().is_empty() => Decision::Drop { id, call_text },
+                Decision::Shorten {
+                    id,
+                    mut text,
+                    call_text,
+                } => {
+                    truncate_to(&mut text, MAX_FRAGMENT_BYTES.saturating_sub(id.len() + 64));
+                    Decision::Shorten {
+                        id,
+                        text,
+                        call_text,
+                    }
+                }
+                other => other,
+            };
+            if let Decision::Shorten { call_text, .. } | Decision::Drop { call_text, .. } =
+                &mut decision
+                && let Some(text) = call_text
             {
-                return Err(CompactionError::Invalid("call summary is oversized"));
+                truncate_to(text, MAX_CALL_SUMMARY_BYTES);
             }
+            decisions.push(decision);
         }
-        if seen.len() != allowed.len() {
-            return Err(CompactionError::Invalid(
-                "every eligible result needs one decision",
-            ));
+        if decisions.is_empty() {
+            return Err(CompactionError::Invalid("no usable decision"));
         }
+        let decided: HashSet<_> = decisions.iter().map(Decision::id).collect();
         Ok(Self {
             source: source
                 .into_iter()
                 .filter(|item| {
                     item.item
                         .id()
-                        .is_some_and(|id| allowed.contains(id.as_str()))
+                        .is_some_and(|id| decided.contains(id.as_str()))
                 })
                 .collect(),
-            decisions: analysis.decisions,
+            decisions,
         })
     }
 

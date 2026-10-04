@@ -29,8 +29,11 @@ keep original local records queryable without a hosted notes service.
   one marking request is in flight per session; normal model work does not wait for it.
 - **REQ-2**: Results are stored by stable record ID and original content. Appended messages, new user
   input, and disjoint tool cleanup do not invalidate a batch. Only unchanged, still-present records
-  can receive a result. Invalid JSON, duplicate/foreign IDs, and oversized replacements cannot
-  modify the live view. Failed marking is nonfatal and cannot cause a tight retry loop. Validated
+  can receive a result. Each decision is validated on its own: unreadable JSON rejects the batch,
+  while an entry with a foreign, protected or repeated ID or an unknown action is ignored, oversized
+  replacement or call text is cut to its limit, an empty shortening counts as a drop, and a result
+  without a decision stays unmarked; a batch with no usable decision fails. Failed marking is
+  nonfatal and cannot cause a tight retry loop. Validated
   results are persisted immediately, before any cleanup; resume and fork restore those whose records
   are still present and unchanged, so they are neither lost nor sent for marking again. A fork keeps
   its own copy of inherited marks and never writes to its parent's.
