@@ -444,7 +444,8 @@ pub(crate) async fn run_pipeline(
         }
     }
     // The summary and its wrapper are bounded in bytes, measured by the same estimator.
-    let summary_tokens = approx_tokens_from_byte_count(MAX_SUMMARY_BYTES + 512);
+    let summary_tokens = usize::try_from(approx_tokens_from_byte_count(MAX_SUMMARY_BYTES + 512))
+        .unwrap_or(usize::MAX);
     let plan = WindowPlan::new(
         &source,
         &costs,
