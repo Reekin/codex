@@ -1059,6 +1059,60 @@ ORDER BY rollout_ordinal
 }
 
 #[tokio::test]
+async fn late_terminal_record_decides_superseded_turn_status() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("finishing-turn"),
+                user_message("finishing work"),
+                turn_started("next-turn"),
+                turn_completed("finishing-turn"),
+                turn_completed("next-turn"),
+            ],
+        })
+        .await
+        .expect("append a completion persisted after the next turn start");
+
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    let (next_turn_start_byte_offset, _) =
+        rollout_line_byte_offsets(rollout_path.as_path(), /*ordinal*/ 3);
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let turn = sqlx::query_as::<_, (String, Option<i64>, Option<i64>, Option<i64>)>(
+        r#"
+SELECT status, rollout_end_ordinal, rollout_end_byte_offset, completed_at
+FROM thread_turns
+WHERE thread_id = ? AND turn_id = ?
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .bind("finishing-turn")
+    .fetch_one(&pool)
+    .await
+    .expect("read finishing turn");
+    assert_eq!(
+        turn,
+        (
+            "completed".to_string(),
+            Some(2),
+            Some(next_turn_start_byte_offset),
+            Some(20),
+        )
+    );
+}
+
+#[tokio::test]
 async fn paginated_fork_persists_empty_source() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;

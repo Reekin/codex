@@ -31,9 +31,10 @@ persisted.
   status for A and accept A as a `lastTurnId` fork anchor.
 - **REQ-4 Scope**: Closure applies only within one rollout segment. Turns inherited from a parent
   rollout keep the status recorded by their own segment.
-- **REQ-5 First terminal wins**: The inferred interruption is a terminal status. A terminal event for
-  A that arrives after B started does not reopen it or turn it into a completion, matching how the
-  projections treat other terminal statuses.
+- **REQ-5 Late terminal records**: A can still record its own `TurnComplete` or `TurnAborted` after
+  B started, because a finishing turn may persist its terminal record after the next turn's start.
+  That record sets A's status, error, and timing in both projections; A keeps the end position
+  before B's `TurnStarted`. A repeated `TurnStarted` for A never reopens it.
 
 ## Portability Constraints
 
@@ -71,6 +72,13 @@ Prove an unfinished latest turn stays in progress and is still rejected as a for
 completed turn followed by a new turn is unchanged, a repeated `TurnStarted` for the same turn ID
 does not close it, and a turn inherited from a parent rollout is not closed by a child segment's
 turn start. Evidence: unit tests.
+
+### Late Terminal Record
+
+Setup: turn A started, turn B started, then A's `TurnComplete` with timing, then B completes.
+Result: both projections report A as completed with that timing, and the SQLite end position of A
+stays just before B's `TurnStarted`. A late `TurnComplete` with an error reports A as failed with
+that error. Evidence: unit tests.
 
 ## Integration Contract
 

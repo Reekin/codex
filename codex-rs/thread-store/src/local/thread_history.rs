@@ -308,8 +308,9 @@ async fn apply_change_set(
             }
             TurnStatus::InProgress => {
                 // A thread runs one turn at a time, so a turn still open when another one starts
-                // was cut off without a terminal record (for example by a crash). It ends right
-                // before this start record, where a fork before the new turn would also end.
+                // has stopped running, usually because a crash cut it off before its terminal
+                // record. It ends right before this start record, where a fork before the new
+                // turn would also end.
                 let superseded_end_ordinal = rollout_ordinal - 1;
                 let superseded_turn_ids = sqlx::query_scalar::<_, String>(
                     r#"
@@ -346,7 +347,9 @@ RETURNING turn_id
         };
         // The same turn can appear again as it moves from started to completed. Update its latest
         // status, error, and timestamps, but keep the rollout ordinal from the first record that
-        // created it.
+        // created it. An interrupted turn can still record its own terminal event afterwards, for
+        // example when it was interrupted because a later turn started first; that event decides
+        // how the turn ended, while the turn keeps the end position it already has.
         sqlx::query(
             r#"
 INSERT INTO thread_turns (
@@ -363,15 +366,24 @@ INSERT INTO thread_turns (
     duration_ms
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(thread_id, turn_id) DO UPDATE SET
-    rollout_end_ordinal = excluded.rollout_end_ordinal,
-    rollout_end_byte_offset = excluded.rollout_end_byte_offset,
+    rollout_end_ordinal = COALESCE(thread_turns.rollout_end_ordinal, excluded.rollout_end_ordinal),
+    rollout_end_byte_offset = COALESCE(
+        thread_turns.rollout_end_byte_offset,
+        excluded.rollout_end_byte_offset
+    ),
     status = excluded.status,
     error_json = excluded.error_json,
     started_at = excluded.started_at,
     completed_at = excluded.completed_at,
     duration_ms = excluded.duration_ms
-WHERE thread_turns.rollout_end_ordinal IS NULL
-  AND thread_turns.status = 'inProgress'
+WHERE (
+    thread_turns.rollout_end_ordinal IS NULL
+    AND thread_turns.status = 'inProgress'
+)
+   OR (
+    thread_turns.status = 'interrupted'
+    AND excluded.status != 'inProgress'
+)
             "#,
         )
         .bind(thread_id)

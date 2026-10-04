@@ -1239,8 +1239,9 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_turn_started(&mut self, payload: &TurnStartedEvent) {
-        // A thread runs one turn at a time, so a turn still open when another one starts was cut
-        // off without a terminal record (for example by a crash) and can no longer finish.
+        // A thread runs one turn at a time, so a turn still open when another one starts has
+        // stopped running, usually because a crash cut it off before its terminal record. Its
+        // own terminal record can still arrive later and then decides how it ended.
         if let Some(turn) = self.current_turn.as_mut().filter(|turn| {
             turn.id != payload.turn_id && matches!(turn.status, TurnStatus::InProgress)
         }) {
@@ -1269,7 +1270,10 @@ impl ThreadHistoryBuilder {
             if let Some(error) = terminal_error.as_ref() {
                 turn.status = TurnStatus::Failed;
                 turn.error = Some(error.clone());
-            } else if matches!(turn.status, TurnStatus::Completed | TurnStatus::InProgress) {
+            } else if matches!(
+                turn.status,
+                TurnStatus::Completed | TurnStatus::InProgress | TurnStatus::Interrupted
+            ) {
                 turn.status = TurnStatus::Completed;
             }
             turn.completed_at = payload.completed_at;
@@ -1297,7 +1301,12 @@ impl ThreadHistoryBuilder {
             if let Some(error) = terminal_error.as_ref() {
                 turn.status = TurnStatus::Failed;
                 turn.error = Some(error.clone());
-            } else if matches!(turn.status, TurnStatus::Completed | TurnStatus::InProgress) {
+            } else if matches!(
+                turn.status,
+                // A turn interrupted because a later turn started can still record its own
+                // completion afterwards; that record decides how the turn ended.
+                TurnStatus::Completed | TurnStatus::InProgress | TurnStatus::Interrupted
+            ) {
                 turn.status = TurnStatus::Completed;
             }
             turn.completed_at = payload.completed_at;
@@ -5014,6 +5023,48 @@ mod tests {
                     completed_at: Some(40),
                     duration_ms: Some(10_000),
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn late_turn_complete_completes_superseded_turn() {
+        let turn_started = |turn_id: &str| {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: turn_id.into(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            }))
+        };
+        let turn_completed = |turn_id: &str, completed_at: i64| {
+            RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: turn_id.into(),
+                started_at: None,
+                last_agent_message: None,
+                error: None,
+                completed_at: Some(completed_at),
+                duration_ms: Some(1_000),
+                time_to_first_token_ms: None,
+            }))
+        };
+        let items = vec![
+            turn_started("turn-a"),
+            turn_started("turn-b"),
+            turn_completed("turn-a", 20),
+            turn_completed("turn-b", 40),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(
+            turns
+                .iter()
+                .map(|turn| (turn.id.as_str(), turn.status.clone(), turn.completed_at))
+                .collect::<Vec<_>>(),
+            vec![
+                ("turn-a", TurnStatus::Completed, Some(20)),
+                ("turn-b", TurnStatus::Completed, Some(40)),
             ]
         );
     }
