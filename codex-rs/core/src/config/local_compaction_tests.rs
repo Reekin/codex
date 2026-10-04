@@ -17,12 +17,13 @@ async fn loads_local_compaction_overrides_and_partial_defaults() -> anyhow::Resu
             },
         ),
         (
-            "[local_compaction]\nreclaim_percent = 20\nmark_after_tokens_percent = 4\ncompact_target_percent = 25",
+            "[local_compaction]\nreclaim_percent = 20\nmark_after_tokens_percent = 4\ncompact_target_percent = 25\nkeep_reasoning_percent = 8",
             LocalCompactionConfig {
                 force_local: false,
                 reclaim_percent: 20,
                 mark_after_tokens_percent: 4,
                 compact_target_percent: 25,
+                keep_reasoning_percent: 8,
             },
         ),
     ] {
@@ -47,6 +48,8 @@ async fn rejects_invalid_local_compaction_budgets() -> anyhow::Result<()> {
         "compact_target_percent = 100",
         "mark_after_tokens_percent = 0",
         "mark_after_tokens_percent = 100",
+        "keep_reasoning_percent = 0",
+        "keep_reasoning_percent = 100",
     ] {
         let home = tempdir()?;
         let result = Config::load_from_base_config_with_overrides(

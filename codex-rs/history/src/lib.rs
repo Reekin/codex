@@ -73,6 +73,10 @@ pub struct CodexHarnessMetadata {
     /// Copied parent context stays model-visible but must not become child-local authorization.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inherited_user_message: bool,
+
+    /// Kept verbatim by the latest local full compaction; the next one summarizes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub previous_window: bool,
 }
 
 /// Local archive addresses survive replacement views and repeated tier promotion.

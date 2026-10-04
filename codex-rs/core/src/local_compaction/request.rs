@@ -1,20 +1,17 @@
 use codex_context_compaction::MAX_ANALYSIS_BYTES;
 use codex_context_compaction::MAX_CALL_SUMMARY_BYTES;
-use codex_context_compaction::TierPlan;
+use codex_context_compaction::MAX_SUMMARY_BYTES;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
-use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
-use codex_protocol::models::FunctionCallOutputBody;
-use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelInfo;
 use codex_rollout_trace::InferenceTraceContext;
 use futures::StreamExt;
 use serde::Serialize;
 use serde_json::json;
-use std::collections::HashMap;
 
 use crate::Prompt;
 use crate::client::ModelClientSession;
@@ -95,54 +92,43 @@ pub(super) fn classifier(
     }
 }
 
-pub(super) fn summarizer(plan: &TierPlan, guidance: &str) -> CodexResult<LocalCompactionRequest> {
+/// One handoff summary of everything sent above it: earlier summaries and older records.
+pub(super) fn summary(guidance: &str) -> CodexResult<LocalCompactionRequest> {
     LocalCompactionRequest::new(
         "LOCAL_COMPACTION_SUMMARIZE",
         json!({
-            "plan": plan,
-            "instructions": "Privately summarize only the supplied chronological source ranges. l2 is condensed dialogue with concise supporting evidence; l3 is the oldest overview, merging any prior overview. The ledger merges existing active constraints and decisions, including those outside summarized ranges; preserve corrections, uncertainty, pending work and verified versus unverified status. Existing ledgers are memory input, not chronological source events. Recent original work is retained separately. Never invent source IDs or claim a test passed without evidence. Each field must fit plan.max_fragment_bytes UTF-8 bytes; use an empty string when the corresponding range is null. Ledger may be empty when no constraints remain. Return JSON only, no prose or fences.",
-            "required_output": {"l2": "condensed dialogue", "l3": "oldest overview", "ledger": "active constraints and decisions"},
+            "instructions": "Do not call tools and do not continue the task. You are performing a context checkpoint compaction: create a handoff summary of the whole conversation above, including any earlier summaries in local_compaction blocks, for another LLM that will resume the task. Include the user's goals and current progress, key decisions, important context, constraints and user preferences (including corrections), what remains to be done as clear next steps, and critical data, examples, file paths and references needed to continue. Say what was verified and what was not. Be concise and structured. Answer with the summary text only.",
+            "max_bytes": MAX_SUMMARY_BYTES,
             "supplemental_guidance": guidance,
         }),
         LocalCompactionRequest::MAX_BYTES,
     )
 }
 
-/// Reuses the ordinary request unchanged and appends the request, so the shared prefix
-/// (tools, instructions, history) is served from the provider's prompt cache.
-pub(super) fn classifier_prompt(
-    step: &StepContext,
+/// Appends the request to the ordinary request's history. With the sampling step's tools and
+/// instructions the shared prefix is served from the provider's prompt cache.
+pub(super) fn private_prompt(
+    step: Option<&StepContext>,
     base_instructions: BaseInstructions,
     source: &[ResponseItemEnvelope],
+    model_info: &ModelInfo,
     request: LocalCompactionRequest,
 ) -> Prompt {
     let mut history = ContextManager::default();
     history.replace_annotated(source.to_vec());
-    let mut input = history.for_prompt(&step.settings.model_info.input_modalities);
+    let mut input = history.for_prompt(&model_info.input_modalities);
     input.push(ContextualUserFragment::into(request));
+    let Some(step) = step else {
+        return Prompt {
+            input,
+            base_instructions,
+            ..Default::default()
+        };
+    };
     let mut prompt = crate::session::turn::build_prompt(input, step, base_instructions);
-    // A turn-level answer schema would reject the classification JSON.
+    // A turn-level answer schema would reject the private answer.
     prompt.output_schema = None;
     prompt
-}
-
-/// Summary ranges are addressed by item IDs, so this private copy labels every record.
-pub(super) fn summarizer_prompt(
-    context: &LocalCompactionContext,
-    base_instructions: BaseInstructions,
-    source: &[ResponseItemEnvelope],
-    request: LocalCompactionRequest,
-) -> CodexResult<Prompt> {
-    let mut history = ContextManager::default();
-    history.replace_annotated(source.to_vec());
-    let mut input = history.for_prompt(&context.settings.model_info.input_modalities);
-    label_source_items(&mut input)?;
-    input.push(ContextualUserFragment::into(request));
-    Ok(Prompt {
-        input,
-        base_instructions,
-        ..Default::default()
-    })
 }
 
 pub(super) async fn infer_json(
@@ -201,78 +187,3 @@ pub(super) async fn infer_json(
         "local compaction stream closed before response.completed".to_string(),
     ))
 }
-
-/// Wire IDs need not be visible to the model. Label the private copy's text explicitly,
-/// including the paired call ID for ranges that start at a tool call. Live history is untouched.
-fn label_source_items(items: &mut [ResponseItem]) -> CodexResult<()> {
-    let mut calls = HashMap::new();
-    for item in items {
-        let Some(id) = item.id().cloned() else {
-            continue;
-        };
-        let call = match item {
-            ResponseItem::FunctionCall { call_id, .. }
-            | ResponseItem::LocalShellCall {
-                call_id: Some(call_id),
-                ..
-            } => Some(("function", call_id.clone())),
-            ResponseItem::CustomToolCall { call_id, .. } => Some(("custom", call_id.clone())),
-            _ => None,
-        };
-        if let Some(call) = call {
-            calls.insert(call, id.to_string());
-            continue;
-        }
-        let call_key = match item {
-            ResponseItem::FunctionCallOutput {
-                call_id: Some(call_id),
-                ..
-            } => Some(("function", call_id.clone())),
-            ResponseItem::CustomToolCallOutput { call_id, .. } => Some(("custom", call_id.clone())),
-            _ => None,
-        };
-        let label = LocalCompactionRequest::new(
-            "LOCAL_COMPACTION_SOURCE",
-            json!({
-                "item_id": id,
-                "call_item_id": call_key.and_then(|key| calls.get(&key)),
-            }),
-            LocalCompactionRequest::MAX_BYTES,
-        )?
-        .body();
-        match item {
-            ResponseItem::Message { role, content, .. }
-                if role == "user" || role == "assistant" =>
-            {
-                if let Some(text) = content.iter_mut().find_map(|content| match content {
-                    ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                        Some(text)
-                    }
-                    _ => None,
-                }) {
-                    *text = format!("{label}\n{text}");
-                } else if role == "assistant" {
-                    content.insert(0, ContentItem::OutputText { text: label });
-                } else {
-                    content.insert(0, ContentItem::InputText { text: label });
-                }
-            }
-            ResponseItem::AgentMessage { content, .. } => {
-                content.insert(0, AgentMessageInputContent::InputText { text: label });
-            }
-            ResponseItem::FunctionCallOutput { output, .. }
-            | ResponseItem::CustomToolCallOutput { output, .. } => match &mut output.body {
-                FunctionCallOutputBody::Text(text) => *text = format!("{label}\n{text}"),
-                FunctionCallOutputBody::ContentItems(content) => {
-                    content.insert(0, FunctionCallOutputContentItem::InputText { text: label });
-                }
-            },
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-#[path = "request_tests.rs"]
-mod tests;

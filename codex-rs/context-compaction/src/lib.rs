@@ -7,14 +7,17 @@ mod tiers;
 pub use cleanup::Decision;
 pub use cleanup::MAX_CALL_SUMMARY_BYTES;
 pub use cleanup::StagedDecisions;
+pub use cleanup::dropped_reasoning;
 pub use cleanup::eligible_results;
 pub use cleanup::large_calls;
 pub use groups::is_user_direction;
-pub use tiers::SummaryOutput;
-pub use tiers::TierPlan;
+pub use tiers::SourceRange;
+pub use tiers::WindowPlan;
 
-/// A fragment is at most 3,000 UTF-8 bytes (also an upper bound on token count).
+/// A shortened tool result is at most 3,000 UTF-8 bytes (also an upper bound on token count).
 pub const MAX_FRAGMENT_BYTES: usize = 3_000;
+/// The handoff summary of earlier windows; also an upper bound on its token count.
+pub const MAX_SUMMARY_BYTES: usize = 16_000;
 pub const MAX_ANALYSIS_BYTES: usize = 256_000;
 
 #[derive(Debug, thiserror::Error)]
@@ -34,6 +37,7 @@ pub struct Budget {
     pub fixed_tokens: usize,
     pub reclaim_percent: usize,
     pub compact_target_percent: usize,
+    pub keep_reasoning_percent: usize,
 }
 
 impl Budget {
@@ -44,12 +48,21 @@ impl Budget {
             .max(1)
     }
 
+    /// History allowed after full compaction before the current window's oldest part is
+    /// summarized too.
     pub fn history_target(self) -> usize {
         (self
             .window_tokens
             .saturating_mul(self.compact_target_percent)
             / 100)
             .saturating_sub(self.fixed_tokens)
+    }
+
+    /// Newest reasoning kept by cleanup, for models that are sent earlier turns' reasoning.
+    pub fn reasoning_tokens(self) -> usize {
+        self.window_tokens
+            .saturating_mul(self.keep_reasoning_percent)
+            / 100
     }
 
     pub fn useful(self, before_tokens: usize, after_tokens: usize) -> bool {

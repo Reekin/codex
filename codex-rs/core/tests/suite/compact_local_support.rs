@@ -208,18 +208,13 @@ impl LocalModel {
                     };
                     let response_id = if state.marking_count == 1 { "classifier-response".to_string() } else { format!("classifier-response-{}", state.marking_count) };
                     sse(vec![ev_assistant_message("classifier-private", &text), ev_completed_with_tokens(&response_id, 17)])
-                } else if let Some(payload) = analysis_payload(&body, SUMMARIZE) {
-                    let plan = &payload["plan"];
+                } else if analysis_payload(&body, SUMMARIZE).is_some() {
                     let text = if matches!(state.analysis, Analysis::InvalidSummary) {
-                        "invalid tier analysis".to_string()
+                        String::new()
                     } else {
-                        json!({
-                            "l2": if plan["l2"].is_null() { "" } else { "Earlier dialogue and concise evidence; the earlier assumption was corrected, verification remains pending." },
-                            "l3": if plan["l3"].is_null() { "" } else { "Oldest conversation overview; preserve the offline-only constraint and unresolved work." },
-                            "ledger": LEDGER,
-                        }).to_string()
+                        format!("Earlier conversation: the earlier assumption was corrected. {LEDGER}")
                     };
-                    sse(vec![ev_assistant_message("tiers-private", &text), ev_completed_with_tokens("tiers-response", 23)])
+                    sse(vec![ev_assistant_message("summary-private", &text), ev_completed_with_tokens("summary-response", 23)])
                 } else {
                     state.replies.pop_front().expect("ordinary response queued before submitting turn")
                 };

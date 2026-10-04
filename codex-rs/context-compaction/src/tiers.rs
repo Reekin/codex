@@ -1,267 +1,111 @@
 use codex_history::LocalCompactionKind;
-use codex_history::LocalCompactionSource;
 use codex_history::ResponseItemEnvelope;
-use serde::Deserialize;
-use serde::Serialize;
+use codex_protocol::models::ResponseItem;
 
 use crate::CompactionError;
-use crate::MAX_FRAGMENT_BYTES;
-use crate::bounded_json;
 use crate::groups::is_user_direction;
 use crate::groups::pinned;
 use crate::groups::safe_cuts;
 
-#[derive(Debug, Clone, Serialize)]
+/// First and last original records a summary covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceRange {
     pub first_item_id: String,
     pub last_item_id: String,
 }
 
-/// One bounded semantic response. The adapter supplies ranges; the model cannot invent them.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SummaryOutput {
-    pub l2: String,
-    pub l3: String,
-    pub ledger: String,
-}
-
-#[derive(Debug)]
-pub struct SummaryFragment {
-    pub text: String,
-    pub source: LocalCompactionSource,
-}
-
-/// Chronological L3 overview, L2 condensed dialogue, L1 cleaned verbatim dialogue, recent originals.
-/// Existing summaries and the ledger are consumed on promotion, never accumulated per turn.
-#[derive(Debug, Clone, Serialize)]
-pub struct TierPlan {
-    pub l2: Option<SourceRange>,
-    pub l3: Option<SourceRange>,
-    pub max_fragment_bytes: usize,
-    /// History-only budget; the adapter reserves fixed context and continuation headroom.
-    pub result_budget_tokens: usize,
-    pub hard_cap_tokens: usize,
-    /// Conservative bound using one token per summary byte, including provenance wrappers.
+/// Full compaction keeps the current window (L1), after tool cleanup, verbatim; it becomes the
+/// previous window (L2) of the next full compaction. Earlier summaries and the previous window
+/// are summarized into one handoff summary (L3). When the cleaned current window alone exceeds
+/// the budget, its oldest part is summarized as well, so repeated compaction always converges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowPlan {
+    /// Records before this index are summarized, except the kept ones below.
+    pub cut: usize,
+    /// Canonical instructions before `cut`, kept verbatim ahead of the summary.
+    pub kept_instructions: Vec<usize>,
+    /// The active user input when it lies before `cut`, kept verbatim after the summary.
+    pub kept_input: Option<usize>,
+    /// Original range of the summarized records; `None` when nothing needs a summary.
+    pub summarized: Option<SourceRange>,
+    /// History tokens after compaction, reserving `summary_tokens` for a summary.
     pub projected_tokens: usize,
-    pub retained_tokens: usize,
-    #[serde(skip)]
-    pub retained_prefix: Vec<ResponseItemEnvelope>,
-    #[serde(skip)]
-    pub retained_tail: Vec<ResponseItemEnvelope>,
-    #[serde(skip)]
-    ledger_range: Option<SourceRange>,
 }
 
-impl TierPlan {
+impl WindowPlan {
+    /// `costs` are per-record tokens after tool cleanup, zero for records cleanup removes.
+    /// Picks the earliest pair-safe cut at or after the current window start that fits
+    /// `budget_tokens`, or the latest one when none fits.
     pub fn new(
         items: &[ResponseItemEnvelope],
-        preferred_tokens: usize,
-        hard_cap_tokens: usize,
-        item_tokens: &[usize],
+        costs: &[usize],
+        budget_tokens: usize,
+        summary_tokens: usize,
     ) -> Result<Self, CompactionError> {
-        if item_tokens.len() != items.len() {
+        if costs.len() != items.len() {
             return Err(CompactionError::Invalid(
                 "history token costs do not match records",
             ));
         }
-        let preferred_tokens = preferred_tokens.min(hard_cap_tokens);
-        let retained_tokens = item_tokens
-            .iter()
-            .fold(0usize, |total, cost| total.saturating_add(*cost));
-        let unchanged = || Self {
-            l2: None,
-            l3: None,
-            max_fragment_bytes: 0,
-            result_budget_tokens: preferred_tokens.max(retained_tokens),
-            hard_cap_tokens,
-            projected_tokens: retained_tokens,
-            retained_tokens,
-            retained_prefix: Vec::new(),
-            retained_tail: items.to_vec(),
-            ledger_range: None,
-        };
-        if retained_tokens <= preferred_tokens {
-            return Ok(unchanged());
-        }
         let cuts = safe_cuts(items);
-        let l1_budget = (preferred_tokens / 3).min(6_000);
-        let old_summary_end = items
+        let boundary = items
             .iter()
-            .rposition(is_summary)
+            .rposition(|item| is_summary(item) || previous_window(item))
             .map_or(0, |index| index + 1);
-        let active_user = items
-            .iter()
-            .rposition(|item| !is_summary(item) && !pinned(item) && is_user_direction(&item.item));
-        let keep: Vec<_> = items
-            .iter()
-            .enumerate()
-            .map(|(index, item)| pinned(item) || active_user == Some(index))
-            .collect();
-        // The last safe cut is before unresolved calls. Completed groups, including the newest
-        // one in a long user turn, are eligible for promotion as a whole.
-        let pending_start = cuts.last().copied().unwrap_or(0);
-        let mut suffix = vec![0usize; items.len() + 1];
-        let mut fixed = 0usize;
-        for index in (0..items.len()).rev() {
-            suffix[index] =
-                suffix[index + 1].saturating_add(if keep[index] { 0 } else { item_tokens[index] });
-            if keep[index] {
-                fixed = fixed.saturating_add(item_tokens[index]);
-            }
-        }
-        // Exhaust promotions at the preferred occupancy before accepting a higher valid result.
-        // A byte is a conservative token bound, unlike an assumed prose compression ratio.
-        const MIN_SUMMARY_BYTES: usize = 128;
-        for (budget, minimum_bytes) in [(preferred_tokens, MIN_SUMMARY_BYTES), (hard_cap_tokens, 1)]
-        {
-            for cut in cuts.iter().copied().filter(|cut| *cut >= old_summary_end) {
-                let recent_tokens = suffix[cut].saturating_sub(suffix[pending_start]);
-                if recent_tokens > l1_budget {
-                    continue;
-                }
-                let retained_tokens = fixed.saturating_add(suffix[cut]);
-                if retained_tokens >= budget {
-                    continue;
-                }
-                let Some(mut plan) = Self::at_cut(items, &keep, &cuts, cut, old_summary_end) else {
-                    continue;
-                };
-                let ranges: Vec<_> = plan
-                    .l2
-                    .iter()
-                    .chain(plan.l3.iter())
-                    .chain(plan.ledger_range.iter())
-                    .collect();
-                // LocalCompactionFragment adds markers, a kind name, provenance, recall guidance,
-                // and message framing. Reserve their bytes plus the actual endpoint lengths.
-                let overhead = ranges.iter().fold(0usize, |total, range| {
-                    total
-                        .saturating_add(256)
-                        .saturating_add(range.first_item_id.len())
-                        .saturating_add(range.last_item_id.len())
-                });
-                let available = budget
-                    .saturating_sub(retained_tokens)
-                    .saturating_sub(overhead);
-                let fragment_bytes = (available / ranges.len()).min(MAX_FRAGMENT_BYTES);
-                if fragment_bytes < minimum_bytes {
-                    continue;
-                }
-                plan.max_fragment_bytes = fragment_bytes;
-                plan.retained_tokens = retained_tokens;
-                plan.projected_tokens = retained_tokens + overhead + fragment_bytes * ranges.len();
-                plan.result_budget_tokens = preferred_tokens.max(plan.projected_tokens);
-                plan.hard_cap_tokens = hard_cap_tokens;
-                return Ok(plan);
-            }
-        }
-        if retained_tokens <= hard_cap_tokens {
-            return Ok(unchanged());
-        }
-        Err(CompactionError::Invalid(
-            "irreducible active input exceeds the safe history budget",
-        ))
-    }
-
-    fn at_cut(
-        items: &[ResponseItemEnvelope],
-        keep: &[bool],
-        cuts: &[usize],
-        l1: usize,
-        old_summary_end: usize,
-    ) -> Option<Self> {
-        let midpoint = l1 / 2;
-        let l3_end = cuts
+        let window_start = cuts
             .iter()
             .copied()
-            .filter(|cut| {
-                *cut <= l1 && *cut >= old_summary_end && *cut <= midpoint.max(old_summary_end)
-            })
+            .filter(|cut| *cut <= boundary)
             .max()
-            .unwrap_or(l1);
-        let summarized: Vec<_> = items[..l1]
+            .unwrap_or(0);
+        let last_cut = cuts.last().copied().unwrap_or(0);
+        let active_input = items
             .iter()
-            .enumerate()
-            .filter(|(index, _)| !keep[*index])
-            .map(|(_, item)| item.clone())
-            .collect();
-        let l3_items: Vec<_> = items[..l3_end]
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !keep[*index])
-            .map(|(_, item)| item.clone())
-            .collect();
-        let l2_items: Vec<_> = items[l3_end..l1]
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !keep[*index + l3_end])
-            .map(|(_, item)| item.clone())
-            .collect();
-        let l3 = source_range(&l3_items);
-        let l2 = source_range(&l2_items);
-        let ledger_range = source_range(&summarized)?;
-        Some(Self {
-            l2,
-            l3,
-            max_fragment_bytes: 0,
-            result_budget_tokens: 0,
-            hard_cap_tokens: 0,
-            projected_tokens: 0,
-            retained_tokens: 0,
-            retained_prefix: items[..l1]
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| keep[*index])
-                .map(|(_, item)| item.clone())
-                .collect(),
-            retained_tail: items[l1..].to_vec(),
-            ledger_range: Some(ledger_range),
-        })
-    }
-
-    pub fn parse(&self, json: &str) -> Result<Vec<SummaryFragment>, CompactionError> {
-        let output: SummaryOutput = bounded_json(json)?;
-        let mut fragments = Vec::new();
-        for (text, range, kind) in [
-            (
-                output.l3,
-                self.l3.as_ref(),
-                LocalCompactionKind::OldestOverview,
-            ),
-            (
-                output.l2,
-                self.l2.as_ref(),
-                LocalCompactionKind::CondensedDialogue,
-            ),
-            (
-                output.ledger,
-                self.ledger_range.as_ref(),
-                LocalCompactionKind::ConstraintsLedger,
-            ),
-        ] {
-            if text.len() > self.max_fragment_bytes
-                || (range.is_some()
-                    && kind != LocalCompactionKind::ConstraintsLedger
-                    && text.trim().is_empty())
-                || (range.is_none() && !text.is_empty())
-            {
-                return Err(CompactionError::Invalid(
-                    "summary violates required range or size bound",
-                ));
-            }
-            if let Some(range) = range {
-                fragments.push(SummaryFragment {
-                    text,
-                    source: LocalCompactionSource {
-                        first_item_id: range.first_item_id.clone(),
-                        last_item_id: range.last_item_id.clone(),
-                        kind,
-                    },
-                });
-            }
+            .rposition(|item| !pinned(item) && !is_summary(item) && is_user_direction(&item.item));
+        let mut suffix = vec![0usize; items.len() + 1];
+        for index in (0..items.len()).rev() {
+            suffix[index] = suffix[index + 1].saturating_add(costs[index]);
         }
-        Ok(fragments)
+        let mut latest = None;
+        for cut in cuts
+            .into_iter()
+            .filter(|cut| (window_start..=last_cut).contains(cut))
+        {
+            let kept_instructions: Vec<_> =
+                (0..cut).filter(|index| pinned(&items[*index])).collect();
+            let kept_input = active_input.filter(|index| *index < cut);
+            let summarized = source_range(
+                items[..cut]
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, item)| !pinned(item) && kept_input != Some(*index))
+                    .map(|(_, item)| item),
+            );
+            let projected_tokens = kept_instructions
+                .iter()
+                .chain(kept_input.iter())
+                .map(|index| costs[*index])
+                .fold(suffix[cut], usize::saturating_add)
+                .saturating_add(if summarized.is_some() {
+                    summary_tokens
+                } else {
+                    0
+                });
+            let plan = Self {
+                cut,
+                kept_instructions,
+                kept_input,
+                summarized,
+                projected_tokens,
+            };
+            if plan.projected_tokens <= budget_tokens {
+                return Ok(plan);
+            }
+            latest = Some(plan);
+        }
+        latest.ok_or(CompactionError::Invalid(
+            "history has no safe compaction boundary",
+        ))
     }
 }
 
@@ -276,40 +120,28 @@ fn is_summary(item: &ResponseItemEnvelope) -> bool {
         .is_some_and(|source| source.kind != LocalCompactionKind::ToolResult)
 }
 
-fn source_range(items: &[ResponseItemEnvelope]) -> Option<SourceRange> {
-    let mut sources = items
-        .iter()
-        .filter(|item| !pinned(item))
-        // Range endpoints must name records whose source labels can be shown to the model.
-        .filter(|item| {
-            matches!(
-                item.item,
-                codex_protocol::models::ResponseItem::Message { .. }
-                    | codex_protocol::models::ResponseItem::AgentMessage { .. }
-                    | codex_protocol::models::ResponseItem::FunctionCall { .. }
-                    | codex_protocol::models::ResponseItem::FunctionCallOutput { .. }
-                    | codex_protocol::models::ResponseItem::CustomToolCall { .. }
-                    | codex_protocol::models::ResponseItem::CustomToolCallOutput { .. }
-                    | codex_protocol::models::ResponseItem::LocalShellCall {
-                        call_id: Some(_),
-                        ..
-                    }
-            )
-        })
-        .filter_map(|item| {
-            if let Some(source) = item
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.local_compaction.as_ref())
-            {
-                if source.kind == LocalCompactionKind::ConstraintsLedger {
-                    return None;
-                }
-                Some((source.first_item_id.clone(), source.last_item_id.clone()))
-            } else {
-                item.item.id().map(|id| (id.to_string(), id.to_string()))
-            }
-        });
+fn previous_window(item: &ResponseItemEnvelope) -> bool {
+    item.metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.previous_window)
+}
+
+/// Earlier summaries contribute the range they already cover; other records their own ID.
+fn source_range<'a>(items: impl Iterator<Item = &'a ResponseItemEnvelope>) -> Option<SourceRange> {
+    let mut sources = items.filter_map(|item| {
+        if let Some(source) = item
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.local_compaction.as_ref())
+            .filter(|source| source.kind != LocalCompactionKind::ToolResult)
+        {
+            return Some((source.first_item_id.clone(), source.last_item_id.clone()));
+        }
+        if matches!(item.item, ResponseItem::Reasoning { .. }) {
+            return None;
+        }
+        item.item.id().map(|id| (id.to_string(), id.to_string()))
+    });
     let (first_item_id, mut last_item_id) = sources.next()?;
     for (_, last) in sources {
         last_item_id = last;

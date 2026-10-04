@@ -55,6 +55,9 @@ pub(crate) struct LocalCompactionContext {
     pub(crate) settings: Arc<ResolvedStepSettings>,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) tool_tokens: usize,
+    /// The sampling step, when there is one; its tools let private requests reuse the
+    /// ordinary request's cached prefix.
+    pub(crate) step: Option<Arc<StepContext>>,
 }
 
 impl LocalCompactionContext {
@@ -63,6 +66,7 @@ impl LocalCompactionContext {
             settings: Arc::clone(&turn.initial_settings),
             session_telemetry: turn.session_telemetry.clone(),
             tool_tokens: 0,
+            step: None,
             turn,
         }
     }
@@ -78,6 +82,7 @@ impl LocalCompactionContext {
                 ),
             )
             .unwrap_or(0),
+            step: Some(step),
         }
     }
 }
