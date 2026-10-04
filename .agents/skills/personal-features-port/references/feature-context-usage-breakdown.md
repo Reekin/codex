@@ -25,6 +25,10 @@ ended with, including threads reopened after a restart.
   its reported input can be several times the real context. Its full usage still counts toward
   token totals, but the active context after it is at most the active context the request was sent
   with plus the response's output.
+  A response to a request sent before a cleanup, compaction or rollback replaced the history counts
+  toward totals only; the active context stays at the value set by the replacement.
+  Reasoning whose encrypted payload is empty (providers with plaintext reasoning) is estimated from
+  its visible summary and content.
 - **REQ-2**: Every token usage snapshot that has provider usage carries a context usage record with
   the active context tokens, the active-context token count at which automatic compaction will
   trigger (the smaller of the configured auto-compaction trigger and the model's usable context

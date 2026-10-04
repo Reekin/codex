@@ -2375,7 +2375,10 @@ async fn try_run_sampling_request(
     let mut should_emit_turn_diff = false;
     let mut should_emit_token_count = false;
     // The request carries exactly the current active context.
-    let mut response_context = ResponseContext::new(sess.get_total_token_usage().await);
+    let mut response_context = ResponseContext::new(
+        sess.get_total_token_usage().await,
+        sess.clone_history().await.history_version(),
+    );
     const MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE: usize = 256;
     let mut analytics_tool_call_ids = Vec::new();
     let reasoning_effort = step_context
