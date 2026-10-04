@@ -13,22 +13,34 @@ use codex_protocol::protocol::TokenUsage;
 /// the whole context again, so the provider reports the context several times over. Such usage
 /// still counts toward totals, but the active context is the request's own active usage plus
 /// what the response generated.
+///
+/// A cleanup, compaction or rollback that replaces history while the request is in flight makes
+/// the response measure a context that no longer exists; its usage only counts toward totals.
 #[derive(Default)]
 pub(crate) struct ResponseContext {
     request_tokens: i64,
+    /// History version the request was built from; unknown for usage outside sampling.
+    history_version: Option<u64>,
     server_search: bool,
 }
 
 impl ResponseContext {
-    pub(crate) fn new(request_tokens: i64) -> Self {
+    pub(crate) fn new(request_tokens: i64, history_version: u64) -> Self {
         Self {
             request_tokens,
+            history_version: Some(history_version),
             server_search: false,
         }
     }
 
     pub(crate) fn observe(&mut self, item: &ResponseItem) {
         self.server_search |= matches!(item, ResponseItem::WebSearchCall { .. });
+    }
+
+    /// Whether history was replaced after this request was sent.
+    pub(crate) fn is_stale(&self, history_version: u64) -> bool {
+        self.history_version
+            .is_some_and(|version| version != history_version)
     }
 
     /// Usage that measures the active context after this response.

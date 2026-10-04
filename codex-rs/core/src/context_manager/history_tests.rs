@@ -428,6 +428,33 @@ fn truncate_exec_output(content: &str) -> String {
     truncate_text(content, TruncationPolicy::Tokens(EXEC_FORMAT_MAX_TOKENS))
 }
 
+#[test]
+fn empty_encrypted_reasoning_is_estimated_from_its_visible_text() {
+    let text = "plaintext reasoning ".repeat(200);
+    let ResponseItem::Reasoning {
+        id,
+        summary,
+        content,
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = reasoning_msg(&text)
+    else {
+        unreachable!("reasoning fixture");
+    };
+    let item = ResponseItem::Reasoning {
+        id,
+        summary,
+        content,
+        encrypted_content: Some(String::new()),
+        internal_chat_message_metadata_passthrough,
+    };
+
+    let estimated = estimate_response_item_model_visible_bytes(&item);
+    let raw_len = serde_json::to_string(&item).unwrap().len() as i64;
+
+    assert_eq!(estimated, raw_len);
+}
+
 fn approx_token_count_for_text(text: &str) -> i64 {
     i64::try_from(text.len().saturating_add(3) / 4).unwrap_or(i64::MAX)
 }

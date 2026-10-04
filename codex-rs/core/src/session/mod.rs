@@ -4419,18 +4419,29 @@ impl Session {
         response: &ResponseContext,
     ) -> CodexResult<()> {
         if let Some(token_usage) = token_usage {
-            let active_usage = response.active_usage(token_usage);
             let token_info = {
                 let mut state = self.state.lock().await;
+                let stale = response.is_stale(state.history.history_version());
+                // A replaced history keeps the active usage it was given at replacement.
+                let active_usage = if stale {
+                    state
+                        .token_info()
+                        .map(|info| info.last_token_usage)
+                        .unwrap_or_default()
+                } else {
+                    response.active_usage(token_usage)
+                };
                 state.update_token_info_from_usage(
                     token_usage,
                     &active_usage,
                     turn_context.model_context_window(),
                 );
-                if matches!(
-                    turn_context.config.model_auto_compact_token_limit_scope,
-                    AutoCompactTokenLimitScope::BodyAfterPrefix
-                ) {
+                if !stale
+                    && matches!(
+                        turn_context.config.model_auto_compact_token_limit_scope,
+                        AutoCompactTokenLimitScope::BodyAfterPrefix
+                    )
+                {
                     state.ensure_auto_compact_window_server_prefill_from_usage(&active_usage);
                 }
                 state.token_info()

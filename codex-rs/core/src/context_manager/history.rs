@@ -811,6 +811,8 @@ static ORIGINAL_IMAGE_ESTIMATE_CACHE: LazyLock<BlockingLruCache<[u8; 20], Option
 
 fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
     match item {
+        // Providers with plaintext reasoning send an empty encrypted payload; the visible
+        // summary and content are what the model reads back.
         ResponseItem::Reasoning {
             encrypted_content: Some(content),
             ..
@@ -822,7 +824,9 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
         | ResponseItem::ContextCompaction {
             encrypted_content: Some(content),
             ..
-        } => i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX),
+        } if !content.is_empty() => {
+            i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX)
+        }
         item => {
             let raw = serialized_json_bytes(item)
                 .map(|len| i64::try_from(len).unwrap_or(i64::MAX))
