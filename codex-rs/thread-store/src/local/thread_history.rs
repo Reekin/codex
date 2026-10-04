@@ -306,11 +306,50 @@ async fn apply_change_set(
             TurnStatus::Completed | TurnStatus::Interrupted | TurnStatus::Failed => {
                 (Some(rollout_ordinal), Some(rollout_end_byte_offset))
             }
-            TurnStatus::InProgress => (None, None),
+            TurnStatus::InProgress => {
+                // A thread runs one turn at a time, so a turn still open when another one starts
+                // has stopped running, usually because a crash cut it off before its terminal
+                // record. It ends right before this start record, where a fork before the new
+                // turn would also end.
+                let superseded_end_ordinal = rollout_ordinal - 1;
+                let superseded_turn_ids = sqlx::query_scalar::<_, String>(
+                    r#"
+UPDATE thread_turns
+SET
+    status = 'interrupted',
+    rollout_end_ordinal = ?,
+    rollout_end_byte_offset = ?
+WHERE thread_id = ?
+  AND turn_id != ?
+  AND rollout_end_ordinal IS NULL
+  AND status = 'inProgress'
+RETURNING turn_id
+                    "#,
+                )
+                .bind(superseded_end_ordinal)
+                .bind(rollout_byte_offset)
+                .bind(thread_id)
+                .bind(turn_id.as_str())
+                .fetch_all(&mut **transaction)
+                .await
+                .map_err(thread_history_error)?;
+                for superseded_turn_id in superseded_turn_ids {
+                    fill_turn_summary_items(
+                        transaction,
+                        thread_id,
+                        superseded_turn_id.as_str(),
+                        superseded_end_ordinal,
+                    )
+                    .await?;
+                }
+                (None, None)
+            }
         };
         // The same turn can appear again as it moves from started to completed. Update its latest
         // status, error, and timestamps, but keep the rollout ordinal from the first record that
-        // created it.
+        // created it. An interrupted turn can still record its own terminal event afterwards, for
+        // example when it was interrupted because a later turn started first; that event decides
+        // how the turn ended, while the turn keeps the end position it already has.
         sqlx::query(
             r#"
 INSERT INTO thread_turns (
@@ -327,15 +366,24 @@ INSERT INTO thread_turns (
     duration_ms
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(thread_id, turn_id) DO UPDATE SET
-    rollout_end_ordinal = excluded.rollout_end_ordinal,
-    rollout_end_byte_offset = excluded.rollout_end_byte_offset,
+    rollout_end_ordinal = COALESCE(thread_turns.rollout_end_ordinal, excluded.rollout_end_ordinal),
+    rollout_end_byte_offset = COALESCE(
+        thread_turns.rollout_end_byte_offset,
+        excluded.rollout_end_byte_offset
+    ),
     status = excluded.status,
     error_json = excluded.error_json,
     started_at = excluded.started_at,
     completed_at = excluded.completed_at,
     duration_ms = excluded.duration_ms
-WHERE thread_turns.rollout_end_ordinal IS NULL
-  AND thread_turns.status = 'inProgress'
+WHERE (
+    thread_turns.rollout_end_ordinal IS NULL
+    AND thread_turns.status = 'inProgress'
+)
+   OR (
+    thread_turns.status = 'interrupted'
+    AND excluded.status != 'inProgress'
+)
             "#,
         )
         .bind(thread_id)
@@ -355,76 +403,7 @@ WHERE thread_turns.rollout_end_ordinal IS NULL
 
         // Review turns can persist completed items before their turn lifecycle record. Fill the
         // summary IDs from those older item rows when the turn row finally arrives.
-        sqlx::query(
-            r#"
-UPDATE thread_turns
-SET
-    first_user_item_id = COALESCE(
-        first_user_item_id,
-        (
-            SELECT item_id
-            FROM thread_items
-            WHERE thread_id = ?
-              AND turn_id = ?
-              AND (
-                item_type = 'userMessage'
-                OR (item_type = '' AND json_extract(item_json, '$.type') = 'userMessage')
-              )
-            ORDER BY rollout_ordinal
-            LIMIT 1
-        )
-    ),
-    final_agent_item_id = COALESCE(
-        (
-            SELECT item_id
-            FROM thread_items
-            WHERE thread_id = ?
-              AND turn_id = ?
-              AND (
-                item_type = 'agentMessage'
-                OR (item_type = '' AND json_extract(item_json, '$.type') = 'agentMessage')
-              )
-              AND json_extract(item_json, '$.phase') = 'final_answer'
-            ORDER BY rollout_ordinal DESC
-            LIMIT 1
-        ),
-        CASE
-            WHEN status IN ('completed', 'interrupted', 'failed') THEN (
-                SELECT item_id
-                FROM thread_items
-                WHERE thread_id = ?
-                  AND turn_id = ?
-                  AND (
-                    item_type = 'agentMessage'
-                    OR (item_type = '' AND json_extract(item_json, '$.type') = 'agentMessage')
-                  )
-                  AND json_extract(item_json, '$.phase') IS NULL
-                ORDER BY rollout_ordinal DESC
-                LIMIT 1
-            )
-        END,
-        final_agent_item_id
-    )
-WHERE thread_id = ?
-  AND turn_id = ?
-  AND (
-    rollout_end_ordinal = ?
-    OR status = 'inProgress'
-  )
-            "#,
-        )
-        .bind(thread_id)
-        .bind(turn_id.as_str())
-        .bind(thread_id)
-        .bind(turn_id.as_str())
-        .bind(thread_id)
-        .bind(turn_id.as_str())
-        .bind(thread_id)
-        .bind(turn_id.as_str())
-        .bind(rollout_ordinal)
-        .execute(&mut **transaction)
-        .await
-        .map_err(thread_history_error)?;
+        fill_turn_summary_items(transaction, thread_id, turn_id.as_str(), rollout_ordinal).await?;
     }
 
     for item in changes.changed_items {
@@ -536,6 +515,89 @@ WHERE thread_id = ?
             | ThreadItem::ContextCompaction { .. } => {}
         }
     }
+    Ok(())
+}
+
+/// Fills a turn's summary item IDs from its stored items once the turn row exists.
+///
+/// Terminal summaries only refresh while the turn row still ends at `terminal_ordinal`, so later
+/// records cannot rewrite a turn that already ended.
+async fn fill_turn_summary_items(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    thread_id: &str,
+    turn_id: &str,
+    terminal_ordinal: i64,
+) -> ThreadStoreResult<()> {
+    sqlx::query(
+        r#"
+UPDATE thread_turns
+SET
+    first_user_item_id = COALESCE(
+        first_user_item_id,
+        (
+            SELECT item_id
+            FROM thread_items
+            WHERE thread_id = ?
+              AND turn_id = ?
+              AND (
+                item_type = 'userMessage'
+                OR (item_type = '' AND json_extract(item_json, '$.type') = 'userMessage')
+              )
+            ORDER BY rollout_ordinal
+            LIMIT 1
+        )
+    ),
+    final_agent_item_id = COALESCE(
+        (
+            SELECT item_id
+            FROM thread_items
+            WHERE thread_id = ?
+              AND turn_id = ?
+              AND (
+                item_type = 'agentMessage'
+                OR (item_type = '' AND json_extract(item_json, '$.type') = 'agentMessage')
+              )
+              AND json_extract(item_json, '$.phase') = 'final_answer'
+            ORDER BY rollout_ordinal DESC
+            LIMIT 1
+        ),
+        CASE
+            WHEN status IN ('completed', 'interrupted', 'failed') THEN (
+                SELECT item_id
+                FROM thread_items
+                WHERE thread_id = ?
+                  AND turn_id = ?
+                  AND (
+                    item_type = 'agentMessage'
+                    OR (item_type = '' AND json_extract(item_json, '$.type') = 'agentMessage')
+                  )
+                  AND json_extract(item_json, '$.phase') IS NULL
+                ORDER BY rollout_ordinal DESC
+                LIMIT 1
+            )
+        END,
+        final_agent_item_id
+    )
+WHERE thread_id = ?
+  AND turn_id = ?
+  AND (
+    rollout_end_ordinal = ?
+    OR status = 'inProgress'
+  )
+        "#,
+    )
+    .bind(thread_id)
+    .bind(turn_id)
+    .bind(thread_id)
+    .bind(turn_id)
+    .bind(thread_id)
+    .bind(turn_id)
+    .bind(thread_id)
+    .bind(turn_id)
+    .bind(terminal_ordinal)
+    .execute(&mut **transaction)
+    .await
+    .map_err(thread_history_error)?;
     Ok(())
 }
 

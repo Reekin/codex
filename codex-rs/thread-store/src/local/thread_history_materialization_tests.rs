@@ -813,9 +813,6 @@ async fn named_fork_boundaries_reject_invisible_and_noncanonical_turns() {
             items: vec![
                 user_message("after fork"),
                 turn_completed("inherited-turn"),
-                turn_started("stale-turn"),
-                turn_started("replacement-turn"),
-                turn_completed("replacement-turn"),
                 completed_item(
                     source_id,
                     "review-turn",
@@ -829,18 +826,13 @@ async fn named_fork_boundaries_reject_invisible_and_noncanonical_turns() {
             ],
         })
         .await
-        .expect("append invisible, stale, and terminal-only turns");
+        .expect("append invisible and terminal-only turns");
 
     for (thread_id, boundary, expected_error) in [
         (
             child_id,
             ForkBoundary::ThroughTurn("inherited-turn".to_string()),
             "fork boundary exceeds inherited source history",
-        ),
-        (
-            source_id,
-            ForkBoundary::ThroughTurn("stale-turn".to_string()),
-            "lastTurnId 'stale-turn' identifies an in-progress turn",
         ),
         (
             source_id,
@@ -933,6 +925,190 @@ async fn active_turn_stores_only_its_start_position() {
         .await
         .history_base,
         None
+    );
+}
+
+#[tokio::test]
+async fn superseded_turn_is_interrupted_before_next_turn_start() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("orphaned-turn"),
+                completed_item(
+                    thread_id,
+                    "orphaned-turn",
+                    TurnItem::UserMessage(UserMessageItem {
+                        id: "orphaned-user".to_string(),
+                        client_id: None,
+                        content: Vec::new(),
+                    }),
+                ),
+                user_message("last orphaned record"),
+                turn_started("next-turn"),
+                user_message("next turn work"),
+                turn_completed("next-turn"),
+                turn_started("active-turn"),
+                turn_started("active-turn"),
+            ],
+        })
+        .await
+        .expect("append orphaned, next, and repeated active turn starts");
+
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    let (next_turn_start_byte_offset, _) =
+        rollout_line_byte_offsets(rollout_path.as_path(), /*ordinal*/ 4);
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let turns = sqlx::query_as::<_, (String, String, Option<i64>, Option<i64>, Option<String>)>(
+        r#"
+SELECT turn_id, status, rollout_end_ordinal, rollout_end_byte_offset, first_user_item_id
+FROM thread_turns
+WHERE thread_id = ?
+ORDER BY rollout_ordinal
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read projected turns");
+    let (_, next_turn_end_byte_offset) =
+        rollout_line_byte_offsets(rollout_path.as_path(), /*ordinal*/ 6);
+    assert_eq!(
+        turns,
+        vec![
+            (
+                "orphaned-turn".to_string(),
+                "interrupted".to_string(),
+                Some(3),
+                Some(next_turn_start_byte_offset),
+                Some("orphaned-user".to_string()),
+            ),
+            (
+                "next-turn".to_string(),
+                "completed".to_string(),
+                Some(6),
+                Some(next_turn_end_byte_offset),
+                None,
+            ),
+            (
+                "active-turn".to_string(),
+                "inProgress".to_string(),
+                None,
+                None,
+                None,
+            ),
+        ]
+    );
+
+    let through_orphaned = prepare_paginated_fork(
+        &store,
+        thread_id,
+        ForkBoundary::ThroughTurn("orphaned-turn".to_string()),
+    )
+    .await;
+    assert_eq!(
+        through_orphaned.history_base,
+        Some(HistoryPosition {
+            thread_id,
+            end_ordinal_exclusive: 4,
+            end_byte_offset: u64::try_from(next_turn_start_byte_offset)
+                .expect("next turn start byte offset"),
+        })
+    );
+    assert_eq!(
+        through_orphaned.history_base,
+        prepare_paginated_fork(
+            &store,
+            thread_id,
+            ForkBoundary::BeforeTurn("next-turn".to_string()),
+        )
+        .await
+        .history_base
+    );
+    assert!(contains_user_message(
+        &through_orphaned.model_context,
+        "last orphaned record"
+    ));
+    assert!(!contains_user_message(
+        &through_orphaned.model_context,
+        "next turn work"
+    ));
+    let error = store
+        .prepare_fork(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::ThroughTurn("active-turn".to_string()),
+        })
+        .await
+        .expect_err("the latest open turn is not a fork anchor");
+    assert!(matches!(
+        error,
+        crate::ThreadStoreError::InvalidRequest { message }
+            if message == "lastTurnId 'active-turn' identifies an in-progress turn"
+    ));
+}
+
+#[tokio::test]
+async fn late_terminal_record_decides_superseded_turn_status() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("finishing-turn"),
+                user_message("finishing work"),
+                turn_started("next-turn"),
+                turn_completed("finishing-turn"),
+                turn_completed("next-turn"),
+            ],
+        })
+        .await
+        .expect("append a completion persisted after the next turn start");
+
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("rollout path");
+    let (next_turn_start_byte_offset, _) =
+        rollout_line_byte_offsets(rollout_path.as_path(), /*ordinal*/ 3);
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let turn = sqlx::query_as::<_, (String, Option<i64>, Option<i64>, Option<i64>)>(
+        r#"
+SELECT status, rollout_end_ordinal, rollout_end_byte_offset, completed_at
+FROM thread_turns
+WHERE thread_id = ? AND turn_id = ?
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .bind("finishing-turn")
+    .fetch_one(&pool)
+    .await
+    .expect("read finishing turn");
+    assert_eq!(
+        turn,
+        (
+            "completed".to_string(),
+            Some(2),
+            Some(next_turn_start_byte_offset),
+            Some(20),
+        )
     );
 }
 
