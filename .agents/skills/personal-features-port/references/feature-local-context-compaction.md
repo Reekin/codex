@@ -52,11 +52,11 @@ keep original local records queryable without a hosted notes service.
   ratio of the latest provider-reported context to its estimate (excluding earlier reasoning the
   model does not keep), bounded to 1x-2x so a missing or estimated report falls back to raw
   estimates. App-server cleanup status reports provider-scale tokens.
-- **REQ-4**: Before launching a batch, bound achievable savings by known pending savings, potentially
-  removable unmarked results, and remaining growth before the ordinary hard limit. If even that
-  optimistic bound is below the cleanup requirement, skip marking. Count currently protected output
-  that can become eligible later; exclude known keeps and mandatory call/reference content. Budget
-  or full-window changes require a fresh calculation.
+- **REQ-4**: Shorten and drop decisions hold for as long as their record is unchanged. A keep holds
+  only within the user turn it was judged in: once newer user input exists, the result counts as
+  unmarked again and joins the next batch under the normal volume threshold. Marking is never
+  skipped for lack of reachable savings, because full compaction applies every mark to the window
+  it keeps. Marking and summary requests are recorded in the rollout trace like ordinary inference.
 - **REQ-5**: Full compaction runs only through original automatic-compaction triggers (including
   existing configured limit/scope and model transitions) or an explicit manual request. It cancels
   marking for the old full window and ignores late results. Tool-only cleanup does not cancel a
@@ -124,8 +124,8 @@ keep original local records queryable without a hosted notes service.
    in-flight batch, and unchanged live dialogue (REQ-1,2,5).
 2. Accumulate validated savings: 50 to 30 must not rewrite; 70 to 40 may rewrite. Newer unmarked
    results and concurrent batch targets survive; originals remain queryable (REQ-2,3,7,8).
-3. Exercise feasible/impossible bounds, future eligibility of protected results, and a changed
-   hard limit. Capture absence of needless marking requests (REQ-4,9).
+3. Keep results, add user input, and verify they are classified again while shortened and dropped
+   results are not; without new user input no batch repeats them (REQ-4,9).
 4. Trigger the original hard limit and manual compaction. Verify cancellation of old marking,
    ignored late responses, the previous window and earlier summary folded into one bounded summary,
    the cleaned current window verbatim, valid pairs, and an oversized window summarized from its

@@ -217,14 +217,6 @@ fn cleanup_strips_images_and_summarizes_large_paired_calls() {
                 .is_some_and(|metadata| metadata.local_compaction.is_some())
         );
     }
-    // The optimistic bound counts the same image and call reductions.
-    let bound = StagedDecisions::default().optimistic_replacement(&source);
-    assert!(
-        matches!(&bound[3].item, ResponseItem::CustomToolCall { input, .. } if input.len() < 200)
-    );
-    assert!(
-        matches!(&bound[2].item, ResponseItem::FunctionCallOutput { output, .. } if output.content_items().is_none())
-    );
 }
 
 #[test]
@@ -289,21 +281,33 @@ fn decisions_survive_disjoint_cleanup_but_changed_sources_stay_unmarked() {
 }
 
 #[test]
-fn optimistic_bound_counts_protected_output_but_excludes_known_keeps_and_calls() {
+fn keeps_hold_within_their_user_turn_while_reductions_persist() {
     let source = history();
     let stage = StagedDecisions::parse_candidates(
         source.clone(),
-        &["result_0".to_string()],
-        &json!({"decisions":[{"id":"result_0","action":"keep"}]}).to_string(),
+        &["result_0".to_string(), "result_1".to_string()],
+        &json!({"decisions":[
+            {"id":"result_0","action":"keep"},{"id":"result_1","action":"drop"}
+        ]})
+        .to_string(),
     )
     .unwrap();
-    let optimistic = stage.optimistic_replacement(&source);
-    assert_eq!(&optimistic[..3], &source[..3]);
-    for index in [3, 5, 7, 9] {
-        assert_eq!(optimistic[index], source[index]);
-    }
-    assert_ne!(optimistic[8], source[8]);
-    assert!(!eligible_results(&source).contains(&"result_3".to_string()));
+    let turn = crate::user_turn(&source);
+    assert_eq!(turn.as_deref(), Some("user_1"));
+    assert!(stage.decided(&source[2], turn.as_deref()));
+    assert!(stage.decided(&source[4], turn.as_deref()));
+    let mut later = source.clone();
+    later.push(message("user_2", "user", "Move on to the next step."));
+    let turn = crate::user_turn(&later);
+    // A keep is reconsidered once the user writes again; a drop is not.
+    assert!(!stage.decided(&later[2], turn.as_deref()));
+    assert!(stage.decided(&later[4], turn.as_deref()));
+    // Durable keeps without a recorded turn are reconsidered too.
+    let restored = StagedDecisions::from_marks(vec![(
+        source[2].clone(),
+        serde_json::from_value(json!({"id":"result_0","action":"keep"})).unwrap(),
+    )]);
+    assert!(!restored.decided(&source[2], crate::user_turn(&source).as_deref()));
 }
 
 #[test]
@@ -332,7 +336,7 @@ fn completed_batch_merges_after_a_disjoint_cleanup_and_new_input() {
 }
 
 #[test]
-fn cleanup_uses_window_percentage_points_and_optimistic_headroom() {
+fn cleanup_uses_window_percentage_points() {
     let budget = Budget {
         window_tokens: 20_000,
         fixed_tokens: 4_000,
@@ -347,9 +351,6 @@ fn cleanup_uses_window_percentage_points_and_optimistic_headroom() {
     assert!(!budget.useful(6_000, 2_000));
     // Fixed4k + history10k=70%; total40% saves the required30 percentage points.
     assert!(budget.useful(10_000, 4_000));
-    assert!(budget.can_reach(2_000, 2_000, 14_000, 18_000));
-    assert!(!budget.can_reach(1_000, 2_000, 16_000, 18_000));
-    assert!(budget.can_reach(1_000, 2_000, 16_000, 20_000));
 }
 
 #[test]

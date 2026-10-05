@@ -402,12 +402,13 @@ def run(binary):
             rpc.close()
             rpc = None
             marks = root / "home" / "local_compaction" / f"{thread['id']}.jsonl"
-            persisted = sorted(
+            persisted = {
                 mark["decision"]["id"]
                 for line in marks.read_text(encoding="utf-8").splitlines()
                 for mark in json.loads(line)
-            )
-            assert persisted == sorted(d["id"] for d in model.decisions), persisted
+            }
+            # Kept results may be judged again after new user input.
+            assert persisted == {d["id"] for d in model.decisions}, persisted
             rollouts = list((root / "home" / "sessions").rglob("rollout-*.jsonl"))
             assert len(rollouts) == 1, rollouts
             records = [

@@ -10,6 +10,7 @@ pub use cleanup::StagedDecisions;
 pub use cleanup::dropped_reasoning;
 pub use cleanup::eligible_results;
 pub use cleanup::large_calls;
+pub use cleanup::user_turn;
 pub use groups::is_user_direction;
 pub use tiers::SourceRange;
 pub use tiers::WindowPlan;
@@ -68,21 +69,6 @@ impl Budget {
     pub fn useful(self, before_tokens: usize, after_tokens: usize) -> bool {
         let saved = before_tokens.saturating_sub(after_tokens);
         saved >= self.required_savings()
-    }
-
-    /// An optimistic bound: all remaining growth could be removable tool output.
-    /// Callers include protected-but-unmarked outputs that can become eligible later.
-    pub fn can_reach(
-        self,
-        pending_savings: usize,
-        unmarked_upper_bound: usize,
-        current_total: usize,
-        hard_limit: usize,
-    ) -> bool {
-        pending_savings
-            .saturating_add(unmarked_upper_bound)
-            .saturating_add(hard_limit.saturating_sub(current_total))
-            >= self.required_savings()
     }
 }
 
