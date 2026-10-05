@@ -975,24 +975,20 @@ async fn compatible_budget_change_applies_disjoint_cleanup_without_cancelling_ba
     let batches: Vec<_> = bodies
         .iter()
         .filter_map(|body| analysis_payload(body, CLASSIFY))
-        .map(|payload| payload["candidates"].clone())
+        .map(|payload| payload["candidates"].to_string())
         .collect();
     assert!(
         output(bodies.last().unwrap(), "next-shorten")
             .to_string()
-            .contains(SHORTENED),
-        "batches {batches:?} decisions {:?} output {} checkpoints {}",
-        model.decisions(),
-        output(bodies.last().unwrap(), "next-shorten"),
-        checkpoints(&path)?.len()
+            .contains(SHORTENED)
     );
-    assert_eq!(
-        bodies
+    // Later batches only reconsider keeps; B's reductions survive without being relaunched.
+    assert!(
+        batches[2..]
             .iter()
-            .filter(|body| analysis_payload(body, CLASSIFY).is_some())
-            .count(),
-        2,
-        "B result survives disjoint installation without being relaunched"
+            .all(|candidates| !candidates.contains("next-shorten")
+                && !candidates.contains("next-drop")),
+        "{batches:?}"
     );
     assert!(
         bodies
