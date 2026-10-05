@@ -67,7 +67,8 @@ async fn many_small_outputs_are_marked_in_one_batch() -> Result<()> {
         .filter_map(|body| analysis_payload(body, CLASSIFY))
         .map(|payload| payload["candidates"].as_array().unwrap().len())
         .collect::<Vec<_>>();
-    assert_eq!(batches, vec![80]);
+    // Later batches may reconsider kept results after new user input.
+    assert_eq!(batches[0], 80);
     Ok(())
 }
 

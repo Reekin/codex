@@ -34,6 +34,7 @@ use codex_context_compaction::WindowPlan;
 use codex_context_compaction::dropped_reasoning;
 use codex_context_compaction::eligible_results;
 use codex_context_compaction::large_calls;
+use codex_context_compaction::user_turn;
 use codex_history::LocalCompactionKind;
 use codex_history::LocalCompactionSource;
 use codex_history::ResponseItemEnvelope;
@@ -146,7 +147,7 @@ async fn clean_and_launch(
     context: LocalCompactionContext,
     state: &mut LocalCompactionState,
 ) -> CodexResult<()> {
-    let (budget, scale) = budget(sess, &context).await;
+    let (budget, _) = budget(sess, &context).await;
     install_marks(sess, &context, state, CleanupTrigger::Savings).await?;
     let history = sess.clone_history().await;
     let source = history.annotated_items();
@@ -156,9 +157,8 @@ async fn clean_and_launch(
             .retry_after
             .is_none_or(|retry| Instant::now() >= retry)
     {
-        // A tool cleanup can reset body-after-prefix accounting; use the post-cleanup limit.
-        let hard_limit = to_estimate(sess.local_compaction_hard_limit(&context).await, scale);
         let eligible = eligible_results(source);
+        let turn = user_turn(source);
         // A result's weight includes the large call it is shortened together with.
         let calls = large_calls(source);
         let weight = |item: &ResponseItemEnvelope| {
@@ -172,7 +172,7 @@ async fn clean_and_launch(
         let unmarked: Vec<_> = source
             .iter()
             .filter(|item| {
-                !state.staged.contains(item)
+                !state.staged.decided(item, turn.as_deref())
                     && item
                         .item
                         .id()
@@ -193,24 +193,8 @@ async fn clean_and_launch(
                 ))
                 .div_ceil(100)
                 .max(1);
-        let reasoning = reasoning_budget(&context, budget);
-        let model = &context.settings.model_info;
-        let total = visible_tokens(source, model);
-        let pending =
-            total.saturating_sub(history_tokens(&cleaned(&state.staged, source, reasoning)?));
-        let upper = total.saturating_sub(history_tokens(&trim_reasoning(
-            state.staged.optimistic_replacement(source),
-            reasoning,
-        )));
-        if !unmarked.is_empty()
-            && accumulated
-            && budget.can_reach(
-                pending,
-                upper,
-                total.saturating_add(budget.fixed_tokens),
-                hard_limit,
-            )
-        {
+        // Marks are always useful: full compaction applies them to the window it keeps.
+        if !unmarked.is_empty() && accumulated {
             // Each batch costs one full-context request; spend it on the largest outputs.
             // A replacement is never larger than its original, so small outputs cost little
             // response space and many fit in one batch; the request cap trims the rest.
@@ -280,13 +264,15 @@ async fn clean_and_launch(
             {
                 return Ok(());
             }
+            let trace = inference_trace(sess, &context);
             let weak = Arc::downgrade(sess);
             let completed = Arc::new(Mutex::new(MarkingResult::default()));
             let result_slot = Arc::clone(&completed);
             let task = tokio::spawn(async move {
                 let result = async {
                     let response =
-                        request::infer_json(&prompt, &context, &mut client, &metadata).await?;
+                        request::infer_json(&prompt, &context, &mut client, &metadata, &trace)
+                            .await?;
                     if let Some(sess) = weak.upgrade() {
                         if let Some(rate_limits) = response.rate_limits {
                             sess.record_rate_limits_info(rate_limits).await;
@@ -489,7 +475,9 @@ pub(crate) async fn run_pipeline(
             &context.settings.model_info,
             request,
         );
-        let mut response = request::infer_json(&prompt, context, &mut client, &metadata).await?;
+        let trace = inference_trace(sess, context);
+        let mut response =
+            request::infer_json(&prompt, context, &mut client, &metadata, &trace).await?;
         if let Some(rate_limits) = response.rate_limits.take() {
             sess.record_rate_limits_info(rate_limits).await;
         }
@@ -652,18 +640,16 @@ fn reasoning_budget(context: &LocalCompactionContext, budget: Budget) -> usize {
     }
 }
 
-/// Removes trimmed reasoning from a view that keeps every other record in place.
-fn trim_reasoning(
-    items: Vec<ResponseItemEnvelope>,
-    keep_tokens: usize,
-) -> Vec<ResponseItemEnvelope> {
-    let costs: Vec<_> = items.iter().map(|item| item_tokens(&item.item)).collect();
-    let dropped = dropped_reasoning(&items, keep_tokens, &costs);
-    items
-        .into_iter()
-        .zip(dropped)
-        .filter_map(|(item, dropped)| (!dropped).then_some(item))
-        .collect()
+/// Private requests are traced like ordinary inference so their answers can be inspected.
+fn inference_trace(
+    sess: &Session,
+    context: &LocalCompactionContext,
+) -> codex_rollout_trace::InferenceTraceContext {
+    sess.services.rollout_thread_trace.inference_trace_context(
+        context.turn.sub_id.as_str(),
+        context.settings.model_info.slug.as_str(),
+        context.turn.provider.info().name.as_str(),
+    )
 }
 
 /// The history after applying validated marks and trimming earlier reasoning.
@@ -672,10 +658,14 @@ fn cleaned(
     items: &[ResponseItemEnvelope],
     reasoning_tokens: usize,
 ) -> CodexResult<Vec<ResponseItemEnvelope>> {
-    Ok(trim_reasoning(
-        staged.apply(items).map_err(invalid)?,
-        reasoning_tokens,
-    ))
+    let items = staged.apply(items).map_err(invalid)?;
+    let costs: Vec<_> = items.iter().map(|item| item_tokens(&item.item)).collect();
+    let dropped = dropped_reasoning(&items, reasoning_tokens, &costs);
+    Ok(items
+        .into_iter()
+        .zip(dropped)
+        .filter_map(|(item, dropped)| (!dropped).then_some(item))
+        .collect())
 }
 
 /// Estimated tokens the model is sent; earlier turns' reasoning does not count for models

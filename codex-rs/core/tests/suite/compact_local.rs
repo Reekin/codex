@@ -764,7 +764,7 @@ async fn short_history_manual_cleanup_completes_without_analysis_or_checkpoint()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn keep_marks_survive_new_user_input_and_only_new_ids_are_classified() -> Result<()> {
+async fn keeps_are_reconsidered_after_new_user_input() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let model = LocalModel::mount(&server).await;
@@ -775,42 +775,31 @@ async fn keep_marks_survive_new_user_input_and_only_new_ids_are_classified() -> 
         .await?;
     seed_tools(&test, &model).await?;
     finish_marking(&test, &model, /*expected_batches*/ 1).await?;
-    let first_ids = model
+    let kept = model
         .decisions()
         .iter()
         .map(|decision| decision["id"].clone())
         .collect::<Vec<_>>();
-    assert_eq!(first_ids.len(), 4);
+    assert_eq!(kept.len(), 4);
+    // Without new user input the keeps hold and nothing is classified again.
+    test.codex.flush_rollout().await?;
+    assert_eq!(model.decisions().len(), kept.len());
     model.text("New direction acknowledged.");
-    test.submit_text_turn("Preserve the completed assessment across new user input.")
-        .await?;
-    assert_eq!(model.decisions().len(), first_ids.len());
-    model.reply(sse(vec![
-        ev_function_call(
-            "new-evidence",
-            &format!("new_{}", "evidence_".repeat(1000)),
-            "{}",
-        ),
-        ev_completed("new-tools"),
-    ]));
-    model.text("New tools completed.");
-    test.submit_text_turn("Collect new evidence.").await?;
+    test.submit_text_turn("The task has moved on.").await?;
     finish_marking(&test, &model, /*expected_batches*/ 2).await?;
-    let bodies = model.bodies();
-    let batches = bodies
+    let batches = model
+        .bodies()
         .iter()
         .filter_map(|body| analysis_payload(body, CLASSIFY))
         .collect::<Vec<_>>();
-    assert_eq!(batches.len(), 2);
-    assert!(
-        batches[1]["candidates"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|candidate| !first_ids.contains(&candidate["id"]))
-    );
-    test.codex.flush_rollout().await?;
-    assert!(checkpoints(&test.codex.rollout_path().unwrap())?.is_empty());
+    assert!(batches.len() >= 2);
+    let second: Vec<_> = batches[1]["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|candidate| candidate["id"].clone())
+        .collect();
+    assert!(kept.iter().all(|id| second.contains(id)), "{second:?}");
     Ok(())
 }
 
@@ -866,79 +855,6 @@ async fn network_failure_is_nonfatal_and_does_not_retry_unchanged_batch() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn impossible_tool_forecast_skips_marking_until_original_hard_trigger() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-    let server = start_mock_server().await;
-    let model = LocalModel::mount(&server).await;
-    let test = test_codex()
-        .with_config(|config| {
-            configure_marking(config);
-            config.local_compaction.reclaim_percent = 30;
-            config.model_auto_compact_token_limit = Some(90_000);
-        })
-        .build_with_auto_env(&server)
-        .await?;
-    // 300,000 model-visible ASCII bytes occupy about 75k tokens. The remaining hard
-    // headroom plus a tiny tool output cannot release 30% of this 100k window.
-    model.reply(sse(vec![
-        ev_assistant_message("dense-dialogue", &"dense ".repeat(50_000)),
-        ev_completed_with_tokens("dense-dialogue", /*total_tokens*/ 75_000),
-    ]));
-    test.submit_text_turn("Keep this dialogue until an ordinary hard trigger.")
-        .await?;
-    model.reply(sse(vec![
-        ev_function_call("tiny-result", "unavailable", "{}"),
-        ev_completed_with_tokens("tiny-call", /*total_tokens*/ 75_020),
-    ]));
-    model.reply(sse(vec![
-        ev_assistant_message("tiny-answer", "Tiny result received."),
-        ev_completed_with_tokens("tiny-answer", /*total_tokens*/ 75_050),
-    ]));
-    test.submit_text_turn("Collect a tiny result.").await?;
-    for index in 0..2 {
-        let response_id = format!("below-hard-{index}");
-        model.reply(sse(vec![
-            ev_assistant_message(&response_id, "Continue normally."),
-            ev_completed_with_tokens(&response_id, /*total_tokens*/ 75_100),
-        ]));
-        test.submit_text_turn("Allow completed output to become eligible.")
-            .await?;
-    }
-    assert!(
-        model
-            .bodies()
-            .iter()
-            .all(|body| analysis_payload(body, CLASSIFY).is_none()
-                && analysis_payload(body, SUMMARIZE).is_none())
-    );
-    model.reply(sse(vec![
-        ev_assistant_message("reached-hard", "The configured hard limit is now reached."),
-        ev_completed_with_tokens("reached-hard", /*total_tokens*/ 90_001),
-    ]));
-    test.submit_text_turn("Continue the dense work.").await?;
-    model.text("Work continues after full compaction.");
-    test.submit_text_turn("Continue past the configured hard boundary.")
-        .await?;
-    let bodies = model.bodies();
-    assert_eq!(
-        bodies
-            .iter()
-            .filter(|body| analysis_payload(body, SUMMARIZE).is_some())
-            .count(),
-        1
-    );
-    assert!(
-        bodies
-            .iter()
-            .all(|body| analysis_payload(body, CLASSIFY).is_none())
-    );
-    assert!(bodies.last().unwrap().to_string().contains(LEDGER));
-    test.codex.flush_rollout().await?;
-    assert_eq!(checkpoints(&test.codex.rollout_path().unwrap())?.len(), 1);
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compatible_budget_change_applies_disjoint_cleanup_without_cancelling_batch() -> Result<()>
 {
     use codex_protocol::openai_models::ModelsResponse;
@@ -953,7 +869,8 @@ async fn compatible_budget_change_applies_disjoint_cleanup_without_cancelling_ba
         .with_model("wide-window")
         .with_config(move |config| {
             configure_marking(config);
-            config.local_compaction.reclaim_percent = 5;
+            // A's reductions (about 5k) fall short of 6k at 100k but reach 4.2k at 70k.
+            config.local_compaction.reclaim_percent = 6;
             config.model_context_window = None;
             let mut wide = codex_models_manager::bundled_models_response()
                 .unwrap()
@@ -984,7 +901,7 @@ async fn compatible_budget_change_applies_disjoint_cleanup_without_cancelling_ba
     let path = test.codex.rollout_path().unwrap();
     assert!(
         checkpoints(&path)?.is_empty(),
-        "about 4k savings is below 5k required savings"
+        "about 5k savings is below 6k required savings"
     );
 
     gate.hold();
@@ -1055,18 +972,23 @@ async fn compatible_budget_change_applies_disjoint_cleanup_without_cancelling_ba
     marking_ready(&test.codex).await;
     finish_marking(&test, &model, /*expected_batches*/ 2).await?;
     let bodies = model.bodies();
+    let batches: Vec<_> = bodies
+        .iter()
+        .filter_map(|body| analysis_payload(body, CLASSIFY))
+        .map(|payload| payload["candidates"].to_string())
+        .collect();
     assert!(
         output(bodies.last().unwrap(), "next-shorten")
             .to_string()
             .contains(SHORTENED)
     );
-    assert_eq!(
-        bodies
+    // Later batches only reconsider keeps; B's reductions survive without being relaunched.
+    assert!(
+        batches[2..]
             .iter()
-            .filter(|body| analysis_payload(body, CLASSIFY).is_some())
-            .count(),
-        2,
-        "B result survives disjoint installation without being relaunched"
+            .all(|candidates| !candidates.contains("next-shorten")
+                && !candidates.contains("next-drop")),
+        "{batches:?}"
     );
     assert!(
         bodies

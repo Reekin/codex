@@ -33,6 +33,10 @@ pub enum Decision {
         /// Accepted and ignored: a kept result leaves its call unchanged.
         #[serde(default, skip_serializing)]
         call_text: Option<String>,
+        /// Latest user input when the result was judged. Relevance changes as the task moves
+        /// on, so the keep holds only until the user writes again; set by validation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_turn: Option<String>,
     },
     Shorten {
         id: String,
@@ -93,6 +97,16 @@ pub struct StagedDecisions {
 pub fn eligible_results(items: &[ResponseItemEnvelope]) -> Vec<String> {
     let protected = protected_start(items);
     completed_results(&items[..protected])
+}
+
+/// ID of the latest user input, which scopes keep decisions.
+pub fn user_turn(items: &[ResponseItemEnvelope]) -> Option<String> {
+    items
+        .iter()
+        .rev()
+        .find(|item| is_user_direction(&item.item))
+        .and_then(|item| item.item.id())
+        .map(ToString::to_string)
 }
 
 /// Marks reasoning records to remove: earlier turns' reasoning beyond the newest `keep_tokens`.
@@ -214,6 +228,23 @@ impl StagedDecisions {
         self.source.iter().any(|source| source.item == item.item)
     }
 
+    /// Whether the result still has a valid decision: a shorten or drop, or a keep made within
+    /// the current user turn.
+    pub fn decided(&self, item: &ResponseItemEnvelope, current_turn: Option<&str>) -> bool {
+        self.contains(item)
+            && self.decisions.iter().any(|decision| {
+                item.item
+                    .id()
+                    .is_some_and(|id| id.as_str() == decision.id())
+                    && match decision {
+                        Decision::Keep { user_turn, .. } => {
+                            user_turn.is_some() && user_turn.as_deref() == current_turn
+                        }
+                        Decision::Shorten { .. } | Decision::Drop { .. } => true,
+                    }
+            })
+    }
+
     /// Validated decisions paired with the exact records they were made for.
     pub fn marks(&self) -> impl Iterator<Item = (&ResponseItemEnvelope, &Decision)> {
         self.decisions.iter().filter_map(|decision| {
@@ -232,46 +263,6 @@ impl StagedDecisions {
     pub fn from_marks(marks: Vec<(ResponseItemEnvelope, Decision)>) -> Self {
         let (source, decisions) = marks.into_iter().unzip();
         Self { source, decisions }
-    }
-
-    /// Optimistic removable view includes completed results that can age out of protection.
-    /// Small calls, archive references, known keeps and installed reductions remain intact.
-    pub fn optimistic_replacement(
-        &self,
-        current: &[ResponseItemEnvelope],
-    ) -> Vec<ResponseItemEnvelope> {
-        let candidates: HashSet<_> = completed_results(current).into_iter().collect();
-        let calls = large_calls(current);
-        let mut result = current.to_vec();
-        for index in 0..result.len() {
-            if self.contains(&result[index])
-                || !result[index]
-                    .item
-                    .id()
-                    .is_some_and(|id| candidates.contains(id.as_str()))
-            {
-                continue;
-            }
-            let id = result[index]
-                .item
-                .id()
-                .expect("candidate has ID")
-                .to_string();
-            if let ResponseItem::FunctionCallOutput { output, .. }
-            | ResponseItem::CustomToolCallOutput { output, .. } = &mut result[index].item
-            {
-                // The original-ID reference is mandatory; a future concise replacement
-                // can be smaller than the drop notice. Omit optional prose for this bound.
-                let reference = format!("[Original item: {id}; use recall_read_item.]");
-                if reference.len() < output.to_string().len() {
-                    output.body = FunctionCallOutputBody::Text(reference);
-                }
-            }
-            if let Some(&call) = calls.get(&id) {
-                shorten_call(&mut result[call].item, /*summary*/ None);
-            }
-        }
-        result
     }
 
     pub fn retain_current(&mut self, current: &[ResponseItemEnvelope]) {
@@ -307,6 +298,7 @@ impl StagedDecisions {
             return Err(CompactionError::Invalid("candidate is not eligible"));
         }
         let mut decisions: Vec<Decision> = Vec::new();
+        let turn = user_turn(&source);
         for entry in analysis.decisions {
             let Ok(decision) = serde_json::from_value::<Decision>(entry) else {
                 continue;
@@ -334,7 +326,12 @@ impl StagedDecisions {
                         call_text,
                     }
                 }
-                other => other,
+                Decision::Keep { id, call_text, .. } => Decision::Keep {
+                    id,
+                    call_text,
+                    user_turn: turn.clone(),
+                },
+                drop @ Decision::Drop { .. } => drop,
             };
             if let Decision::Shorten { call_text, .. } | Decision::Drop { call_text, .. } =
                 &mut decision

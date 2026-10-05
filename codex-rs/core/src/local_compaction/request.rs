@@ -136,6 +136,7 @@ pub(super) async fn infer_json(
     context: &LocalCompactionContext,
     client: &mut ModelClientSession,
     metadata: &CodexResponsesMetadata,
+    trace: &InferenceTraceContext,
 ) -> CodexResult<AnalysisResponse> {
     let mut stream = client
         .stream(
@@ -146,7 +147,7 @@ pub(super) async fn infer_json(
             context.settings.reasoning_summary,
             context.settings.service_tier.clone(),
             metadata,
-            &InferenceTraceContext::disabled(),
+            trace,
         )
         .await?;
     let mut output = String::new();

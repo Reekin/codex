@@ -52,6 +52,7 @@ class Model(http.server.ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
         self.requests = []
         self.decisions = []
+        self.actions = {}
         self.phase = "tools"
         self.recall_id = None
         self.errors = []
@@ -79,8 +80,11 @@ class Model(http.server.ThreadingHTTPServer):
                 "classifier must not rewrite the shared prefix"
             )
             decisions = []
-            for index, candidate in enumerate(candidates):
-                action = ["keep", "shorten", "drop"][index % 3]
+            for candidate in candidates:
+                # Kept results are judged again after new user input; answer them the same way.
+                action = self.actions.setdefault(
+                    candidate["id"], ["keep", "shorten", "drop"][len(self.actions) % 3]
+                )
                 decision = {"id": candidate["id"], "action": action}
                 if action == "shorten":
                     decision["text"] = (
@@ -402,12 +406,13 @@ def run(binary):
             rpc.close()
             rpc = None
             marks = root / "home" / "local_compaction" / f"{thread['id']}.jsonl"
-            persisted = sorted(
+            persisted = {
                 mark["decision"]["id"]
                 for line in marks.read_text(encoding="utf-8").splitlines()
                 for mark in json.loads(line)
-            )
-            assert persisted == sorted(d["id"] for d in model.decisions), persisted
+            }
+            # Kept results may be judged again after new user input.
+            assert persisted == {d["id"] for d in model.decisions}, persisted
             rollouts = list((root / "home" / "sessions").rglob("rollout-*.jsonl"))
             assert len(rollouts) == 1, rollouts
             records = [
