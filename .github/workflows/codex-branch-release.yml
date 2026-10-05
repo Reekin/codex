@@ -144,18 +144,33 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          version="${GITHUB_REF_NAME#integration-}"
           short_sha="${GITHUB_SHA::12}"
-          release_tag="codex-${short_sha}"
+          # GitHub lists releases by tag date, then by tag name. An annotated tag dated now, named
+          # with the publish time, keeps the list in publish order.
+          published="$(date -u +%Y%m%dT%H%M%SZ)"
+          release_tag="codex-${version}-${published}-${short_sha}"
+          # The integration acceptance tag on this commit, pushed together with it, names the build.
+          revision="$(git ls-remote --tags "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" \
+            "refs/tags/personal/integration/${version}*" \
+            | awk -v sha="$GITHUB_SHA" '$1 == sha { sub(/^refs\/tags\/personal\/integration\//, "", $2); sub(/\^\{\}$/, "", $2); print $2 }' \
+            | sort -V | tail -n 1)"
+          title="Codex ${revision:-$version} (${short_sha})"
           notes_path="${RUNNER_TEMP}/codex-release-notes.md"
 
           (cd dist && sha256sum -- * > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
 
-          cat > "$notes_path" <<'EOF'
-          Automated dev build of branch `${{ github.ref_name }}`.
-
-          - Commit: `${{ github.sha }}`
-          - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          {
+            echo "Automated dev build of branch \`${GITHUB_REF_NAME}\`."
+            echo
+            if [[ -n "$revision" ]]; then
+              echo "- Integration revision: \`personal/integration/${revision}\`"
+            fi
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > "$notes_path"
+          cat >> "$notes_path" <<'EOF'
 
           Packages:
 
@@ -167,17 +182,13 @@ jobs:
           The macOS binaries are ad-hoc signed and not notarized. Archives fetched with `gh release download` or `curl` run as is. After a browser download, run `xattr -dr com.apple.quarantine <extracted-dir>` once before the first launch.
           EOF
 
-          if gh release view "$release_tag" >/dev/null 2>&1; then
-            gh release edit "$release_tag" \
-              --title "Codex ${short_sha}" \
-              --notes-file "$notes_path" \
-              --latest
-          else
-            gh release create "$release_tag" \
-              --target "$GITHUB_SHA" \
-              --title "Codex ${short_sha}" \
-              --notes-file "$notes_path" \
-              --latest
-          fi
-
-          gh release upload "$release_tag" dist/* --clobber
+          tag_object="$(gh api "repos/${GH_REPO}/git/tags" \
+            -f tag="$release_tag" -f message="$title" -f object="$GITHUB_SHA" -f type=commit \
+            --jq .sha)"
+          gh api "repos/${GH_REPO}/git/refs" -f ref="refs/tags/${release_tag}" -f sha="$tag_object" >/dev/null
+          gh release create "$release_tag" \
+            --verify-tag \
+            --title "$title" \
+            --notes-file "$notes_path" \
+            --latest \
+            dist/*

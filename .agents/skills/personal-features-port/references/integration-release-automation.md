@@ -39,6 +39,10 @@ Before push, verify:
 
 ## Push Scope
 
+Push the integration acceptance tag in the same push as the integration commit it names; the
+branch release reads it to title the build with its revision, so a tag pushed later leaves the
+release titled with the bare version.
+
 After push:
 
 - If the task only asks to push or trigger the remote build, confirm the expected workflow started
