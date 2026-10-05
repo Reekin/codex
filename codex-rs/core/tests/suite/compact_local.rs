@@ -869,8 +869,8 @@ async fn compatible_budget_change_applies_disjoint_cleanup_without_cancelling_ba
         .with_model("wide-window")
         .with_config(move |config| {
             configure_marking(config);
-            // Three reductions (about 7k) fall short of 9k at 100k but reach 6.3k at 70k.
-            config.local_compaction.reclaim_percent = 9;
+            // A's reductions (about 5k) fall short of 6k at 100k but reach 4.2k at 70k.
+            config.local_compaction.reclaim_percent = 6;
             config.model_context_window = None;
             let mut wide = codex_models_manager::bundled_models_response()
                 .unwrap()
@@ -901,7 +901,7 @@ async fn compatible_budget_change_applies_disjoint_cleanup_without_cancelling_ba
     let path = test.codex.rollout_path().unwrap();
     assert!(
         checkpoints(&path)?.is_empty(),
-        "about 7k savings is below 9k required savings"
+        "about 5k savings is below 6k required savings"
     );
 
     gate.hold();

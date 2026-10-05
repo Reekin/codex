@@ -359,9 +359,13 @@ pub(crate) fn tool_turn() -> String {
     let mut events = ["keep", "shorten", "drop", "protected"]
         .into_iter()
         .map(|label| {
-            // A kept result is reconsidered after new user input; keeping it small stops it
-            // from starting a batch on its own.
-            let repeat = if label == "keep" { 100 } else { 1000 };
+            // Kept results are reconsidered after new user input; small kept and unlabeled
+            // results cannot start a batch on their own, and savings come from the reductions.
+            let repeat = if matches!(label, "keep" | "protected") {
+                100
+            } else {
+                1000
+            };
             ev_function_call(
                 &format!("original-{label}"),
                 &format!("{label}_{}", "evidence_".repeat(repeat)),
