@@ -52,6 +52,7 @@ class Model(http.server.ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), Handler)
         self.requests = []
         self.decisions = []
+        self.actions = {}
         self.phase = "tools"
         self.recall_id = None
         self.errors = []
@@ -79,8 +80,11 @@ class Model(http.server.ThreadingHTTPServer):
                 "classifier must not rewrite the shared prefix"
             )
             decisions = []
-            for index, candidate in enumerate(candidates):
-                action = ["keep", "shorten", "drop"][index % 3]
+            for candidate in candidates:
+                # Kept results are judged again after new user input; answer them the same way.
+                action = self.actions.setdefault(
+                    candidate["id"], ["keep", "shorten", "drop"][len(self.actions) % 3]
+                )
                 decision = {"id": candidate["id"], "action": action}
                 if action == "shorten":
                     decision["text"] = (

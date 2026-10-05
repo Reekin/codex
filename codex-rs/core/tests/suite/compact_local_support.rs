@@ -176,14 +176,15 @@ impl LocalModel {
                     let candidates = payload["candidates"].as_array().expect("candidates");
                     assert!(!candidates.is_empty(), "classifier needs eligible tool results");
                     let ids = candidates.iter().map(|candidate| candidate["id"].clone()).collect::<Vec<_>>();
-                    // Fixture calls name their intended action; others rotate by position.
+                    // Fixture calls name their intended action; others alternate between the
+                    // reductions, so only labeled results are kept and reconsidered later.
                     let mut decisions = candidates.iter().enumerate().map(|(index, candidate)| {
                         let id = &candidate["id"];
                         let call_id = candidate["call_id"].as_str().unwrap_or_default();
                         let slot = ["keep", "shorten", "drop"]
                             .iter()
                             .position(|action| call_id.contains(action))
-                            .unwrap_or(index % 3);
+                            .unwrap_or(1 + index % 2);
                         let mut decision = match (&state.analysis, slot) {
                             (Analysis::Keep, _) | (_, 0) => json!({"id":id,"action":"keep"}),
                             (_, 1) => json!({"id":id,"action":"shorten","text":SHORTENED}),

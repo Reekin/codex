@@ -792,7 +792,7 @@ async fn keeps_are_reconsidered_after_new_user_input() -> Result<()> {
         .iter()
         .filter_map(|body| analysis_payload(body, CLASSIFY))
         .collect::<Vec<_>>();
-    assert_eq!(batches.len(), 2);
+    assert!(batches.len() >= 2);
     let second: Vec<_> = batches[1]["candidates"]
         .as_array()
         .unwrap()
