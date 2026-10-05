@@ -972,10 +972,19 @@ async fn compatible_budget_change_applies_disjoint_cleanup_without_cancelling_ba
     marking_ready(&test.codex).await;
     finish_marking(&test, &model, /*expected_batches*/ 2).await?;
     let bodies = model.bodies();
+    let batches: Vec<_> = bodies
+        .iter()
+        .filter_map(|body| analysis_payload(body, CLASSIFY))
+        .map(|payload| payload["candidates"].clone())
+        .collect();
     assert!(
         output(bodies.last().unwrap(), "next-shorten")
             .to_string()
-            .contains(SHORTENED)
+            .contains(SHORTENED),
+        "batches {batches:?} decisions {:?} output {} checkpoints {}",
+        model.decisions(),
+        output(bodies.last().unwrap(), "next-shorten"),
+        checkpoints(&path)?.len()
     );
     assert_eq!(
         bodies
