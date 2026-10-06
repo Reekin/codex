@@ -13,13 +13,12 @@ use codex_protocol::auth::AuthMode;
 use codex_protocol::openai_models::ModelInfo;
 
 pub(super) fn uses_local_compaction(config: &Config, model_info: &ModelInfo) -> bool {
-    config.local_compaction.force_local
-        || crate::compaction_policy::remote_compaction_support(
-            create_model_provider(config.model_provider.clone(), /*auth_manager*/ None)
-                .capabilities()
-                .remote_compaction,
-            model_info,
-        ) == RemoteCompactionSupport::Unsupported
+    crate::compaction_policy::remote_compaction_support(
+        create_model_provider(config.model_provider.clone(), /*auth_manager*/ None)
+            .capabilities()
+            .remote_compaction,
+        model_info,
+    ) == RemoteCompactionSupport::Unsupported
 }
 
 fn experimental_context_is_eligible(auth_mode: AuthMode, plan_type: Option<PlanType>) -> bool {

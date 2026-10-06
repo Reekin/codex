@@ -424,14 +424,9 @@ pub(crate) async fn run_turn(
 
             // All prior tool results and newly accepted user direction are recorded before
             // staging or installing a local view for the next normal model request.
-            if crate::local_compaction::uses_local_route(
-                &turn_context,
-                &step_context.settings.model_info,
-            ) {
-                crate::local_compaction::maybe_clean_history(&sess, &step_context)
-                    .or_cancel(&cancellation_token)
-                    .await??;
-            }
+            crate::local_compaction::maybe_clean_history(&sess, &step_context)
+                .or_cancel(&cancellation_token)
+                .await??;
             // Cleanup installed here or by an out-of-turn request is announced before sampling.
             if run_pending_session_start_hooks(&sess, &turn_context).await {
                 return Err(CodexErr::TurnAborted);
@@ -1321,14 +1316,10 @@ async fn run_auto_compact(
         return Ok(());
     }
 
-    let support = if local_route {
-        RemoteCompactionSupport::Unsupported
-    } else {
-        crate::compaction_policy::remote_compaction_support(
-            turn_context.provider.capabilities().remote_compaction,
-            step_context.settings.model_info.as_ref(),
-        )
-    };
+    let support = crate::compaction_policy::remote_compaction_support(
+        turn_context.provider.capabilities().remote_compaction,
+        step_context.settings.model_info.as_ref(),
+    );
     match support {
         RemoteCompactionSupport::V2
             if turn_context

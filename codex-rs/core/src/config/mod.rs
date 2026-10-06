@@ -3709,11 +3709,7 @@ impl Config {
         let code_mode = resolve_code_mode_config(&cfg);
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
         cfg.local_compaction.validate()?;
-        let token_budget = if cfg.local_compaction.force_local {
-            None
-        } else {
-            resolve_token_budget_config(&cfg, &features)?
-        };
+        let token_budget = resolve_token_budget_config(&cfg, &features)?;
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
         let sleep_tool_mode = cfg

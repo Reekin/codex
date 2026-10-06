@@ -35,14 +35,10 @@ impl SessionTask for CompactTask {
     ) -> SessionTaskResult {
         let _profile_guard = ctx.turn_timing_state.begin_compaction();
         session.cancel_local_compaction().await;
-        let support = if ctx.config.local_compaction.force_local {
-            RemoteCompactionSupport::Unsupported
-        } else {
-            crate::compaction_policy::remote_compaction_support(
-                ctx.provider.capabilities().remote_compaction,
-                ctx.model_info(),
-            )
-        };
+        let support = crate::compaction_policy::remote_compaction_support(
+            ctx.provider.capabilities().remote_compaction,
+            ctx.model_info(),
+        );
         if support != RemoteCompactionSupport::Unsupported
             && ctx.config.features.enabled(Feature::TokenBudget)
         {

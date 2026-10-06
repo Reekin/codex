@@ -2712,7 +2712,6 @@ async fn deferred_executor_noop_cleanup_preserves_then_updates_environment_once(
                     .is_ok()
             );
             config.model_provider.name = "OpenAI (test)".to_string();
-            config.local_compaction.force_local = true;
             config.model_context_window = Some(100_000);
             config.model_auto_compact_token_limit = Some(90);
         });

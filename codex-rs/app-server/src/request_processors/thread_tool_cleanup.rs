@@ -53,7 +53,6 @@ impl ThreadRequestProcessor {
 
 fn status_payload(status: ToolCleanupStatus) -> ThreadToolCleanupStatus {
     ThreadToolCleanupStatus {
-        enabled: status.enabled,
         marking: status.marking,
         pending_savings_tokens: tokens(status.pending_savings_tokens),
         required_savings_tokens: tokens(status.required_savings_tokens),

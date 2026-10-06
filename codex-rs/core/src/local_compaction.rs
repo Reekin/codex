@@ -119,13 +119,13 @@ enum CleanupTrigger {
     Manual,
 }
 
-/// Whether tool marking and full compaction use the local pipeline for this model.
+/// Whether full compaction uses the local pipeline: the provider or the model lacks native
+/// compaction. Tool cleanup runs on every route.
 pub(crate) fn uses_local_route(turn: &TurnContext, model_info: &ModelInfo) -> bool {
-    turn.config.local_compaction.force_local
-        || crate::compaction_policy::remote_compaction_support(
-            turn.provider.capabilities().remote_compaction,
-            model_info,
-        ) == RemoteCompactionSupport::Unsupported
+    crate::compaction_policy::remote_compaction_support(
+        turn.provider.capabilities().remote_compaction,
+        model_info,
+    ) == RemoteCompactionSupport::Unsupported
 }
 
 pub(crate) async fn maybe_clean_history(
@@ -524,16 +524,17 @@ pub(crate) async fn run_pipeline(
             replacement.push(item);
         }
     }
-    if history_tokens(&replacement) > hard_history {
-        return Err(invalid("compacted history exceeds its safe budget"));
-    }
     // Marking the window alone is not worth a checkpoint; the next compaction starts here.
+    // With nothing to change the turn continues as it was, whatever the budget says.
     if replacement
         .iter()
         .map(|item| &item.item)
         .eq(source.iter().map(|item| &item.item))
     {
         return Ok(false);
+    }
+    if history_tokens(&replacement) > hard_history {
+        return Err(invalid("compacted history exceeds its safe budget"));
     }
     let baseline = match injection {
         InitialContextInjection::BeforeLastUserMessage { world_state, .. } => Some(world_state),

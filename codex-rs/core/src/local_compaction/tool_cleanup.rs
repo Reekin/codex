@@ -13,16 +13,13 @@ use super::install_marks;
 use super::prepared_state;
 use super::reasoning_budget;
 use super::to_reported;
-use super::uses_local_route;
 use super::visible_tokens;
 use crate::compact::LocalCompactionContext;
 use crate::session::session::Session;
 
-/// Tool cleanup progress for the thread's current model route.
+/// Tool cleanup progress for the thread.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ToolCleanupStatus {
-    /// Whether background marking runs on the current model route.
-    pub enabled: bool,
     /// Whether a background marking request is in flight.
     pub marking: bool,
     /// Estimated history tokens released by applying every current validated mark and
@@ -84,7 +81,6 @@ async fn status(
             &cleaned(&state.staged, source, reasoning_budget(context, budget))?,
         ));
     Ok(ToolCleanupStatus {
-        enabled: uses_local_route(&context.turn, &context.settings.model_info),
         marking: state.background.is_some(),
         pending_savings_tokens: to_reported(pending_savings_tokens, scale),
         required_savings_tokens: to_reported(budget.required_savings(), scale),

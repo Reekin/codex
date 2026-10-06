@@ -274,11 +274,18 @@ impl LocalModel {
     }
 }
 
+/// Local-compaction budgets on a provider without native compaction, so full compaction uses
+/// the local pipeline.
 pub(crate) fn configure(config: &mut Config) {
+    configure_budgets(config);
+    config.model_provider.name = "Local compaction fixture".to_string();
+}
+
+/// Local-compaction budgets that keep the provider's own compaction route.
+pub(crate) fn configure_budgets(config: &mut Config) {
     let _ = config
         .features
         .disable(codex_features::Feature::EnableRequestCompression);
-    config.local_compaction.force_local = true;
     config.local_compaction.reclaim_percent = 1;
     // Manual/full-compaction fixtures isolate tier planning from background marking.
     config.local_compaction.mark_after_tokens_percent = 99;

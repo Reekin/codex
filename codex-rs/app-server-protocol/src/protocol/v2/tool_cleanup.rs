@@ -3,13 +3,11 @@ use crate::TS;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Tool-result cleanup progress for a loaded thread's current model route.
+/// Tool-result cleanup progress for a loaded thread.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadToolCleanupStatus {
-    /// Whether background tool marking runs on the current model route.
-    pub enabled: bool,
     /// Whether a background marking request is in flight.
     pub marking: bool,
     /// Estimated context tokens released by applying every current validated mark.

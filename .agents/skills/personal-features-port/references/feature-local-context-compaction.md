@@ -87,13 +87,15 @@ keep original local records queryable without a hosted notes service.
   Original images appear in item text as numbered placeholders. Reading an item attaches up to four
   original images as real images on its first page, with an image cursor for the rest; the CLI can
   include them as data URLs on request.
-- **REQ-9**: Provider/model capability routing remains the default. A local preference can force
-  this pipeline and bypass hosted-notes rollover. Configuration separately controls the marking
-  volume threshold, reclaim percentage, kept earlier reasoning, and the kept-window share of full
-  compaction. Obsolete occupancy-trigger, minimum-savings and record-count options have no
-  fallback path. Custom guidance supplements the structured protocol.
-- **REQ-10**: App-server clients can read, for a loaded thread, whether marking runs on its current
-  route, whether a batch is in flight, the estimated release of all current validated marks, and the
+- **REQ-9**: Background marking, tool cleanup and earlier-reasoning trimming run on every model
+  route. Only full compaction is routed: native compaction when both the provider and the model
+  metadata (`supports_remote_compaction`) support it, the local window pipeline otherwise; there is
+  no configuration switch that overrides this. Configuration controls the marking volume
+  threshold, reclaim percentage, kept earlier reasoning, and the kept-window share of full
+  compaction. Obsolete occupancy-trigger, minimum-savings, record-count and forced-route options
+  have no fallback path. Custom guidance supplements the structured protocol.
+- **REQ-10**: App-server clients can read, for a loaded thread, whether a batch is in flight, the
+  estimated release of all current validated marks, and the
   automatic cleanup requirement. Clients can request immediate tool cleanup that applies every
   validated mark regardless of that requirement. It does not await in-flight marking, send model
   requests, or start full compaction, and it reports the estimated release (zero when nothing
@@ -132,8 +134,9 @@ keep original local records queryable without a hosted notes service.
    oldest part (REQ-5–7).
 5. Return invalid data, fail/delay marking, append user input, and rewrite a window. Verify no partial
    rewrite, normal progress, independent usage, and no stale result install (REQ-1,2,5,7).
-6. Resume/fork after cleanup and read originals with model tools and CLI. Compare forced-local and
-   native-remote routes, and round-trip configuration (REQ-8,9).
+6. Resume/fork after cleanup and read originals with model tools and CLI. Verify full compaction
+   follows provider and model capability, tool cleanup also installs on a native-compaction model,
+   and configuration round-trips (REQ-8,9).
 7. Validate marks below the savings requirement, restart and fork, and verify identical status
    without new marking requests. Apply manually through the app-server methods, including on the
    packaged binary; verify the release, the next request's view, and a no-op second apply (REQ-2,10).

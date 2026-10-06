@@ -1927,11 +1927,6 @@
           "minimum": 0.0,
           "type": "integer"
         },
-        "force_local": {
-          "default": false,
-          "description": "Use local cleanup even when the provider supports remote compaction.",
-          "type": "boolean"
-        },
         "keep_reasoning_percent": {
           "default": 5,
           "description": "Window percentage of newest earlier-turn reasoning kept when tool marks are applied.",
@@ -6607,7 +6602,6 @@
       ],
       "default": {
         "compact_target_percent": 50,
-        "force_local": false,
         "keep_reasoning_percent": 5,
         "mark_after_tokens_percent": 5,
         "reclaim_percent": 30
