@@ -524,16 +524,17 @@ pub(crate) async fn run_pipeline(
             replacement.push(item);
         }
     }
-    if history_tokens(&replacement) > hard_history {
-        return Err(invalid("compacted history exceeds its safe budget"));
-    }
     // Marking the window alone is not worth a checkpoint; the next compaction starts here.
+    // With nothing to change the turn continues as it was, whatever the budget says.
     if replacement
         .iter()
         .map(|item| &item.item)
         .eq(source.iter().map(|item| &item.item))
     {
         return Ok(false);
+    }
+    if history_tokens(&replacement) > hard_history {
+        return Err(invalid("compacted history exceeds its safe budget"));
     }
     let baseline = match injection {
         InitialContextInjection::BeforeLastUserMessage { world_state, .. } => Some(world_state),
