@@ -17,9 +17,9 @@ support it use local context compaction without requiring a provider switch.
 
 - **REQ-1**: Every model exposes whether it supports remote compaction. The capability defaults to
   enabled when omitted so existing model catalogs retain their behavior.
-- **REQ-2**: By default remote compaction is selected only when both the provider and the active
-  model support it. The explicit local preference defined in [local context compaction](feature-local-context-compaction.md)
-  can select local compaction even when remote support is available.
+- **REQ-2**: Remote compaction is selected only when both the provider and the active model
+  support it. Tool cleanup from [local context compaction](feature-local-context-compaction.md)
+  runs on either route.
 - **REQ-3**: A model that disables remote compaction uses the local context compaction path for
   both manual and automatic compaction.
 - **REQ-4**: Switching models changes the compaction path immediately according to the newly active

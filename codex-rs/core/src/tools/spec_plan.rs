@@ -1212,11 +1212,10 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add(RequestPermissionsHandler);
     }
 
-    let local_route = turn_context.config.local_compaction.force_local
-        || crate::compaction_policy::remote_compaction_support(
-            turn_context.provider.capabilities().remote_compaction,
-            context.model_info,
-        ) == codex_model_provider::RemoteCompactionSupport::Unsupported;
+    let local_route = crate::compaction_policy::remote_compaction_support(
+        turn_context.provider.capabilities().remote_compaction,
+        context.model_info,
+    ) == codex_model_provider::RemoteCompactionSupport::Unsupported;
     if !local_route && features.enabled(Feature::TokenBudget) {
         registry.add_with_exposure(NewContextWindowHandler, ToolExposure::DirectModelOnly);
         registry.add(GetContextRemainingHandler);

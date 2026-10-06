@@ -35,8 +35,7 @@ async fn mid_turn_cleanup_uses_activated_model_settings_and_keeps_pending_work()
         .with_auth(CodexAuth::from_api_key("test-key"))
         .with_model("remote-model")
         .with_config(|config| {
-            configure(config);
-            config.local_compaction.force_local = false;
+            configure_budgets(config);
             config.local_compaction.compact_target_percent = 15;
             let mut next = model("local-model", false, "shared");
             next.default_reasoning_summary =
@@ -159,26 +158,23 @@ fn remote_response() -> String {
     ])
 }
 
-#[test_case::test_case(true, true, false; "native remote default")]
-#[test_case::test_case(true, true, true; "force local on capable model")]
-#[test_case::test_case(true, false, false; "model lacks remote capability")]
-#[test_case::test_case(false, true, false; "provider lacks remote capability")]
+#[test_case::test_case(true, true; "native remote default")]
+#[test_case::test_case(true, false; "model lacks remote capability")]
+#[test_case::test_case(false, true; "provider lacks remote capability")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn provider_model_capability_and_local_preference_select_independent_routes(
+async fn provider_and_model_capability_select_the_compaction_route(
     provider_remote: bool,
     model_remote: bool,
-    force_local: bool,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let responder = LocalModel::mount(&server).await;
-    let use_remote = provider_remote && model_remote && !force_local;
+    let use_remote = provider_remote && model_remote;
     let test = test_codex()
         .with_auth(CodexAuth::from_api_key("test-key"))
         .with_model("routing-model")
         .with_config(move |config| {
-            configure(config);
-            config.local_compaction.force_local = force_local;
+            configure_budgets(config);
             config.model_catalog = Some(ModelsResponse {
                 models: vec![model("routing-model", model_remote, "same")],
             });
@@ -186,9 +182,6 @@ async fn provider_model_capability_and_local_preference_select_independent_route
                 config.model_provider.name = "Custom provider".to_string();
             }
             let _ = config.features.enable(Feature::RemoteCompactionV2);
-            if force_local {
-                let _ = config.features.enable(Feature::TokenBudget);
-            }
         })
         .build_with_auto_env(&server)
         .await?;
@@ -210,13 +203,6 @@ async fn provider_model_capability_and_local_preference_select_independent_route
         bodies[0]["tools"].to_string().contains("recall_read_item"),
         !use_remote
     );
-    if !use_remote {
-        assert!(
-            !bodies[0]["tools"]
-                .to_string()
-                .contains("new_context_window")
-        );
-    }
     assert_eq!(requests.len(), 1);
     if use_remote {
         assert_eq!(
@@ -261,8 +247,7 @@ async fn model_switch_uses_active_capability_and_preserves_selected_reasoning() 
         .with_auth(CodexAuth::from_api_key("test-key"))
         .with_model("remote-model")
         .with_config(|config| {
-            configure(config);
-            config.local_compaction.force_local = false;
+            configure_budgets(config);
             let mut next = model("local-model", false, "local-hash");
             next.default_reasoning_summary =
                 codex_protocol::config_types::ReasoningSummary::Detailed;

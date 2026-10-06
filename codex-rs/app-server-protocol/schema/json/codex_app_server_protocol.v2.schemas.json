@@ -22116,12 +22116,8 @@
       "type": "object"
     },
     "ThreadToolCleanupStatus": {
-      "description": "Tool-result cleanup progress for a loaded thread's current model route.",
+      "description": "Tool-result cleanup progress for a loaded thread.",
       "properties": {
-        "enabled": {
-          "description": "Whether background tool marking runs on the current model route.",
-          "type": "boolean"
-        },
         "marking": {
           "description": "Whether a background marking request is in flight.",
           "type": "boolean"
@@ -22138,7 +22134,6 @@
         }
       },
       "required": [
-        "enabled",
         "marking",
         "pendingSavingsTokens",
         "requiredSavingsTokens"

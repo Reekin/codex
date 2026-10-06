@@ -6,8 +6,6 @@ use serde::Serialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalCompactionConfig {
-    /// Use local cleanup even when the provider supports remote compaction.
-    pub force_local: bool,
     /// Window percentage points that completed tool marks must reclaim before cleanup.
     pub reclaim_percent: u8,
     /// Unmarked tool tokens as a percentage of the window that starts a background batch.
@@ -21,7 +19,6 @@ pub struct LocalCompactionConfig {
 impl Default for LocalCompactionConfig {
     fn default() -> Self {
         Self {
-            force_local: false,
             reclaim_percent: 30,
             mark_after_tokens_percent: 5,
             compact_target_percent: 50,

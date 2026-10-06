@@ -80,7 +80,7 @@ async fn auto_compaction_local_emits_started_and_completed_items() -> Result<()>
 
     let codex_home = TempDir::new()?;
     compaction_config(&server.uri(), /*auto_compact_limit*/ 90_000)
-        .with_root_config("model_context_window = 100000\nlocal_compaction.force_local = true")
+        .with_root_config("model_context_window = 100000")
         .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
@@ -283,7 +283,7 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
     let initial_cwd = TempDir::new()?;
     let updated_cwd = TempDir::new()?;
     compaction_config(&server.uri(), /*auto_compact_limit*/ 1_000_000)
-        .with_root_config("model_context_window = 100000\nlocal_compaction.force_local = true")
+        .with_root_config("model_context_window = 100000")
         .write(codex_home.path())?;
 
     // Top-level cwd restoration uses host-native paths, not a foreign executor's paths.
@@ -459,7 +459,6 @@ async fn thread_tool_cleanup_reports_marks_and_applies_them_on_request() -> Resu
     compaction_config(&server.uri(), /*auto_compact_limit*/ 90_000)
         .with_root_config(
             "model_context_window = 100000\n\
-             local_compaction.force_local = true\n\
              local_compaction.reclaim_percent = 50\n\
              local_compaction.mark_after_tokens_percent = 1",
         )
@@ -473,7 +472,6 @@ async fn thread_tool_cleanup_reports_marks_and_applies_them_on_request() -> Resu
     assert_eq!(
         initial,
         ThreadToolCleanupStatus {
-            enabled: true,
             marking: false,
             pending_savings_tokens: 0,
             ..initial

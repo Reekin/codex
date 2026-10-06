@@ -119,13 +119,13 @@ enum CleanupTrigger {
     Manual,
 }
 
-/// Whether tool marking and full compaction use the local pipeline for this model.
+/// Whether full compaction uses the local pipeline: the provider or the model lacks native
+/// compaction. Tool cleanup runs on every route.
 pub(crate) fn uses_local_route(turn: &TurnContext, model_info: &ModelInfo) -> bool {
-    turn.config.local_compaction.force_local
-        || crate::compaction_policy::remote_compaction_support(
-            turn.provider.capabilities().remote_compaction,
-            model_info,
-        ) == RemoteCompactionSupport::Unsupported
+    crate::compaction_policy::remote_compaction_support(
+        turn.provider.capabilities().remote_compaction,
+        model_info,
+    ) == RemoteCompactionSupport::Unsupported
 }
 
 pub(crate) async fn maybe_clean_history(

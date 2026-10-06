@@ -73,6 +73,41 @@ async fn many_small_outputs_are_marked_in_one_batch() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tool_cleanup_runs_on_the_native_compaction_route() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    // The default test provider and model both support native compaction.
+    let test = test_codex()
+        .with_config(|config| {
+            configure_budgets(config);
+            config.local_compaction.mark_after_tokens_percent = 1;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    model.reply(tool_turn());
+    model.text("Evidence received.");
+    test.submit_text_turn("Collect evidence.").await?;
+    model.text("Recent dialogue.");
+    test.submit_text_turn("Continue.").await?;
+    finish_marking(&test, &model, /*expected_batches*/ 1).await?;
+    model.text("Following installed view.");
+    test.submit_text_turn("Inspect the cleaned view.").await?;
+    let installed = model.bodies().pop().expect("follow-up");
+    let shortened = installed["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| {
+            item["type"] == "function_call_output" && item["call_id"] == "original-shorten"
+        })
+        .expect("shortened result")
+        .to_string();
+    assert!(shortened.contains(SHORTENED), "{shortened}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cleanup_status_follows_provider_token_counts() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
@@ -162,7 +197,6 @@ async fn validated_marks_survive_resume_and_apply_manually() -> Result<()> {
     assert_eq!(
         status,
         ToolCleanupStatus {
-            enabled: true,
             marking: false,
             ..status
         }
