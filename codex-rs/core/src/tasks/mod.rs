@@ -285,6 +285,13 @@ impl Session {
         input: Vec<TurnInput>,
         task: T,
     ) {
+        self.input_queue
+            .subagent_continuation_paused
+            .store(false, std::sync::atomic::Ordering::Release);
+        let completion_parent_guard = self.services.agent_control.completion_parent_guard(
+            turn_context.multi_agent_version,
+            &turn_context.session_source,
+        );
         // Inherited or recovered roots are applied before task start. Otherwise this
         // task owns its turn, including background work. Later mail cannot change it.
         turn_context
@@ -359,6 +366,8 @@ impl Session {
         );
         let handle = tokio::spawn(
             async move {
+                // Finalization forwards the result after removing RunningTask from the turn.
+                let _completion_parent_guard = completion_parent_guard;
                 let ctx_for_finish = Arc::clone(&ctx);
                 let task_result = task_for_run
                     .run(
@@ -409,6 +418,29 @@ impl Session {
         turn.task = Some(running_task);
     }
 
+    /// Enqueues admission without holding a task open or keeping the submission loop alive.
+    pub(crate) fn request_pending_work(&self) {
+        let Some(sender) = self
+            .pending_work_sender
+            .get()
+            .and_then(async_channel::WeakSender::upgrade)
+        else {
+            return;
+        };
+        // A full submission queue must not block task finalization while an interrupt joins it.
+        tokio::spawn(async move {
+            let _ = sender
+                .send(codex_protocol::protocol::Submission {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    op: codex_protocol::protocol::Op::ProcessPendingWork,
+                    trace: None,
+                    parent_turn_id: None,
+                    root_turn_id: None,
+                })
+                .await;
+        });
+    }
+
     /// Returns whether an extension has marked this thread as durably asleep.
     pub(crate) fn has_outstanding_durable_sleep(&self) -> bool {
         self.services
@@ -419,8 +451,8 @@ impl Session {
 
     /// Starts a regular turn when the session is idle and pending work is waiting.
     ///
-    /// Pending work includes mailbox mail marked with `trigger_turn`, or any mailbox mail while
-    /// an outstanding durable sleep is attached to the thread.
+    /// Pending work includes subagent results, mailbox mail marked with `trigger_turn`, or any
+    /// mailbox mail while an outstanding durable sleep is attached to the thread.
     ///
     /// This helper generates a fresh sub-id for the synthetic turn before delegating to the
     /// explicit-sub-id variant.
@@ -436,15 +468,24 @@ impl Session {
     /// Starts a regular turn with the provided sub-id when pending work should wake an idle
     /// session.
     ///
-    /// The turn is created only when the session is idle and mailbox mail either requests a turn
-    /// or can wake an outstanding durable sleep.
+    /// The turn is created only when the session is idle and pending work requests a turn.
+    /// Child results resume normal completion, but respect an explicit parent interruption.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "pending-work admission must recheck input under the active-turn lock"
+    )]
     pub(crate) async fn maybe_start_turn_for_pending_work_with_sub_id(
         self: &Arc<Self>,
         sub_id: String,
     ) {
         if !self.input_queue.has_pending_mailbox_items().await
             || (!self.input_queue.has_trigger_turn_mailbox_items().await
-                && !self.has_outstanding_durable_sleep())
+                && !self.has_outstanding_durable_sleep()
+                && (self
+                    .input_queue
+                    .subagent_continuation_paused
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    || !self.input_queue.has_pending_subagent_results().await))
         {
             return;
         }
@@ -452,6 +493,17 @@ impl Session {
         let turn_state = {
             let mut active_turn = self.active_turn.lock().await;
             if active_turn.is_some() {
+                return;
+            }
+            // A user turn may have consumed the results while this admission waited for the lock.
+            if !self.input_queue.has_pending_mailbox_items().await
+                || (self
+                    .input_queue
+                    .subagent_continuation_paused
+                    .load(std::sync::atomic::Ordering::Acquire)
+                    && !self.input_queue.has_trigger_turn_mailbox_items().await
+                    && !self.has_outstanding_durable_sleep())
+            {
                 return;
             }
             let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
@@ -463,7 +515,7 @@ impl Session {
         if !input.iter().any(
             |item| matches!(item, TurnInput::InterAgentCommunication(mail) if mail.trigger_turn),
         ) {
-            // Queue-only mail wakes durable sleep without selecting a new task's settings.
+            // Child results and queue-only mail preserve the parent's execution settings.
             start_options.cyber_access_program = self
                 .reference_context_item()
                 .await
@@ -861,7 +913,7 @@ impl Session {
             warn!("failed to flush rollout after emitting terminal turn event: {err}");
         }
         if cleared_active_turn {
-            self.maybe_start_turn_for_pending_work().await;
+            self.request_pending_work();
         }
     }
 

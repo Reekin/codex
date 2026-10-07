@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::AgentIdentity;
 use crate::agent::status::is_final;
+use crate::session::InputQueueActivity;
 use crate::session::session::Session;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v1;
@@ -164,9 +165,34 @@ impl Handler {
             }
         }
 
+        let mut steered = false;
         let statuses = if !initial_final_statuses.is_empty() {
             initial_final_statuses
         } else {
+            let turn_state = session
+                .input_queue
+                .turn_state_for_sub_id(&session.active_turn, &turn.sub_id)
+                .await;
+            let wait_for_steer = async {
+                loop {
+                    // Subscribe before checking pending input so steering during setup is
+                    // observed. Recheck after mailbox activity: watch can coalesce a steer
+                    // followed by mail into a single mailbox notification.
+                    let (mut activity_rx, pending_activity) = session
+                        .input_queue
+                        .subscribe_activity(turn_state.as_deref())
+                        .await;
+                    if pending_activity == Some(InputQueueActivity::Steer) {
+                        break;
+                    }
+                    if activity_rx.changed().await.is_ok()
+                        && *activity_rx.borrow_and_update() == InputQueueActivity::Steer
+                    {
+                        break;
+                    }
+                }
+            };
+            tokio::pin!(wait_for_steer);
             let mut futures = FuturesUnordered::new();
             for (id, rx) in status_rxs.into_iter() {
                 let session = session.clone();
@@ -175,7 +201,14 @@ impl Handler {
             let mut results = Vec::new();
             let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
             loop {
-                match timeout_at(deadline, futures.next()).await {
+                let next_status = tokio::select! {
+                    _ = &mut wait_for_steer => {
+                        steered = true;
+                        break;
+                    }
+                    next_status = timeout_at(deadline, futures.next()) => next_status,
+                };
+                match next_status {
                     Ok(Some(Some(result))) => {
                         results.push(result);
                         break;
@@ -196,7 +229,7 @@ impl Handler {
             results
         };
 
-        let timed_out = statuses.is_empty();
+        let timed_out = statuses.is_empty() && !steered;
         let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
         let result = WaitAgentResult {
             status: statuses

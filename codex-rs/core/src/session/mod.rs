@@ -843,6 +843,8 @@ impl Session {
         }
         let thread_id = session.thread_id;
 
+        let _ = session.pending_work_sender.set(tx_sub.downgrade());
+
         // This task will run until Op::Shutdown is received.
         let session_for_loop = Arc::clone(&session);
         let session_loop_handle = tokio::spawn(async move {
@@ -1236,6 +1238,9 @@ impl Session {
     }
 
     pub(crate) fn mark_interrupted(&self) {
+        self.input_queue
+            .subagent_continuation_paused
+            .store(true, std::sync::atomic::Ordering::Release);
         self.agent_status.send_replace(AgentStatus::Interrupted);
     }
 
@@ -2152,23 +2157,19 @@ impl Session {
         }
     }
 
-    /// Forwards terminal turn events from spawned MultiAgentV2 children to their direct parent.
+    /// Forwards every terminal child turn to its direct parent, including reused agents.
     async fn maybe_notify_parent_of_terminal_turn(
         &self,
         turn_context: &TurnContext,
         msg: &EventMsg,
     ) {
-        if turn_context.multi_agent_version != MultiAgentVersion::V2 {
-            return;
-        }
-
         if !matches!(msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) {
             return;
         }
 
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
-            agent_path: Some(child_agent_path),
+            agent_path,
             ..
         }) = &turn_context.session_source
         else {
@@ -2191,6 +2192,29 @@ impl Session {
         if !is_final(&status) {
             return;
         }
+
+        if turn_context.multi_agent_version != MultiAgentVersion::V2 {
+            let child_reference = agent_path
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| self.thread_id.to_string());
+            let notification = crate::context::SubagentNotification::new(&child_reference, status);
+            if let Err(err) = self
+                .services
+                .agent_control
+                .deliver_subagent_result(
+                    *parent_thread_id,
+                    TurnInput::ResponseItem(ContextualUserFragment::into(notification).into()),
+                )
+                .await
+            {
+                debug!("failed to notify parent thread {parent_thread_id}: {err}");
+            }
+            return;
+        }
+        let Some(child_agent_path) = agent_path else {
+            return;
+        };
 
         self.forward_child_completion_to_parent(
             turn_context,
@@ -2289,12 +2313,7 @@ impl Session {
         if let Err(err) = self
             .services
             .agent_control
-            .send_inter_agent_communication(
-                parent_thread_id,
-                communication,
-                context,
-                TurnStartOptions::default(),
-            )
+            .deliver_subagent_communication(parent_thread_id, communication, context)
             .await
         {
             debug!("failed to notify parent thread {parent_thread_id}: {err}");

@@ -9,9 +9,11 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use tracing::warn;
 
 #[derive(Default)]
@@ -23,6 +25,7 @@ pub(super) struct V2Residency {
 struct V2ResidencyState {
     residents: VecDeque<ThreadId>,
     pending_slots: usize,
+    completion_parents: HashMap<ThreadId, Weak<()>>,
 }
 
 pub(super) struct V2ResidencySlot {
@@ -46,6 +49,27 @@ impl Drop for V2ResidencySlot {
 }
 
 impl AgentControl {
+    pub(crate) fn completion_parent_guard(
+        &self,
+        multi_agent_version: MultiAgentVersion,
+        session_source: &SessionSource,
+    ) -> Option<Arc<()>> {
+        if multi_agent_version != MultiAgentVersion::V2 {
+            return None;
+        }
+        let SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            ..
+        }) = session_source
+        else {
+            return None;
+        };
+        Some(
+            self.v2_residency
+                .retain_completion_parent(*parent_thread_id),
+        )
+    }
+
     pub(super) async fn reserve_v2_residency_slot(
         &self,
         state: &Arc<ThreadManagerState>,
@@ -78,6 +102,29 @@ impl AgentControl {
 }
 
 impl V2Residency {
+    /// Keep a result recipient resident until its producer has handed the result to its queue.
+    pub(super) fn retain_completion_parent(&self, thread_id: ThreadId) -> Arc<()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .completion_parents
+            .retain(|_, lease| lease.strong_count() > 0);
+        if let Some(lease) = state
+            .completion_parents
+            .get(&thread_id)
+            .and_then(Weak::upgrade)
+        {
+            return lease;
+        }
+        let lease = Arc::new(());
+        state
+            .completion_parents
+            .insert(thread_id, Arc::downgrade(&lease));
+        lease
+    }
+
     async fn reserve_slot(
         self: Arc<Self>,
         manager: &Arc<ThreadManagerState>,
@@ -173,7 +220,12 @@ impl V2Residency {
         let candidates_to_scan = state.residents.len();
         for _ in 0..candidates_to_scan {
             let candidate_thread_id = state.residents.pop_front()?;
-            if Some(candidate_thread_id) == protected_thread_id {
+            if Some(candidate_thread_id) == protected_thread_id
+                || state
+                    .completion_parents
+                    .get(&candidate_thread_id)
+                    .is_some_and(|lease| lease.strong_count() > 0)
+            {
                 state.residents.push_back(candidate_thread_id);
                 continue;
             }

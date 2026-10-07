@@ -77,6 +77,9 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+#[path = "multi_agents_wait_tests.rs"]
+mod wait_steer_tests;
+
 fn invocation(
     session: Arc<crate::session::session::Session>,
     turn: Arc<TurnContext>,

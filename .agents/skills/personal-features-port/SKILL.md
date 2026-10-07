@@ -52,6 +52,7 @@ Read only the target feature reference unless integration work needs more.
 | Image-generation options | `ft/imagegen-options-<upstream-version>` | typed projection | `references/feature-imagegen-options.md` |
 | Context usage breakdown | `ft/context-usage-breakdown-<upstream-version>` | typed projection | `references/feature-context-usage-breakdown.md` |
 | Superseded turn closure | `ft/superseded-turn-closure-<upstream-version>` | typed projection | `references/feature-superseded-turn-closure.md` |
+| Subagent continuation | `ft/subagent-continuation-<upstream-version>` | lifecycle policy | `references/feature-subagent-continuation.md` |
 
 For integration packaging and release work, also read
 `references/integration-release-automation.md`.

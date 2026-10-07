@@ -241,6 +241,45 @@ impl AgentControl {
         .await
     }
 
+    pub(crate) async fn deliver_subagent_communication(
+        &self,
+        agent_id: ThreadId,
+        communication: InterAgentCommunication,
+        context: AgentCommunicationContext,
+    ) -> CodexResult<()> {
+        let communication_for_log =
+            crate::agent_communication::logging_enabled().then(|| communication.clone());
+        let communication_id = Uuid::now_v7().to_string();
+        self.deliver_subagent_result(
+            agent_id,
+            crate::session::TurnInput::InterAgentCommunication(communication),
+        )
+        .await?;
+        if let Some(communication) = communication_for_log {
+            crate::agent_communication::emit_agent_communication_send(
+                &communication_id,
+                &context,
+                &communication,
+                agent_id,
+            );
+        }
+        crate::agent_communication::emit_agent_communication_receive(&communication_id);
+        Ok(())
+    }
+
+    pub(crate) async fn deliver_subagent_result(
+        &self,
+        agent_id: ThreadId,
+        input: crate::session::TurnInput,
+    ) -> CodexResult<()> {
+        self.upgrade()?
+            .get_thread(agent_id)
+            .await?
+            .deliver_subagent_result(input)
+            .await;
+        Ok(())
+    }
+
     pub(crate) async fn emit_sub_agent_activity(
         &self,
         thread_id: ThreadId,
@@ -635,7 +674,9 @@ impl AgentControl {
             return;
         };
         let control = self.clone();
+        let parent_residency = self.v2_residency.retain_completion_parent(parent_thread_id);
         tokio::spawn(async move {
+            let _parent_residency = parent_residency;
             let status = match control.subscribe_status(child_thread_id).await {
                 Ok(mut status_rx) => {
                     let mut status = status_rx.borrow().clone();
@@ -664,6 +705,13 @@ impl AgentControl {
                 }
                 None => true,
             };
+            // Loaded V1 children report every terminal turn through Session, including follow-ups.
+            // This watcher still reports missing/shutdown children that have no terminal turn.
+            if !child_uses_multi_agent_v2
+                && matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_))
+            {
+                return;
+            }
             if child_agent_path.is_some() && child_uses_multi_agent_v2 {
                 let Some(child_agent_path) = child_agent_path.clone() else {
                     return;
@@ -691,6 +739,12 @@ impl AgentControl {
                 );
                 let context =
                     AgentCommunicationContext::new(AgentCommunicationKind::Result, child_thread_id);
+                if matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_)) {
+                    let _ = control
+                        .deliver_subagent_communication(parent_thread_id, communication, context)
+                        .await;
+                    return;
+                }
                 let _ = control
                     .send_inter_agent_communication(
                         parent_thread_id,

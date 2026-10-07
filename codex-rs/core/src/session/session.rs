@@ -44,6 +44,7 @@ pub(crate) struct Session {
     pub(crate) thread_id: ThreadId,
     pub(crate) installation_id: String,
     pub(super) tx_event: Sender<Event>,
+    pub(crate) pending_work_sender: OnceLock<async_channel::WeakSender<Submission>>,
     pub(super) agent_status: watch::Sender<AgentStatus>,
     pub(super) state: Mutex<SessionState>,
     /// Orders accepted settings commits and their persisted events with compaction checkpoints.
@@ -1504,6 +1505,7 @@ impl Session {
                 thread_id,
                 installation_id,
                 tx_event: tx_event.clone(),
+                pending_work_sender: OnceLock::new(),
                 agent_status,
                 state: Mutex::new(state),
                 thread_settings_persistence: Semaphore::new(/*permits*/ 1),
