@@ -373,7 +373,9 @@ pub(super) async fn ensure_listener_task_running(
                     if !unloading_state.should_unload_now() {
                         continue;
                     }
-                    if matches!(conversation.agent_status().await, AgentStatus::Running) {
+                    if matches!(conversation.agent_status().await, AgentStatus::Running)
+                        || conversation.has_pending_subagent_work().await
+                    {
                         unloading_state.note_thread_activity_observed();
                         continue;
                     }

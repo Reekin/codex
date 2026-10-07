@@ -35,6 +35,31 @@ fn completion_watchers_hold_parent_until_last_result_is_delivered() {
     assert_eq!(residency.pop_lru_candidate(None), Some(parent));
 }
 
+#[test]
+fn child_turns_retain_parent_across_reuse_without_an_agent_version_gate() {
+    let control = AgentControl::default();
+    let parent = ThreadId::new();
+    let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: parent,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+    let first = control
+        .completion_parent_guard(&source)
+        .expect("child guard");
+    assert!(control.has_outstanding_child_completion(parent));
+    drop(first);
+    assert!(!control.has_outstanding_child_completion(parent));
+    let followup = control
+        .completion_parent_guard(&source)
+        .expect("follow-up guard");
+    assert!(control.has_outstanding_child_completion(parent));
+    drop(followup);
+    assert!(!control.has_outstanding_child_completion(parent));
+}
+
 #[tokio::test]
 async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
     let mut config = test_config().await;

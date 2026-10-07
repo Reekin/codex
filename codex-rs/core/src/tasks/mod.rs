@@ -288,10 +288,10 @@ impl Session {
         self.input_queue
             .subagent_continuation_paused
             .store(false, std::sync::atomic::Ordering::Release);
-        let completion_parent_guard = self.services.agent_control.completion_parent_guard(
-            turn_context.multi_agent_version,
-            &turn_context.session_source,
-        );
+        let completion_parent_guard = self
+            .services
+            .agent_control
+            .completion_parent_guard(&turn_context.session_source);
         // Inherited or recovered roots are applied before task start. Otherwise this
         // task owns its turn, including background work. Later mail cannot change it.
         turn_context
