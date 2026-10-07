@@ -20,11 +20,23 @@ impl SessionTask for HeldTask {
 
     async fn run(
         self: Arc<Self>,
-        _session: Arc<Session>,
-        _turn: Arc<TurnContext>,
+        session: Arc<Session>,
+        turn: Arc<TurnContext>,
         _input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
+        session
+            .send_event(
+                &turn,
+                EventMsg::TurnStarted(codex_protocol::protocol::TurnStartedEvent {
+                    turn_id: turn.sub_id.clone(),
+                    trace_id: None,
+                    started_at: None,
+                    model_context_window: None,
+                    collaboration_mode_kind: turn.collaboration_mode().mode,
+                }),
+            )
+            .await;
         cancellation_token.cancelled().await;
         Ok(None)
     }
@@ -75,6 +87,10 @@ async fn wait_agent_returns_on_steer_without_stopping_child(timing: SteerTiming)
         .session
         .spawn_task(child_turn, Vec::new(), HeldTask)
         .await;
+    core_test_support::wait_for_event(&child.thread, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await;
     let child_status = manager.agent_control().get_status(child.thread_id).await;
     assert_eq!(child_status, AgentStatus::Running);
     let session = Arc::new(session);
