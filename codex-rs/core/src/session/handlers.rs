@@ -57,6 +57,10 @@ use tracing::info;
 use tracing::warn;
 
 pub async fn interrupt(sess: &Arc<Session>) {
+    // A stop also applies while idle or finalizing, when there may be no RunningTask left.
+    sess.input_queue
+        .subagent_continuation_paused
+        .store(true, std::sync::atomic::Ordering::Release);
     sess.interrupt_task().await;
 }
 
@@ -549,6 +553,11 @@ pub(super) async fn submission_loop(
                 }
                 Op::CleanBackgroundTerminals => {
                     clean_background_terminals(&sess).await;
+                    false
+                }
+                Op::ProcessPendingWork => {
+                    sess.maybe_start_turn_for_pending_work_with_sub_id(sub.id.clone())
+                        .await;
                     false
                 }
                 Op::RealtimeConversationStart(params) => {

@@ -19,6 +19,22 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
 
+#[test]
+fn completion_watchers_hold_parent_until_last_result_is_delivered() {
+    let residency = super::V2Residency::default();
+    let parent = ThreadId::new();
+    let other = ThreadId::new();
+    residency.touch(parent);
+    residency.touch(other);
+    let first_child = residency.retain_completion_parent(parent);
+    let second_child = residency.retain_completion_parent(parent);
+    assert_eq!(residency.pop_lru_candidate(None), Some(other));
+    drop(first_child);
+    assert_eq!(residency.pop_lru_candidate(None), None);
+    drop(second_child);
+    assert_eq!(residency.pop_lru_candidate(None), Some(parent));
+}
+
 #[tokio::test]
 async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
     let mut config = test_config().await;

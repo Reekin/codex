@@ -3426,7 +3426,9 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
 async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     let harness = AgentControlHarness::new().await;
     let (_root_thread_id, root_thread) = harness.start_thread().await;
-    let (worker_thread_id, _worker_thread) = harness.start_thread().await;
+    let (worker_thread_id, worker_thread) = harness.start_thread().await;
+    // Hold the parent idle so this routing test can inspect the queued result without sampling.
+    worker_thread.session.mark_interrupted();
     let mut tester_config = harness.config.clone();
     let _ = tester_config.features.enable(Feature::MultiAgentV2);
     let tester_thread_id = harness
@@ -3477,28 +3479,23 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         &AgentStatus::Completed(Some("done".to_string())),
     )
     .expect("completed status should render");
-    let expected = (
-        worker_thread_id,
-        Op::InterAgentCommunication {
-            communication: InterAgentCommunication::new(
-                tester_path.clone(),
-                worker_path.clone(),
-                Vec::new(),
-                expected_message.clone(),
-                /*trigger_turn*/ false,
-            ),
-            start_options: Default::default(),
-        },
-    );
+    let expected =
+        crate::session::TurnInput::InterAgentCommunication(InterAgentCommunication::new(
+            tester_path.clone(),
+            worker_path.clone(),
+            Vec::new(),
+            expected_message.clone(),
+            /*trigger_turn*/ false,
+        ));
 
     timeout(Duration::from_secs(5), async {
         loop {
-            let captured = harness
-                .manager
-                .captured_ops()
-                .into_iter()
-                .find(|entry| captured_op_matches(entry, &expected));
-            if captured.is_some() {
+            if worker_thread
+                .session
+                .input_queue
+                .has_pending_subagent_results()
+                .await
+            {
                 break;
             }
             sleep(Duration::from_millis(10)).await;
@@ -3506,6 +3503,12 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     })
     .await
     .expect("completion watcher should queue a direct-parent message");
+    let (queued, _) = worker_thread
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    assert_eq!(queued, vec![expected]);
 
     let root_history = root_thread.session.clone_history().await;
     assert!(!history_contains_assistant_inter_agent_communication(

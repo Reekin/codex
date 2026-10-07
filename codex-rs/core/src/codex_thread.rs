@@ -615,6 +615,18 @@ impl CodexThread {
             .await;
     }
 
+    /// Delivers a child result through the session queue so it survives parent turn finalization.
+    pub(crate) async fn deliver_subagent_result(&self, input: crate::session::TurnInput) {
+        if matches!(self.agent_status().await, AgentStatus::Shutdown) {
+            return;
+        }
+        self.session
+            .input_queue
+            .enqueue_subagent_result(input)
+            .await;
+        self.session.request_pending_work();
+    }
+
     /// Record raw Responses API items without starting a new turn.
     pub async fn inject_response_items(&self, items: Vec<ResponseItem>) -> CodexResult<()> {
         self.inject_response_items_for_turn(items).await?;

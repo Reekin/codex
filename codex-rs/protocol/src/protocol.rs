@@ -598,6 +598,9 @@ pub enum Op {
     /// Use this when callers intentionally want to stop long-lived background shells.
     CleanBackgroundTerminals,
 
+    /// Recheck queued internal work through the same admission loop as user input and shutdown.
+    ProcessPendingWork,
+
     /// Start a realtime conversation stream.
     RealtimeConversationStart(ConversationStartParams),
 
@@ -932,6 +935,7 @@ impl Op {
         match self {
             Self::Interrupt => "interrupt",
             Self::CleanBackgroundTerminals => "clean_background_terminals",
+            Self::ProcessPendingWork => "process_pending_work",
             Self::RealtimeConversationStart(_) => "realtime_conversation_start",
             Self::RealtimeConversationAudio(_) => "realtime_conversation_audio",
             Self::RealtimeConversationText(_) => "realtime_conversation_text",

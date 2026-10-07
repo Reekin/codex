@@ -52,7 +52,13 @@ impl Session {
                 cause
             }
         };
-        if self.input_queue.has_trigger_turn_mailbox_items().await {
+        if self.input_queue.has_trigger_turn_mailbox_items().await
+            || (!self
+                .input_queue
+                .subagent_continuation_paused
+                .load(std::sync::atomic::Ordering::Acquire)
+                && self.input_queue.has_pending_subagent_results().await)
+        {
             return;
         }
 

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
@@ -81,6 +82,8 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    subagent_results: Mutex<Vec<TurnInput>>,
+    pub(crate) subagent_continuation_paused: AtomicBool,
 }
 
 struct PendingMailboxCommunication {
@@ -95,6 +98,8 @@ impl InputQueue {
         Self {
             activity_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            subagent_results: Mutex::new(Vec::new()),
+            subagent_continuation_paused: AtomicBool::new(false),
         }
     }
 
@@ -139,6 +144,16 @@ impl InputQueue {
 
     pub(crate) async fn has_pending_mailbox_items(&self) -> bool {
         !self.mailbox_pending_mails.lock().await.is_empty()
+            || self.has_pending_subagent_results().await
+    }
+
+    pub(crate) async fn enqueue_subagent_result(&self, input: TurnInput) {
+        self.subagent_results.lock().await.push(input);
+        self.activity_tx.send_replace(InputQueueActivity::Mailbox);
+    }
+
+    pub(crate) async fn has_pending_subagent_results(&self) -> bool {
+        !self.subagent_results.lock().await.is_empty()
     }
 
     pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
@@ -181,10 +196,11 @@ impl InputQueue {
                     .filter(|id| !id.trim().is_empty())
             })
             .map(str::to_string);
-        let items = pending_mails
+        let mut items: Vec<_> = pending_mails
             .into_iter()
             .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
             .collect();
+        items.extend(self.subagent_results.lock().await.drain(..));
         (items, start_options)
     }
 
