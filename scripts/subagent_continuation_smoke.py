@@ -78,6 +78,7 @@ class Model(http.server.ThreadingHTTPServer):
         self.reuse_sent = threading.Event()
         self.followup_started = threading.Event()
         self.sequence = 0
+        self.resume_prelude = 0
 
     def call(self, name, arguments, call_id):
         return {
@@ -120,9 +121,14 @@ class Model(http.server.ThreadingHTTPServer):
             if self.version == "v1":
                 arguments["targets"] = [result["agent_id"]]
             return [self.call("wait_agent", arguments, "smoke-wait")], False
-        assert number <= {"reuse": 5, "steer": 4}.get(self.scenario, 3), (
+        assert number <= {"reuse": 5, "steer": 4, "interrupt": 4}.get(self.scenario, 3), (
             "duplicate or unexpected parent request", number
         )
+        if self.scenario == "interrupt" and number == 3 and CHILD_RESULT not in input_text(body):
+            # Explicit user input may be sampled before queued child mail is drained.
+            assert "Process the retained child result." in input_text(body)
+            self.resume_prelude = 1
+            return [], False
         if self.scenario == "reuse":
             if number == 3:
                 assert CHILD_RESULT in input_text(body), "first child result missing"
@@ -440,7 +446,7 @@ def run_case(binary, version, scenario, idle_seconds):
                 rpc.completed(parent, turn)
                 assert model.followup_started.is_set(), "parent never consumed second child result"
                 count = 4
-            rpc.idle(model, parent, count + 1, idle_seconds)
+            rpc.idle(model, parent, count + 1 + model.resume_prelude, idle_seconds)
             return {"version": version, "scenario": scenario, "status": "passed",
                     "parent_requests": len(model.parents), "idle_seconds": idle_seconds}
         except Exception:
