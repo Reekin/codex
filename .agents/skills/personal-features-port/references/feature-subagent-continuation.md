@@ -32,6 +32,8 @@ lifetimes, and interrupting unrelated tools are outside this feature.
   completion at the turn boundary is handled without polling or concurrent parent turns.
 - MUST return control from the wait tool on steering while keeping the tool-call transcript valid.
 - MUST preserve active-turn delivery and stop semantics when upstream changes the input queue.
+- MUST retain a result recipient across client unsubscription and idle eviction while child work
+  or unconsumed child results still depend on it; release that retention after consumption.
 
 ## Adapter Seams
 
@@ -43,6 +45,8 @@ and interruption; subagent wait activity subscriptions; model-visible tool descr
 - Finish a parent reply while a child is held by a deterministic model server, then release the
   child. Observe a new parent model request with the child result and no new user submission.
   Exercise both multi-agent versions through the production RPC/model path. Covers REQ-1/5.
+- Repeat with the parent unsubscribed and the child held beyond the idle unload delay. Observe
+  autonomous result consumption, then normal idle unloading after consumption. Covers REQ-1/2.
 - Complete a child during an active parent turn and at its answer boundary. Observe delivery once,
   serialized requests, and completion/start event ordering. Covers REQ-2/5.
 - Hold a child, enter a long wait, and steer the parent. Observe the next parent request containing

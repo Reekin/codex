@@ -3,6 +3,7 @@
 Python 3.11+. Run with --codex ABSOLUTE/PATH/TO/codex.exe; no build or credentials.
 Each V1/V2 case owns a temporary CODEX_HOME, working directory, and server process.
 The interrupted-parent assertion observes a bounded idle window, not indefinite liveness.
+Unsubscribe cases hold children beyond the unload delay and require autonomous consumption.
 Run from this checkout: the adjacent local_context_compaction_smoke module is required.
 """
 
@@ -115,7 +116,7 @@ class Model(http.server.ThreadingHTTPServer):
             result = tool_result(body, "smoke-spawn")
             assert ("agent_id" if self.version == "v1" else "task_name") in result, result
             assert self.child_started.wait(TIMEOUT), "spawn did not request a child response"
-            if self.scenario in ("continue", "reuse"):
+            if self.scenario in ("continue", "reuse", "unsubscribe"):
                 return [assistant("Parent reply complete; child remains in progress.")], False
             arguments = {"timeout_ms": WAIT_MS}
             if self.version == "v1":
@@ -215,6 +216,7 @@ class Rpc(BaseRpc):
             "model": "fixture-model", "model_provider": "fixture",
             "model_context_window": 100000, "model_auto_compact_token_limit": 95000,
             "model_reasoning_effort": "low", "project_doc_max_bytes": 0,
+            "thread_unload_delay_secs": 1,
             "features.multi_agent": True,
             "features.multi_agent_v2.enabled": model.version == "v2",
             "features.multi_agent_v2.wait_agent_enabled": True,
@@ -306,6 +308,60 @@ class Rpc(BaseRpc):
         assert len(model.parents) == count, "parent made an unexpected model request"
         assert not model.errors, model.errors
 
+    def unsubscribe_held(self, model, thread_id, count, seconds):
+        result = self.request("thread/unsubscribe", {"threadId": thread_id})
+        assert result["status"] == "unsubscribed", result
+        # The child gate stays closed across the configured one-second unload delay.
+        self.idle(model, thread_id, count, max(2, seconds))
+
+    def consumed_unsubscribed(self, model, thread_id, previous_turn, count):
+        # No RPC or user submission may wake the parent before this fixture assertion.
+        # Model.respond sets the event only after checking the child result in input.
+        assert model.followup_started.wait(TIMEOUT), (
+            "unsubscribed parent never consumed child result"
+        )
+        assert len(model.parents) == count, (
+            "unexpected parent request count before reattachment"
+        )
+        state = self.request("thread/resume", {"threadId": thread_id})["thread"]
+        deadline = time.monotonic() + TIMEOUT
+        while True:
+            turns = state["turns"]
+            if turns and turns[-1]["id"] != previous_turn:
+                turn = turns[-1]
+                assert turn["status"] in ("inProgress", "completed"), turn
+                assert not turn.get("error"), turn
+                if turn["status"] == "completed":
+                    return turn["id"]
+            assert time.monotonic() < deadline, (
+                "autonomous parent turn did not complete"
+            )
+            time.sleep(0.05)
+            state = self.request(
+                "thread/read",
+                {
+                    "threadId": thread_id,
+                    "includeTurns": True,
+                },
+            )["thread"]
+
+    def unload_idle(self, model, thread_id, count):
+        result = self.request("thread/unsubscribe", {"threadId": thread_id})
+        assert result["status"] == "unsubscribed", result
+        deadline = time.monotonic() + TIMEOUT
+        while True:
+            state = self.request("thread/read", {"threadId": thread_id})["thread"]
+            assert len(model.parents) == count, (
+                "parent restarted after result consumption"
+            )
+            assert not model.errors, model.errors
+            if state["status"]["type"] == "notLoaded":
+                return
+            assert time.monotonic() < deadline, (
+                "idle parent stayed loaded after unsubscribe"
+            )
+            time.sleep(0.05)
+
     def close(self):
         try:
             try:
@@ -365,7 +421,7 @@ def run_case(binary, version, scenario, idle_seconds):
                 assert spawn["status"] == "completed", spawn
                 child = spawn["receiverThreadIds"][0]
             assert model.child_started.wait(TIMEOUT), "child request missing"
-            if scenario in ("continue", "reuse"):
+            if scenario in ("continue", "reuse", "unsubscribe"):
                 rpc.completed(parent, turn)
             else:
                 rpc.wait(lambda e: (
@@ -397,6 +453,9 @@ def run_case(binary, version, scenario, idle_seconds):
                 return {"version": version, "scenario": scenario, "status": "passed",
                         "parent_requests": count, "child_held_through_steering": True}
             model.followup_started.clear()
+            if scenario == "unsubscribe":
+                assert not model.child_sent.is_set()
+                rpc.unsubscribe_held(model, parent, count, idle_seconds)
             model.release_child.set()
             assert model.child_sent.wait(TIMEOUT), "child response was not delivered"
             if scenario == "interrupt":
@@ -414,9 +473,12 @@ def run_case(binary, version, scenario, idle_seconds):
                 rpc.wait(lambda e: e.get("method") == "turn/started"
                          and e["params"]["threadId"] == parent
                          and e["params"]["turn"]["id"] == turn)
+            elif scenario == "unsubscribe":
+                turn = rpc.consumed_unsubscribed(model, parent, turn, count + 1)
             else:
                 turn = rpc.continued(parent, turn)
-            rpc.completed(parent, turn)
+            if scenario != "unsubscribe":
+                rpc.completed(parent, turn)
             assert model.followup_started.is_set(), "parent never consumed child result"
             if scenario == "reuse":
                 assert len(model.parents) == 4, "parent did not submit the follow-up task"
@@ -438,15 +500,24 @@ def run_case(binary, version, scenario, idle_seconds):
                     child_turns.append(event["params"]["turn"]["id"])
                 assert child_turns[0] != child_turns[1], "child did not start a second turn"
                 assert model.reuse_started.is_set() and not model.reuse_sent.is_set()
-                rpc.idle(model, parent, 4, idle_seconds)
+                if version == "v1":
+                    rpc.unsubscribe_held(model, parent, 4, idle_seconds)
+                else:
+                    rpc.idle(model, parent, 4, idle_seconds)
                 model.followup_started.clear()
                 model.release_reuse.set()
                 assert model.reuse_sent.wait(TIMEOUT), "second child response was not delivered"
-                turn = rpc.continued(parent, turn)
-                rpc.completed(parent, turn)
+                if version == "v1":
+                    turn = rpc.consumed_unsubscribed(model, parent, turn, 5)
+                else:
+                    turn = rpc.continued(parent, turn)
+                    rpc.completed(parent, turn)
                 assert model.followup_started.is_set(), "parent never consumed second child result"
                 count = 4
-            rpc.idle(model, parent, count + 1 + model.resume_prelude, idle_seconds)
+            if scenario == "unsubscribe" or (scenario == "reuse" and version == "v1"):
+                rpc.unload_idle(model, parent, count + 1)
+            else:
+                rpc.idle(model, parent, count + 1 + model.resume_prelude, idle_seconds)
             return {"version": version, "scenario": scenario, "status": "passed",
                     "parent_requests": len(model.parents), "idle_seconds": idle_seconds}
         except Exception:
@@ -474,7 +545,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--codex", required=True, type=Path, help="absolute packaged binary path")
     parser.add_argument("--version", choices=("v1", "v2", "both"), default="both")
-    parser.add_argument("--scenario", choices=("continue", "reuse", "steer", "interrupt", "all"), default="all")
+    parser.add_argument("--scenario", choices=("continue", "reuse", "unsubscribe", "steer", "interrupt", "all"), default="all")
     parser.add_argument("--idle-seconds", type=float, default=2,
                         help="bounded observation window for unwanted restarts (default: 2)")
     args = parser.parse_args()
@@ -483,7 +554,7 @@ def main():
     if not 0 < args.idle_seconds <= 30:
         parser.error("--idle-seconds must be in (0, 30]")
     versions = ("v1", "v2") if args.version == "both" else (args.version,)
-    scenarios = ("continue", "reuse", "steer", "interrupt") if args.scenario == "all" else (args.scenario,)
+    scenarios = ("continue", "reuse", "unsubscribe", "steer", "interrupt") if args.scenario == "all" else (args.scenario,)
     for version in versions:
         for scenario in scenarios:
             print(json.dumps(run_case(args.codex, version, scenario, args.idle_seconds)), flush=True)

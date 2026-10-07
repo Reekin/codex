@@ -51,12 +51,8 @@ impl Drop for V2ResidencySlot {
 impl AgentControl {
     pub(crate) fn completion_parent_guard(
         &self,
-        multi_agent_version: MultiAgentVersion,
         session_source: &SessionSource,
     ) -> Option<Arc<()>> {
-        if multi_agent_version != MultiAgentVersion::V2 {
-            return None;
-        }
         let SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::ThreadSpawn {
             parent_thread_id,
             ..
@@ -68,6 +64,16 @@ impl AgentControl {
             self.v2_residency
                 .retain_completion_parent(*parent_thread_id),
         )
+    }
+
+    pub(crate) fn has_outstanding_child_completion(&self, thread_id: ThreadId) -> bool {
+        self.v2_residency
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .completion_parents
+            .get(&thread_id)
+            .is_some_and(|lease| lease.strong_count() > 0)
     }
 
     pub(super) async fn reserve_v2_residency_slot(
