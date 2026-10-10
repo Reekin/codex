@@ -192,8 +192,12 @@ contains only the intended protocol changes; line-ending churn in the working tr
 on commit.
 
 After static validation passes, merge into the integration branch and push it; the remote build is
-the compile gate. Real-path P0 acceptance then runs against the packaged binary from that build.
-Return compile failures reported by the remote build to the owning feature branch.
+the compile gate. It compiles every workspace test target alongside the release packages, because
+release builds leave test code out and a test that stops compiling would otherwise hide every unit
+test in its crate; publishing waits for both. Compiling is not running: a feature that changes
+behavior covered by unit or integration tests still needs those tests run on a remote validation
+branch before it is merged. Real-path P0 acceptance then runs against the packaged binary from that
+build. Return compile failures reported by the remote build to the owning feature branch.
 
 After implementation and real-path acceptance, use a fresh independent reviewer. Give it the
 feature contract, direct previous ref, migration diff, port brief, and evidence. Ask only for

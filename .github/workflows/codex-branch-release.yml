@@ -14,6 +14,40 @@ permissions:
   contents: read
 
 jobs:
+  test-compile:
+    if: github.repository == 'Reekin/codex' && startsWith(github.ref_name, 'integration-')
+    # Release builds skip test code, so a test that no longer compiles would otherwise ship unseen.
+    name: Compile tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        with:
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: test-compile-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: test-compile-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}-
+      - name: Install native dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - name: Compile every workspace test target
+        # The voice host needs GStreamer 1.28, newer than this runner ships.
+        run: cargo check --profile dev-small --workspace --exclude codex-voice-host --tests
+
   build:
     if: github.repository == 'Reekin/codex' && startsWith(github.ref_name, 'integration-')
     name: Build ${{ matrix.target }}
@@ -124,7 +158,7 @@ jobs:
           retention-days: 3
 
   publish:
-    needs: build
+    needs: [build, test-compile]
     name: Publish latest release
     runs-on: ubuntu-latest
     timeout-minutes: 15
