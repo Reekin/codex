@@ -1,8 +1,10 @@
 use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;
+use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -185,14 +187,33 @@ async fn child_result_continues_parent(
     let EventMsg::TurnStarted(started) = started else {
         unreachable!()
     };
-    let spawned = wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::CollabAgentSpawnEnd(_))
-    })
-    .await;
-    let EventMsg::CollabAgentSpawnEnd(spawned) = spawned else {
-        unreachable!()
+    let child_id = match version {
+        Version::V1 => {
+            let spawned = wait_for_event(&test.codex, |event| {
+                matches!(event, EventMsg::CollabAgentSpawnEnd(_))
+            })
+            .await;
+            let EventMsg::CollabAgentSpawnEnd(spawned) = spawned else {
+                unreachable!()
+            };
+            spawned.new_thread_id.expect("child spawned")
+        }
+        Version::V2 => {
+            let spawned = wait_for_event(&test.codex, |event| {
+                matches!(event, EventMsg::ItemCompleted(event)
+                    if matches!(&event.item, TurnItem::SubAgentActivity(item)
+                        if item.kind == SubAgentActivityKind::Started))
+            })
+            .await;
+            let EventMsg::ItemCompleted(spawned) = spawned else {
+                unreachable!()
+            };
+            let TurnItem::SubAgentActivity(spawned) = spawned.item else {
+                unreachable!()
+            };
+            spawned.agent_thread_id
+        }
     };
-    let child_id = spawned.new_thread_id.expect("child spawned");
     let child = test.thread_manager.get_thread(child_id).await?;
     timeout(Duration::from_secs(10), async {
         child_server.wait_for_request_count(1).await;
