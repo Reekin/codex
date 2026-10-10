@@ -1,4 +1,6 @@
 use anyhow::Result;
+use codex_core::CodexThread;
+use codex_core::TurnInputRequest;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_features::Feature;
@@ -10,6 +12,8 @@ use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_protocol::turn_input::TurnInputSubmission;
+use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -17,6 +21,7 @@ use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::test_codex;
@@ -25,6 +30,9 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::time::Duration;
 use test_case::test_case;
+use wiremock::Mock;
+use wiremock::matchers::method;
+use wiremock::matchers::path_regex;
 
 const FIRST_PROMPT: &str = "spawn the first worker";
 const FIRST_TASK: &str = "first worker task";
@@ -213,6 +221,33 @@ enum ResidencyReload {
     OwnerRevokesWorkspaceRoot,
 }
 
+async fn submit_residency_turn(thread: &CodexThread, prompt: &str) -> Result<()> {
+    let submission = thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: prompt.to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let turn_id = match submission {
+        TurnInputSubmission::Started { turn_id } | TurnInputSubmission::Steered { turn_id } => {
+            turn_id
+        }
+        TurnInputSubmission::NotSubmitted { reason } => anyhow::bail!("turn rejected: {reason:?}"),
+    };
+    wait_for_event(
+        thread,
+        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == turn_id),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while thread.has_pending_subagent_work().await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
 #[test_case(ResidencyReload::Sender; "sender preserves stricter child")]
 #[test_case(ResidencyReload::OwnerNarrowsPermissions; "owner narrows cached permissions")]
 #[test_case(ResidencyReload::OwnerPreservesStricterChild; "owner preserves stricter child")]
@@ -274,6 +309,48 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
                 .expect("thread permissions should allow workspace writes");
         });
     let test = builder.build_with_remote_and_local_env(&server).await?;
+    let root_thread_id = test.session_configured.thread_id;
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses$"))
+        .and(move |request: &wiremock::Request| {
+            let decoded = if request
+                .headers
+                .get("content-encoding")
+                .is_some_and(|value| value == "zstd")
+            {
+                zstd::stream::decode_all(std::io::Cursor::new(&request.body)).ok()
+            } else {
+                Some(request.body.clone())
+            };
+            decoded
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .is_some_and(|body| {
+                    body["client_metadata"]["thread_id"] == json!(root_thread_id)
+                        && body["input"].as_array().is_some_and(|items| {
+                            items
+                                .iter()
+                                .rev()
+                                .find(|item| item["type"] != "additional_tools")
+                                .is_some_and(|item| {
+                                    item["type"] == "agent_message"
+                                        && item["recipient"] == "/root"
+                                        && (item["author"] == "/root/first"
+                                            || item["author"] == "/root/replacement")
+                                        && item["content"]
+                                            .to_string()
+                                            .contains("Message Type: FINAL_ANSWER")
+                                })
+                        })
+                })
+        })
+        .respond_with(sse_response(sse(vec![
+            ev_response_created("resp-result-consumed"),
+            ev_assistant_message("msg-result-consumed", "worker result processed"),
+            ev_completed("resp-result-consumed"),
+        ])))
+        .with_priority(/*p*/ 10)
+        .mount(&server)
+        .await;
     let mut child_environment = test.executor_environment().selection().clone();
     let (child_permissions, parent_permissions) = match reload {
         ResidencyReload::Sender => (
@@ -362,7 +439,7 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
         },
     )
     .await?;
-    test.submit_text_turn(FIRST_PROMPT).await?;
+    submit_residency_turn(&test.codex, FIRST_PROMPT).await?;
     let first_thread_id = created_threads.recv().await?;
     let first_thread = test.thread_manager.get_thread(first_thread_id).await?;
     wait_for_event(first_thread.as_ref(), |event| {
@@ -392,7 +469,7 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
         )
         .await?;
     }
-    test.submit_text_turn(EVICT_PROMPT).await?;
+    submit_residency_turn(&test.codex, EVICT_PROMPT).await?;
     let replacement_thread_id = created_threads.recv().await?;
     let replacement_thread = test
         .thread_manager
@@ -465,7 +542,7 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
             PermissionProfileSnapshot::legacy(PermissionProfile::read_only());
     }
 
-    test.submit_text_turn(FOLLOWUP_PROMPT).await?;
+    submit_residency_turn(&test.codex, FOLLOWUP_PROMPT).await?;
     let reloaded_worker = test.thread_manager.get_thread(first_thread_id).await?;
     wait_for_event(reloaded_worker.as_ref(), |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -490,7 +567,9 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
             .into_iter()
             .find_map(|request| {
                 let body = request.body_json();
-                if body["client_metadata"]["thread_id"] != json!(first_thread_id) {
+                if body["client_metadata"]["thread_id"] != json!(first_thread_id)
+                    || !request.body_contains_text(FOLLOWUP_TASK)
+                {
                     return None;
                 }
                 body.get("tools")

@@ -1,4 +1,6 @@
+use anyhow::Context;
 use anyhow::Result;
+use codex_core::CodexThread;
 use codex_core::TurnInputRequest;
 use codex_core::config::AgentRoleConfig;
 use codex_features::Feature;
@@ -7,6 +9,7 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::turn_input::TurnInputSubmission;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::assert_parent_turn;
 use core_test_support::responses::assert_root_turn;
@@ -14,9 +17,9 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
-use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -26,6 +29,9 @@ use serde_json::json;
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
+use wiremock::Mock;
+use wiremock::matchers::method;
+use wiremock::matchers::path_regex;
 
 const COLLABORATION_NAMESPACE: &str = "collaboration";
 const SPAWN_CALL_ID: &str = "spawn-worker";
@@ -92,6 +98,41 @@ fn request_has_input_type(request: &wiremock::Request, input_type: &str) -> bool
                 .iter()
                 .any(|item| item.get("type").and_then(Value::as_str) == Some(input_type))
         })
+}
+
+async fn submit_durable_root_turn(thread: &CodexThread, prompt: &str) -> Result<String> {
+    let submission = thread
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: prompt.to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                permission_profile: Some(PermissionProfile::Disabled),
+                ..Default::default()
+            }),
+        )
+        .await
+        .with_context(|| format!("submit durable-root prompt: {prompt}"))?;
+    let turn_id = match submission {
+        TurnInputSubmission::Started { turn_id } | TurnInputSubmission::Steered { turn_id } => {
+            turn_id
+        }
+        TurnInputSubmission::NotSubmitted { reason } => anyhow::bail!("turn rejected: {reason:?}"),
+    };
+    wait_for_event(
+        thread,
+        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == turn_id),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while thread.has_pending_subagent_work().await {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("settle child results after durable-root prompt: {prompt}"))?;
+    Ok(turn_id)
 }
 
 async fn mount_root_collaboration_call(
@@ -214,7 +255,10 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
                 && request_has_input_type(request, "agent_message")
                 && !body_contains(request, NESTED_CALL_ID)
         },
-        sse(vec![ev_completed("resp-parent-turn-assistant")]),
+        sse(vec![
+            ev_assistant_message("msg-grandchild", "nested work complete"),
+            ev_completed("resp-grandchild"),
+        ]),
     )
     .await;
     for (text, is_subagent) in [(NESTED_CALL_ID, true), (QUEUE_CALL_ID, false)] {
@@ -224,7 +268,10 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
                 body_contains(request, text)
                     && request_has_input_type(request, "agent_message") == is_subagent
             },
-            sse(vec![ev_completed("resp-parent-turn-assistant")]),
+            sse(vec![
+                ev_assistant_message("msg-tool-followup", "task complete"),
+                ev_completed("resp-parent-turn-assistant"),
+            ]),
         )
         .await;
     }
@@ -245,25 +292,49 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     let mut initial_builder = test_codex().with_config(move |config| {
         configure_multi_agent_v2_with_role(config, &initial_model_provider_base_url);
     });
-    let initial = initial_builder.build_with_auto_env(&server).await?;
+    let initial = initial_builder
+        .build_with_auto_env(&server)
+        .await
+        .context("build initial durable-root fixture")?;
     let root_thread_id = initial.session_configured.thread_id;
-    initial
-        .codex
-        .start_or_steer_turn(
-            TurnInputRequest::user_input(vec![UserInput::Text {
-                text: INITIAL_PROMPT.to_string(),
-                text_elements: Vec::new(),
-            }])
-            .with_thread_settings(ThreadSettingsOverrides {
-                permission_profile: Some(PermissionProfile::Disabled),
-                ..Default::default()
-            }),
-        )
-        .await?;
-    wait_for_event(&initial.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses$"))
+        .and(move |request: &wiremock::Request| {
+            decoded_body(request)
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                .is_some_and(|body| {
+                    body["input"].as_array().is_some_and(|items| {
+                        items
+                            .iter()
+                            .rev()
+                            .find(|item| item["type"] != "additional_tools")
+                            .is_some_and(|item| {
+                                item["type"] == "agent_message"
+                                    && item["content"]
+                                        .to_string()
+                                        .contains("Message Type: FINAL_ANSWER")
+                                    && ((item["recipient"] == "/root"
+                                        && (item["author"] == "/root/worker"
+                                            || item["author"] == "/root/survivor")
+                                        && body["client_metadata"]["thread_id"]
+                                            == json!(root_thread_id))
+                                        || (item["recipient"] == "/root/worker"
+                                            && item["author"] == "/root/worker/grandchild"
+                                            && body["client_metadata"]["x-codex-parent-thread-id"]
+                                                == json!(root_thread_id)))
+                            })
+                    })
+                })
+        })
+        .respond_with(sse_response(sse(vec![
+            ev_response_created("resp-result-consumed"),
+            ev_assistant_message("msg-result-consumed", "child result processed"),
+            ev_completed("resp-result-consumed"),
+        ])))
+        .with_priority(/*p*/ 10)
+        .mount(&server)
+        .await;
+    submit_durable_root_turn(&initial.codex, INITIAL_PROMPT).await?;
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let worker_thread_id = loop {
@@ -287,13 +358,18 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         }
         sleep(Duration::from_millis(10)).await;
     };
-    let worker_thread = initial.thread_manager.get_thread(worker_thread_id).await?;
+    let worker_thread = initial
+        .thread_manager
+        .get_thread(worker_thread_id)
+        .await
+        .with_context(|| format!("inspect initial worker {worker_thread_id}"))?;
     wait_for_event(worker_thread.as_ref(), |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
     assert!(initial_child_request.requests().iter().any(|request| {
-        request.body_contains_text(INITIAL_TASK)
+        request.body_json()["client_metadata"]["thread_id"] == json!(worker_thread_id)
+            && request.body_contains_text(INITIAL_TASK)
             && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
             && request.body_contains_text("<permission_profile type=\"disabled\">")
             && !request.body_contains_text(SUBAGENT_DEVELOPER_INSTRUCTIONS)
@@ -319,6 +395,10 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
             PermissionProfile::Disabled,
         )
     );
+    worker_thread
+        .flush_rollout()
+        .await
+        .context("flush initial worker before sibling spawn")?;
 
     let sibling_spawn_args = serde_json::to_string(&json!({
         "message": SIBLING_TASK,
@@ -348,9 +428,19 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         ]),
     )
     .await;
-    initial.submit_turn(SIBLING_PROMPT).await?;
+    submit_durable_root_turn(&initial.codex, SIBLING_PROMPT).await?;
 
-    let grandchild = nested_mock.last_request().expect("grandchild").body_json();
+    let grandchild = nested_mock
+        .requests()
+        .into_iter()
+        .find_map(|request| {
+            let body = request.body_json();
+            (body["client_metadata"]["x-codex-parent-thread-id"] == json!(worker_thread_id)
+                && request.body_contains_text(NESTED_TASK)
+                && !request.body_contains_text(NESTED_CALL_ID))
+            .then_some(body)
+        })
+        .expect("grandchild request");
     let nested_id = &grandchild["client_metadata"]["thread_id"];
     let sibling_thread_id = initial
         .thread_manager
@@ -359,16 +449,45 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         .into_iter()
         .find(|id| ![root_thread_id, worker_thread_id].contains(id) && &json!(id) != nested_id)
         .ok_or_else(|| anyhow::anyhow!("spawned sibling should be registered"))?;
-    let sibling_thread = initial.thread_manager.get_thread(sibling_thread_id).await?;
+    let sibling_thread = initial
+        .thread_manager
+        .get_thread(sibling_thread_id)
+        .await
+        .with_context(|| format!("inspect initial sibling {sibling_thread_id}"))?;
     wait_for_event(sibling_thread.as_ref(), |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-    sibling_thread.flush_rollout().await?;
-    worker_thread.flush_rollout().await?;
-    initial.codex.flush_rollout().await?;
-    sibling_thread.shutdown_and_wait().await?;
-    worker_thread.shutdown_and_wait().await?;
+    sibling_thread
+        .flush_rollout()
+        .await
+        .context("flush initial sibling")?;
+    let worker_is_resident = initial
+        .thread_manager
+        .list_thread_ids()
+        .await
+        .contains(&worker_thread_id);
+    if worker_is_resident {
+        worker_thread
+            .flush_rollout()
+            .await
+            .context("flush initial worker")?;
+    }
+    initial
+        .codex
+        .flush_rollout()
+        .await
+        .context("flush initial root")?;
+    sibling_thread
+        .shutdown_and_wait()
+        .await
+        .context("shutdown initial sibling")?;
+    if worker_is_resident {
+        worker_thread
+            .shutdown_and_wait()
+            .await
+            .context("shutdown initial worker")?;
+    }
     drop(sibling_thread);
     drop(worker_thread);
 
@@ -423,7 +542,10 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     let mut resume_builder = test_codex().with_config(move |config| {
         configure_multi_agent_v2_with_role(config, &resumed_model_provider_base_url);
     });
-    let resumed = resume_builder.restart(&server, &initial).await?;
+    let resumed = resume_builder
+        .restart(&server, &initial)
+        .await
+        .with_context(|| format!("cold restart root {root_thread_id}"))?;
     drop(initial);
     assert_eq!(
         resumed.thread_manager.list_thread_ids().await,
@@ -459,10 +581,15 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         ]),
     )
     .await;
-    resumed.codex.submit(Op::Compact).await?;
-    wait_for_event(&resumed.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
+    let compact_turn_id = resumed
+        .codex
+        .submit(Op::Compact)
+        .await
+        .context("submit cold-root compaction")?;
+    wait_for_event(
+        &resumed.codex,
+        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == compact_turn_id),
+    )
     .await;
 
     let redirected_server = start_mock_server().await;
@@ -494,7 +621,7 @@ openai_base_url = "{redirected_base_url}"
         ]),
     )
     .await;
-    resumed.submit_turn(QUEUE_PROMPT).await?;
+    submit_durable_root_turn(&resumed.codex, QUEUE_PROMPT).await?;
 
     let reloaded_worker = resumed
         .thread_manager
@@ -506,20 +633,22 @@ openai_base_url = "{redirected_base_url}"
         resumed.codex.config().await.model_provider,
         "cold reload must preserve the parent's complete model provider",
     );
-    resumed.submit_turn(FOLLOWUP_PROMPT).await?;
+    submit_durable_root_turn(&resumed.codex, FOLLOWUP_PROMPT).await?;
     wait_for_event(reloaded_worker.as_ref(), |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
     assert!(followup_child_request.requests().iter().any(|request| {
-        request.body_contains_text(FOLLOWUP_TASK)
+        request.body_json()["client_metadata"]["thread_id"] == json!(worker_thread_id)
+            && request.body_contains_text(FOLLOWUP_TASK)
             && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
             && request.body_contains_text("<permission_profile type=\"disabled\">")
             && !request.body_contains_text(SUBAGENT_DEVELOPER_INSTRUCTIONS)
     }));
     // The worker is loaded again, while its alphabetically earlier sibling remains unloaded.
-    mount_sse_once(
+    mount_sse_once_match(
         &server,
+        |request: &wiremock::Request| request_has_input_type(request, "compaction_trigger"),
         sse(vec![
             json!({
                 "type": "response.output_item.done",
@@ -529,15 +658,47 @@ openai_base_url = "{redirected_base_url}"
         ]),
     )
     .await;
-    resumed.codex.submit(Op::Compact).await?;
-    wait_for_event(&resumed.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
+    let compact_turn_id = resumed
+        .codex
+        .submit(Op::Compact)
+        .await
+        .context("submit loaded-worker roster compaction")?;
+    wait_for_event(
+        &resumed.codex,
+        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == compact_turn_id),
+    )
     .await;
-    let roster_request =
-        mount_sse_once(&server, sse(vec![ev_completed("resp-loaded-first-roster")])).await;
-    resumed.submit_turn("inspect the agent roster").await?;
-    assert!(roster_request.single_request().body_contains_text(
+    let roster_request = mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| {
+            body_contains(request, "inspect the agent roster")
+                && decoded_body(request)
+                    .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                    .is_some_and(|body| {
+                        body["client_metadata"]["thread_id"] == json!(root_thread_id)
+                    })
+        },
+        sse(vec![
+            ev_assistant_message("msg-roster", "roster inspected"),
+            ev_completed("resp-loaded-first-roster"),
+        ]),
+    )
+    .await;
+    let roster_turn_id =
+        submit_durable_root_turn(&resumed.codex, "inspect the agent roster").await?;
+    let roster_requests = roster_request
+        .requests()
+        .into_iter()
+        .filter(|request| {
+            let body = request.body_json();
+            body["client_metadata"]["thread_id"] == json!(root_thread_id)
+                && body["client_metadata"]["turn_id"] == roster_turn_id
+                && request.body_contains_text("inspect the agent roster")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(roster_requests.len(), 1);
+    let roster_request = &roster_requests[0];
+    assert!(roster_request.body_contains_text(
         r#"<subagents>
     <agent name="/root/worker" />
     <agent name="/root/survivor" />
@@ -630,7 +791,10 @@ openai_base_url = "{redirected_base_url}"
     );
     assert_eq!(reloaded_worker_role_config, initial_worker_role_config);
 
-    reloaded_worker.shutdown_and_wait().await?;
+    reloaded_worker
+        .shutdown_and_wait()
+        .await
+        .context("shutdown reloaded worker before interrupt")?;
     assert!(
         resumed
             .thread_manager
@@ -650,7 +814,7 @@ openai_base_url = "{redirected_base_url}"
         &interrupt_args,
     )
     .await;
-    resumed.submit_turn(INTERRUPT_PROMPT).await?;
+    submit_durable_root_turn(&resumed.codex, INTERRUPT_PROMPT).await?;
     assert!(
         resumed
             .thread_manager
@@ -685,7 +849,7 @@ openai_base_url = "{redirected_base_url}"
         ]),
     )
     .await;
-    resumed.submit_turn(SIBLING_FOLLOWUP_PROMPT).await?;
+    submit_durable_root_turn(&resumed.codex, SIBLING_FOLLOWUP_PROMPT).await?;
 
     let surviving_sibling = resumed
         .thread_manager
@@ -697,7 +861,8 @@ openai_base_url = "{redirected_base_url}"
     })
     .await;
     assert!(sibling_followup_request.requests().iter().any(|request| {
-        request.body_contains_text(SIBLING_FOLLOWUP_TASK)
+        request.body_json()["client_metadata"]["thread_id"] == json!(sibling_thread_id)
+            && request.body_contains_text(SIBLING_FOLLOWUP_TASK)
             && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
     }));
     assert!(

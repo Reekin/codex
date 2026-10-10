@@ -1807,6 +1807,8 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
     // Production spawn_agent calls happen after the parent turn has resolved
     // and stored its runtime; mirror that before using the synthetic handler.
     root.thread.session.new_default_turn().await;
+    // Keep results queued so this routing fixture does not start synthetic model turns.
+    root.thread.session.mark_interrupted();
     session.services.agent_control = manager.agent_control();
     session.thread_id = root.thread_id;
     let session = Arc::new(session);
@@ -1853,6 +1855,31 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         )
         .await;
 
+    let first_notification = format_inter_agent_completion_message(
+        AgentPath::root(),
+        worker_path.clone(),
+        &AgentStatus::Completed(Some("first done".to_string())),
+    )
+    .expect("completed status should render");
+    let (first_results, _) = root
+        .thread
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    assert_eq!(
+        first_results,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            InterAgentCommunication::new(
+                worker_path.clone(),
+                AgentPath::root(),
+                Vec::new(),
+                first_notification,
+                /*trigger_turn*/ false,
+            ),
+        )]
+    );
+
     FollowupTaskHandlerV2
         .handle(invocation(
             session,
@@ -1895,12 +1922,6 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         )
         .await;
 
-    let first_notification = format_inter_agent_completion_message(
-        AgentPath::root(),
-        worker_path.clone(),
-        &AgentStatus::Completed(Some("first done".to_string())),
-    )
-    .expect("completed status should render");
     let second_notification = format_inter_agent_completion_message(
         AgentPath::root(),
         worker_path.clone(),
@@ -1908,45 +1929,24 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
     )
     .expect("completed status should render");
 
-    let notifications = timeout(Duration::from_secs(5), async {
-        loop {
-            let notifications = manager
-                .captured_ops()
-                .into_iter()
-                .filter_map(|(id, op)| {
-                    (id == root.thread_id)
-                        .then_some(op)
-                        .and_then(|op| match op {
-                            Op::InterAgentCommunication { communication, .. }
-                                if communication.author == worker_path
-                                    && communication.recipient == AgentPath::root()
-                                    && communication.other_recipients.is_empty()
-                                    && !communication.trigger_turn =>
-                            {
-                                Some(communication.content)
-                            }
-                            _ => None,
-                        })
-                })
-                .collect::<Vec<_>>();
-            let first_count = notifications
-                .iter()
-                .filter(|message| **message == first_notification)
-                .count();
-            let second_count = notifications
-                .iter()
-                .filter(|message| **message == second_notification)
-                .count();
-            if first_count == 1 && second_count == 1 {
-                break notifications;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("parent should receive one completion notification per child turn");
-
-    assert_eq!(notifications.len(), 2);
+    let (second_results, _) = root
+        .thread
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    assert_eq!(
+        second_results,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            InterAgentCommunication::new(
+                worker_path,
+                AgentPath::root(),
+                Vec::new(),
+                second_notification,
+                /*trigger_turn*/ false,
+            ),
+        )]
+    );
 }
 
 #[tokio::test]
