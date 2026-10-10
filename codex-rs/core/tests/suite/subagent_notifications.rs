@@ -1317,6 +1317,9 @@ async fn grandchild_full_fork_preserves_context_baseline(
                 config.compact_prompt = Some(COMPACT_PROMPT.to_string());
                 config.model_auto_compact_token_limit = Some(200_000);
                 config.model_context_window = Some(1_000_000);
+                // Local full compaction keeps a current window that fits verbatim; a tiny
+                // target makes it summarize the forked history this test checks.
+                config.local_compaction.compact_target_percent = 1;
             }
         })
         .build_with_auto_env(&server)
