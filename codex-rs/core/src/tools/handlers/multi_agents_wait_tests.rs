@@ -5,6 +5,7 @@ use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskResult;
 use futures::FutureExt;
+use pretty_assertions::assert_eq;
 use test_case::test_case;
 
 struct HeldTask;
@@ -87,10 +88,19 @@ async fn wait_agent_returns_on_steer_without_stopping_child(timing: SteerTiming)
         .session
         .spawn_task(child_turn, Vec::new(), HeldTask)
         .await;
-    core_test_support::wait_for_event(&child.thread, |event| {
-        matches!(event, EventMsg::TurnStarted(_))
+    timeout(Duration::from_secs(5), async {
+        while !matches!(
+            child
+                .thread
+                .next_event()
+                .await
+                .expect("event stream should stay open")
+                .msg,
+            EventMsg::TurnStarted(_)
+        ) {}
     })
-    .await;
+    .await
+    .expect("held child turn should start");
     let child_status = manager.agent_control().get_status(child.thread_id).await;
     assert_eq!(child_status, AgentStatus::Running);
     let session = Arc::new(session);
