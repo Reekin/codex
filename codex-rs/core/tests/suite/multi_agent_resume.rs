@@ -320,12 +320,12 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
                     })
                 })
         })
-        .with_priority(10)
         .respond_with(sse_response(sse(vec![
             ev_response_created("resp-result-consumed"),
             ev_assistant_message("msg-result-consumed", "child result processed"),
             ev_completed("resp-result-consumed"),
         ])))
+        .with_priority(/*p*/ 10)
         .mount(&server)
         .await;
     submit_durable_root_turn(&initial.codex, INITIAL_PROMPT).await?;
