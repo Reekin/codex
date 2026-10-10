@@ -117,6 +117,22 @@ fn request_has_input_type(req: &wiremock::Request, ty: &str) -> bool {
         })
 }
 
+fn subagent_notifications_in_request_input(body: &Value) -> Vec<Value> {
+    body["input"]
+        .as_array()
+        .expect("input array")
+        .iter()
+        .filter_map(|item| item["content"].as_array())
+        .flatten()
+        .filter_map(|content| content["text"].as_str())
+        .flat_map(|text| text.split("<subagent_notification>").skip(1))
+        .map(|text| {
+            serde_json::from_str(text.split_once("</subagent_notification>").unwrap().0)
+                .expect("notification JSON")
+        })
+        .collect()
+}
+
 fn decoded_body(req: &wiremock::Request) -> Option<Vec<u8>> {
     let is_zstd = req
         .headers
@@ -841,24 +857,10 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         .and(move |req: &wiremock::Request| {
             let body: Value = serde_json::from_slice(&decoded_body(req).expect("decoded body"))
                 .expect("request JSON");
-            if body["client_metadata"]["thread_id"] != json!(root_id)
-                || !body_contains(req, "<subagent_notification>")
-            {
+            let notifications = subagent_notifications_in_request_input(&body);
+            if body["client_metadata"]["thread_id"] != json!(root_id) || notifications.is_empty() {
                 return false;
             }
-            let notifications: Vec<Value> = body["input"]
-                .as_array()
-                .expect("input array")
-                .iter()
-                .filter_map(|item| item["content"].as_array())
-                .flatten()
-                .filter_map(|content| content["text"].as_str())
-                .flat_map(|text| text.split("<subagent_notification>").skip(1))
-                .map(|text| {
-                    serde_json::from_str(text.split_once("</subagent_notification>").unwrap().0)
-                        .expect("notification JSON")
-                })
-                .collect();
             assert_eq!(notifications.len(), 1);
             assert_eq!(
                 notifications[0]["status"],
@@ -886,6 +888,11 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
 
     let (root_sandbox_policy, root_permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, test.cwd_path());
+    let phase_request_offset = server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .len();
     test.codex
         .start_or_steer_turn(
             TurnInputRequest::user_input(vec![UserInput::Text {
@@ -910,7 +917,61 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         *parent_results.lock().unwrap(),
         vec![json!({"agent_path": child_id, "status": {"completed": "child done final"}})]
     );
+    timeout(Duration::from_secs(5), async {
+        while test.codex.has_pending_subagent_work().await {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("root should finish consuming child work");
+    let settled_requests = server.received_requests().await.expect("recorded requests");
+    let _ = timeout(Duration::from_millis(200), async {
+        loop {
+            let event = test.codex.next_event().await.expect("root event");
+            assert!(
+                !matches!(&event.msg, EventMsg::TurnStarted(_) | EventMsg::Error(_)),
+                "root must remain settled before the internal Review turn: {event:?}"
+            );
+        }
+    })
+    .await;
+    assert!(!test.codex.has_pending_subagent_work().await);
     let requests_before_internal = server.received_requests().await.expect("recorded requests");
+    let root_request_count = |requests: &[wiremock::Request]| {
+        requests
+            .iter()
+            .filter(|req| req.method == "POST")
+            .map(|req| serde_json::from_slice(&decoded_body(req).expect("decoded body")).unwrap())
+            .filter(|body: &Value| body["client_metadata"]["thread_id"] == json!(root_id))
+            .count()
+    };
+    assert_eq!(
+        root_request_count(&requests_before_internal),
+        root_request_count(&settled_requests)
+    );
+    let expected_notification =
+        json!({"agent_path": child_id, "status": {"completed": "child done final"}});
+    // One-shot response caps do not limit the actual request log. A second processing request
+    // must fail even if another fixture supplies a successful parent response.
+    let processing_requests: Vec<Value> = requests_before_internal
+        .iter()
+        .skip(phase_request_offset)
+        .filter(|req| req.method == "POST")
+        .map(|req| serde_json::from_slice(&decoded_body(req).expect("decoded body")).unwrap())
+        .filter(|body: &Value| body["client_metadata"]["thread_id"] == json!(root_id))
+        .filter(|body| {
+            subagent_notifications_in_request_input(body).contains(&expected_notification)
+        })
+        .collect();
+    assert_eq!(
+        processing_requests.len(),
+        1,
+        "root processing requests: {processing_requests:#?}"
+    );
+    assert_eq!(
+        subagent_notifications_in_request_input(&processing_requests[0]),
+        vec![expected_notification]
+    );
     let child_requests: Vec<Value> = requests_before_internal
         .iter()
         .filter(|req| req.method == "POST")

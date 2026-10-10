@@ -26,9 +26,10 @@ use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::time::Duration;
 use test_case::test_case;
+use tokio::time::sleep;
+use tokio::time::timeout;
 
 const ROOT_PROMPT: &str = "spawn the service-tier worker";
 const CHILD_PROMPT: &str = "pause the service-tier worker";
@@ -101,18 +102,31 @@ fn input_texts(body: &Value) -> Vec<&str> {
         .collect()
 }
 
+struct ParentResultFixture {
+    root_id: ThreadId,
+    request_offset: usize,
+    expected: String,
+}
+
 async fn mount_parent_result(
     server: &wiremock::MockServer,
     root_id: ThreadId,
     sender: &str,
     payload: &str,
     acknowledgement: &'static str,
-) -> Arc<Mutex<Vec<Value>>> {
+) -> ParentResultFixture {
     let expected = format!(
         "Message Type: FINAL_ANSWER\nTask name: /root\nSender: {sender}\nPayload:\n{payload}"
     );
-    let requests = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&requests);
+    let fixture = ParentResultFixture {
+        root_id,
+        request_offset: server
+            .received_requests()
+            .await
+            .expect("recorded requests")
+            .len(),
+        expected: expected.clone(),
+    };
     wiremock::Mock::given(wiremock::matchers::method("POST"))
         .and(wiremock::matchers::path("/v1/responses"))
         .and(move |request: &wiremock::Request| {
@@ -130,7 +144,6 @@ async fn mount_parent_result(
                 vec![expected.as_str()],
                 "parent should consume this completion once"
             );
-            captured.lock().expect("result log should lock").push(body);
             true
         })
         .respond_with(sse_response(sse(vec![
@@ -143,12 +156,13 @@ async fn mount_parent_result(
         .expect(1)
         .mount(server)
         .await;
-    requests
+    fixture
 }
 
 async fn assert_parent_result(
+    server: &wiremock::MockServer,
     root: &codex_core::CodexThread,
-    requests: &Arc<Mutex<Vec<Value>>>,
+    fixture: &ParentResultFixture,
     acknowledgement: &str,
     expected_tier: Option<&str>,
 ) {
@@ -157,9 +171,65 @@ async fn assert_parent_result(
             if completed.last_agent_message.as_deref() == Some(acknowledgement))
     })
     .await;
-    let requests = requests.lock().expect("result log should lock");
-    assert_eq!(requests.len(), 1);
-    assert_eq!(requests[0]["service_tier"].as_str(), expected_tier);
+    timeout(Duration::from_secs(5), async {
+        while root.has_pending_subagent_work().await {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("root should finish consuming child work");
+
+    let settled_requests = server.received_requests().await.expect("recorded requests");
+    let _ = timeout(Duration::from_millis(200), async {
+        loop {
+            let event = root.next_event().await.expect("root event");
+            assert!(
+                !matches!(&event.msg, EventMsg::TurnStarted(_) | EventMsg::Error(_)),
+                "root must remain settled after processing a child result: {event:?}"
+            );
+        }
+    })
+    .await;
+    assert!(!root.has_pending_subagent_work().await);
+    let requests = server.received_requests().await.expect("recorded requests");
+    let root_request_count = |requests: &[wiremock::Request]| {
+        requests
+            .iter()
+            .filter(|request| request.method == "POST")
+            .map(request_body)
+            .filter(|body| body["client_metadata"]["thread_id"] == json!(fixture.root_id))
+            .count()
+    };
+    assert_eq!(
+        root_request_count(&requests),
+        root_request_count(&settled_requests)
+    );
+    // The stage boundary excludes older results in later user turns. Inspect the server log,
+    // not the capped matcher: even a leftover spawn response must not hide a duplicate request.
+    let processing_requests: Vec<_> = requests
+        .iter()
+        .skip(fixture.request_offset)
+        .filter(|request| request.method == "POST")
+        .map(request_body)
+        .filter(|body| body["client_metadata"]["thread_id"] == json!(fixture.root_id))
+        .filter(|body| input_texts(body).contains(&fixture.expected.as_str()))
+        .collect();
+    assert_eq!(
+        processing_requests.len(),
+        1,
+        "root processing requests: {processing_requests:#?}"
+    );
+    assert_eq!(
+        input_texts(&processing_requests[0])
+            .into_iter()
+            .filter(|text| *text == fixture.expected)
+            .collect::<Vec<_>>(),
+        vec![fixture.expected.as_str()]
+    );
+    assert_eq!(
+        processing_requests[0]["service_tier"].as_str(),
+        expected_tier
+    );
 }
 
 fn configure_priority_role(config: &mut Config) {
@@ -376,6 +446,7 @@ async fn root_service_tier_change_updates_existing_subagent(
     wait_for_turn_complete(&child).await;
     assert_request_service_tier(&server, child_thread_id, 2, updated_request_service_tier).await;
     assert_parent_result(
+        &server,
         &test.codex,
         &continued_parent,
         "root handled continued child",
@@ -411,6 +482,7 @@ async fn root_service_tier_change_updates_existing_subagent(
     wait_for_turn_complete(&child).await;
     assert_request_service_tier(&server, child_thread_id, 3, updated_request_service_tier).await;
     assert_parent_result(
+        &server,
         &test.codex,
         &compacted_parent,
         "root handled compacted child",
@@ -436,6 +508,7 @@ async fn root_service_tier_change_updates_existing_subagent(
     wait_for_turn_complete(&child).await;
     assert_request_service_tier(&server, child_thread_id, 4, updated_request_service_tier).await;
     assert_parent_result(
+        &server,
         &test.codex,
         &future_parent,
         "root handled future child",
@@ -477,6 +550,7 @@ async fn root_service_tier_change_updates_existing_subagent(
     wait_for_turn_complete(&fresh_thread).await;
     assert_request_service_tier(&server, fresh_thread_id, 1, updated_request_service_tier).await;
     assert_parent_result(
+        &server,
         &test.codex,
         &fresh_parent,
         "root handled fresh child",
@@ -527,6 +601,7 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
     wait_for_turn_complete(&original_thread).await;
     assert_request_service_tier(&server, original_thread_id, 1, Some("priority")).await;
     assert_parent_result(
+        &server,
         &test.codex,
         &original_parent,
         "root handled original child",
@@ -571,6 +646,7 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
     wait_for_turn_complete(&replacement_thread).await;
     assert_request_service_tier(&server, replacement_thread_id, 1, Some("priority")).await;
     assert_parent_result(
+        &server,
         &test.codex,
         &replacement_parent,
         "root handled replacement child",
@@ -626,6 +702,7 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
     wait_for_turn_complete(&reloaded_thread).await;
     assert_request_service_tier(&server, original_thread_id, 2, /*expected*/ None).await;
     assert_parent_result(
+        &server,
         &test.codex,
         &reloaded_parent,
         "root handled reloaded child",
