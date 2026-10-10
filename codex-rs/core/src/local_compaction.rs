@@ -518,8 +518,9 @@ pub(crate) async fn run_pipeline(
     replacement.extend(summary);
     replacement.extend(plan.kept_input.map(|index| source[index].clone()));
     // The cleaned current window stays verbatim and is summarized by the next compaction.
-    for (mut item, dropped) in applied.into_iter().zip(dropped).skip(plan.cut) {
-        if !dropped {
+    for (index, (mut item, dropped)) in applied.into_iter().zip(dropped).enumerate().skip(plan.cut)
+    {
+        if !dropped && !plan.superseded.contains(&index) {
             item.metadata.get_or_insert_default().previous_window = true;
             replacement.push(item);
         }

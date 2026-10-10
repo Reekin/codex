@@ -73,6 +73,7 @@ fn first_window_within_budget_stays_verbatim_without_a_summary() {
         WindowPlan {
             cut: 0,
             kept_instructions: Vec::new(),
+            superseded: Vec::new(),
             kept_input: None,
             summarized: None,
             projected_tokens: 50,
@@ -99,6 +100,7 @@ fn earlier_summary_and_previous_window_are_summarized_and_the_current_window_kep
         WindowPlan {
             cut: 6,
             kept_instructions: vec![0],
+            superseded: Vec::new(),
             kept_input: None,
             summarized: range("origin_1", "reply_1"),
             projected_tokens: 10 + 30 + 50,
@@ -124,6 +126,7 @@ fn an_oversized_window_summarizes_its_oldest_part_but_keeps_the_active_input() {
         WindowPlan {
             cut: 3,
             kept_instructions: Vec::new(),
+            superseded: Vec::new(),
             kept_input: Some(0),
             summarized: range("call_a", "out_a"),
             projected_tokens: 10 + 1_030 + 50,
@@ -164,4 +167,55 @@ fn repeated_compaction_keeps_history_bounded() {
             history.len()
         );
     }
+}
+
+#[test]
+fn only_the_newest_copy_of_each_instruction_is_kept() {
+    let typed = |id: &str, text: &str| {
+        item(json!({"type":"message", "id":id, "role":"user",
+            "content":[{"type":"input_text", "text":text}],
+            "internal_chat_message_metadata_passthrough":{"content_item_kinds":["agents_md.instructions"]}}))
+    };
+    let untyped = |id: &str, text: &str| {
+        item(json!({"type":"message", "id":id, "role":"developer",
+            "content":[{"type":"input_text", "text":text}],
+            "internal_chat_message_metadata_passthrough":{"content_item_kinds":["unknown"]}}))
+    };
+    let items = vec![
+        typed("agents_1", "First rules."),
+        untyped("session_1", "Session A."),
+        message("user_1", "user", "Investigate."),
+        untyped("session_2", "Session A."),
+        untyped("session_b", "Session B."),
+        typed("agents_2", "Updated rules."),
+        message("user_2", "user", "Continue."),
+        call("a"),
+        output("a"),
+    ];
+    // Superseded copies cost nothing, wherever the cut falls.
+    let plan = WindowPlan::new(&items, &[100; 9], 1_000, 50).unwrap();
+    assert_eq!(
+        plan,
+        WindowPlan {
+            cut: 0,
+            kept_instructions: Vec::new(),
+            superseded: vec![0, 1],
+            kept_input: None,
+            summarized: None,
+            projected_tokens: 700,
+        }
+    );
+    // Older copies ahead of the cut are neither kept nor summarized.
+    let plan = WindowPlan::new(&items, &[100; 9], 650, 50).unwrap();
+    assert_eq!(
+        plan,
+        WindowPlan {
+            cut: 3,
+            kept_instructions: Vec::new(),
+            superseded: vec![0, 1],
+            kept_input: None,
+            summarized: range("user_1", "user_1"),
+            projected_tokens: 600 + 50,
+        }
+    );
 }

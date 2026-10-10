@@ -7,6 +7,7 @@ use crate::groups::is_user_direction;
 use crate::groups::pinned;
 use crate::groups::protected_start;
 use crate::groups::safe_cuts;
+use crate::groups::superseded_instructions;
 
 /// First and last original records a summary covers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,12 +21,15 @@ pub struct SourceRange {
 /// are summarized into one handoff summary (L3). When the cleaned current window alone exceeds
 /// the budget, its oldest part is summarized as well, so repeated compaction always converges.
 /// The newest work group (latest user input or tool call onward) is never summarized.
+/// Instruction records that a newer copy of the same kind replaces are dropped everywhere.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowPlan {
     /// Records before this index are summarized, except the kept ones below.
     pub cut: usize,
     /// Canonical instructions before `cut`, kept verbatim ahead of the summary.
     pub kept_instructions: Vec<usize>,
+    /// Instruction records replaced by a newer copy, dropped before and after `cut`.
+    pub superseded: Vec<usize>,
     /// The active user input when it lies before `cut`, kept verbatim after the summary.
     pub kept_input: Option<usize>,
     /// Original range of the summarized records; `None` when nothing needs a summary.
@@ -50,6 +54,11 @@ impl WindowPlan {
             ));
         }
         let cuts = safe_cuts(items);
+        let superseded = superseded_instructions(items);
+        let mut replaced = vec![false; items.len()];
+        for index in &superseded {
+            replaced[*index] = true;
+        }
         let boundary = items
             .iter()
             .rposition(|item| is_summary(item) || previous_window(item))
@@ -66,15 +75,17 @@ impl WindowPlan {
             .rposition(|item| !pinned(item) && !is_summary(item) && is_user_direction(&item.item));
         let mut suffix = vec![0usize; items.len() + 1];
         for index in (0..items.len()).rev() {
-            suffix[index] = suffix[index + 1].saturating_add(costs[index]);
+            let cost = if replaced[index] { 0 } else { costs[index] };
+            suffix[index] = suffix[index + 1].saturating_add(cost);
         }
         let mut latest = None;
         for cut in cuts
             .into_iter()
             .filter(|cut| (window_start..=last_cut).contains(cut))
         {
-            let kept_instructions: Vec<_> =
-                (0..cut).filter(|index| pinned(&items[*index])).collect();
+            let kept_instructions: Vec<_> = (0..cut)
+                .filter(|index| pinned(&items[*index]) && !replaced[*index])
+                .collect();
             let kept_input = active_input.filter(|index| *index < cut);
             let summarized = source_range(
                 items[..cut]
@@ -96,6 +107,7 @@ impl WindowPlan {
             let plan = Self {
                 cut,
                 kept_instructions,
+                superseded: superseded.clone(),
                 kept_input,
                 summarized,
                 projected_tokens,

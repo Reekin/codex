@@ -72,7 +72,9 @@ keep original local records queryable without a hosted notes service.
   The summary request repeats the ordinary request's prefix up to the kept window and appends the
   question; custom or manual guidance supplements it. After compaction the history is canonical
   instructions, the summary, the active user input when it is older than the kept window, and the
-  cleaned window. When the cleaned window alone would exceed the configured share of the window
+  cleaned window. Canonical instructions keep only the newest copy of each kind (untyped
+  instruction records only collapse when their text is identical); older copies are dropped from
+  both the kept instructions and the window. When the cleaned window alone would exceed the configured share of the window
   (50% by default), its oldest part is summarized too, at pair-safe boundaries, so repeated
   compaction converges and an arbitrarily long active turn is not indivisible. Pending call groups
   are never summarized. A first compaction with nothing older and a window that fits needs no

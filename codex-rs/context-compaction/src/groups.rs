@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 
 pub fn is_user_direction(item: &ResponseItem) -> bool {
@@ -104,4 +106,54 @@ pub(crate) fn pinned(item: &ResponseItemEnvelope) -> bool {
         }),
         _ => false,
     }
+}
+
+/// Indices of instruction records that a later record of the same kind replaces. Harness
+/// instructions are re-sent whole whenever they change, so only the newest copy is current;
+/// untyped records count as the same only when their text is identical.
+pub(crate) fn superseded_instructions(items: &[ResponseItemEnvelope]) -> Vec<usize> {
+    let mut seen = HashSet::new();
+    let mut superseded: Vec<_> = items
+        .iter()
+        .enumerate()
+        .rev()
+        .filter_map(|(index, item)| {
+            let key = pinned(item)
+                .then(|| instruction_key(&item.item))
+                .flatten()?;
+            (!seen.insert(key)).then_some(index)
+        })
+        .collect();
+    superseded.reverse();
+    superseded
+}
+
+fn instruction_key(item: &ResponseItem) -> Option<String> {
+    let ResponseItem::Message {
+        role,
+        content,
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = item
+    else {
+        return None;
+    };
+    let kinds: Vec<&str> = internal_chat_message_metadata_passthrough
+        .as_ref()
+        .and_then(|metadata| metadata.content_item_kinds.as_ref())
+        .map(|kinds| kinds.iter().map(|kind| kind.0.as_str()).collect())
+        .unwrap_or_default();
+    if !kinds.is_empty() && !kinds.contains(&"unknown") {
+        return Some(format!("{role}:{}", kinds.join(",")));
+    }
+    let text: String = content
+        .iter()
+        .filter_map(|part| match part {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                Some(text.as_str())
+            }
+            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
+        })
+        .collect();
+    Some(format!("{role}:text:{text}"))
 }
