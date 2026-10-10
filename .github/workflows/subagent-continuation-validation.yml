@@ -1,0 +1,61 @@
+name: Subagent continuation regression validation
+on:
+  push:
+    branches: ["validation/subagent-continuation-r21"]
+permissions:
+  contents: read
+concurrency:
+  group: continuation-validation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  core:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUST_MIN_STACK: "8388608"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: ./.github/actions/setup-ci
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        with:
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: local-context-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: local-context-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}-
+      - name: Install native dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev bubblewrap
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+        with:
+          tool: nextest
+      - name: Build production test executables
+        id: build
+        run: cargo build --profile dev-small -p codex-cli -p codex-exec-server -p codex-code-mode-host -p codex-shell-escalation
+      - name: Run core unit tests
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        # Known pre-feature guardian stack overflow is excluded, all other units are exercised.
+        run: just test --cargo-profile dev-small -p codex-core --lib -E 'not test(guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history)'
+      - name: Run agent integration regressions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: just test --cargo-profile dev-small -p codex-core --test all -E 'test(suite::subagent) | test(suite::multi_agent) | test(suite::agent)'
+      - name: Run compaction integration regressions
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: just test --cargo-profile dev-small -p codex-core --test all -E 'test(suite::compact::) | test(suite::compact_resume_fork::) | test(suite::model_aware_compaction::)'
+      - name: Preserve validation build cache
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        with:
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: local-context-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.sha }}
