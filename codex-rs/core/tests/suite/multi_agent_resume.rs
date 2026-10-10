@@ -395,6 +395,10 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
             PermissionProfile::Disabled,
         )
     );
+    worker_thread
+        .flush_rollout()
+        .await
+        .context("flush initial worker before sibling spawn")?;
 
     let sibling_spawn_args = serde_json::to_string(&json!({
         "message": SIBLING_TASK,
@@ -458,10 +462,17 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         .flush_rollout()
         .await
         .context("flush initial sibling")?;
-    worker_thread
-        .flush_rollout()
+    let worker_is_resident = initial
+        .thread_manager
+        .list_thread_ids()
         .await
-        .context("flush initial worker")?;
+        .contains(&worker_thread_id);
+    if worker_is_resident {
+        worker_thread
+            .flush_rollout()
+            .await
+            .context("flush initial worker")?;
+    }
     initial
         .codex
         .flush_rollout()
@@ -471,10 +482,12 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         .shutdown_and_wait()
         .await
         .context("shutdown initial sibling")?;
-    worker_thread
-        .shutdown_and_wait()
-        .await
-        .context("shutdown initial worker")?;
+    if worker_is_resident {
+        worker_thread
+            .shutdown_and_wait()
+            .await
+            .context("shutdown initial worker")?;
+    }
     drop(sibling_thread);
     drop(worker_thread);
 
