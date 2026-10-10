@@ -5,25 +5,29 @@ use codex_core::TurnInputRequest;
 use codex_core::config::AgentRoleConfig;
 use codex_core::config::Config;
 use codex_features::Feature;
+use codex_protocol::ThreadId;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
-use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::submit_thread_settings;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use serde_json::json;
+use std::sync::Arc;
+use std::sync::Mutex;
 use test_case::test_case;
 
 const ROOT_PROMPT: &str = "spawn the service-tier worker";
@@ -36,7 +40,7 @@ const FRESH_SPAWN_CALL_ID: &str = "spawn-fresh-service-tier-worker";
 const PAUSE_CALL_ID: &str = "pause-service-tier-worker";
 const PRIORITY_ROLE: &str = "priority-worker";
 
-fn body_contains(request: &wiremock::Request, text: &str) -> bool {
+fn request_body(request: &wiremock::Request) -> Value {
     let body = match request
         .headers
         .get("content-encoding")
@@ -47,19 +51,115 @@ fn body_contains(request: &wiremock::Request, text: &str) -> bool {
         }
         _ => Some(request.body.clone()),
     };
-    body.and_then(|body| String::from_utf8(body).ok())
-        .is_some_and(|body| body.contains(text))
+    serde_json::from_slice(&body.expect("request body should decode"))
+        .expect("request body should be JSON")
 }
 
-fn assert_request_service_tier(request: &ResponseMock, expected: Option<&str>) {
+fn body_contains(request: &wiremock::Request, text: &str) -> bool {
+    request_body(request).to_string().contains(text)
+}
+
+async fn assert_request_service_tier(
+    server: &wiremock::MockServer,
+    child_id: ThreadId,
+    expected_count: usize,
+    expected: Option<&str>,
+) {
+    // Inspect all requests from this child, including attempts after a one-shot mock expired.
+    let requests: Vec<_> = server
+        .received_requests()
+        .await
+        .expect("server should record requests")
+        .iter()
+        .filter(|request| request.method == "POST")
+        .map(request_body)
+        .filter(|body| body["client_metadata"]["thread_id"] == json!(child_id))
+        .collect();
     assert_eq!(
-        request
-            .single_request()
-            .body_json()
+        requests.len(),
+        expected_count,
+        "child request bodies: {requests:#?}"
+    );
+    assert_eq!(
+        requests
+            .last()
+            .expect("child should have made a request")
             .get("service_tier")
-            .and_then(serde_json::Value::as_str),
+            .and_then(Value::as_str),
         expected
     );
+}
+
+fn input_texts(body: &Value) -> Vec<&str> {
+    body["input"]
+        .as_array()
+        .expect("request should contain input")
+        .iter()
+        .filter_map(|item| item["content"].as_array())
+        .flatten()
+        .filter_map(|content| content["text"].as_str())
+        .collect()
+}
+
+async fn mount_parent_result(
+    server: &wiremock::MockServer,
+    root_id: ThreadId,
+    sender: &str,
+    payload: &str,
+    acknowledgement: &'static str,
+) -> Arc<Mutex<Vec<Value>>> {
+    let expected = format!(
+        "Message Type: FINAL_ANSWER\nTask name: /root\nSender: {sender}\nPayload:\n{payload}"
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = Arc::clone(&requests);
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .and(move |request: &wiremock::Request| {
+            let body = request_body(request);
+            if body["client_metadata"]["thread_id"] != json!(root_id)
+                || !input_texts(&body).contains(&expected.as_str())
+            {
+                return false;
+            }
+            assert_eq!(
+                input_texts(&body)
+                    .into_iter()
+                    .filter(|text| *text == expected)
+                    .collect::<Vec<_>>(),
+                vec![expected.as_str()],
+                "parent should consume this completion once"
+            );
+            captured.lock().expect("result log should lock").push(body);
+            true
+        })
+        .respond_with(sse_response(sse(vec![
+            ev_response_created(acknowledgement),
+            ev_assistant_message(acknowledgement, acknowledgement),
+            ev_completed(acknowledgement),
+        ])))
+        .with_priority(/*p*/ 1)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(server)
+        .await;
+    requests
+}
+
+async fn assert_parent_result(
+    root: &codex_core::CodexThread,
+    requests: &Arc<Mutex<Vec<Value>>>,
+    acknowledgement: &str,
+    expected_tier: Option<&str>,
+) {
+    wait_for_event(root, |event| {
+        matches!(event, EventMsg::TurnComplete(completed)
+            if completed.last_agent_message.as_deref() == Some(acknowledgement))
+    })
+    .await;
+    let requests = requests.lock().expect("result log should lock");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["service_tier"].as_str(), expected_tier);
 }
 
 fn configure_priority_role(config: &mut Config) {
@@ -88,8 +188,18 @@ async fn wait_for_turn_complete(thread: &codex_core::CodexThread) {
     wait_for_event(thread, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 }
 
+async fn start_root_prompt(root: &codex_core::CodexThread, prompt: &str) -> Result<()> {
+    root.start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+        text: prompt.to_string(),
+        text_elements: Vec::new(),
+    }]))
+    .await?;
+    Ok(())
+}
+
 async fn mount_root_collaboration_call(
     server: &wiremock::MockServer,
+    root_id: ThreadId,
     prompt: &'static str,
     call_id: &'static str,
     arguments: serde_json::Value,
@@ -98,7 +208,9 @@ async fn mount_root_collaboration_call(
     mount_sse_once_match(
         server,
         move |request: &wiremock::Request| {
-            body_contains(request, prompt) && !body_contains(request, call_id)
+            request_body(request)["client_metadata"]["thread_id"] == json!(root_id)
+                && body_contains(request, prompt)
+                && !body_contains(request, call_id)
         },
         sse(vec![
             ev_response_created(&response_id),
@@ -117,7 +229,9 @@ async fn mount_root_collaboration_call(
     mount_sse_once_match(
         server,
         move |request: &wiremock::Request| {
-            body_contains(request, prompt) && body_contains(request, call_id)
+            request_body(request)["client_metadata"]["thread_id"] == json!(root_id)
+                && body_contains(request, prompt)
+                && body_contains(request, call_id)
         },
         sse(vec![
             ev_response_created(&completion_id),
@@ -132,7 +246,8 @@ async fn mount_completed_child(
     server: &wiremock::MockServer,
     prompt: &'static str,
     root_prompt: &'static str,
-) -> ResponseMock {
+    completion: &'static str,
+) {
     mount_sse_once_match(
         server,
         move |request: &wiremock::Request| {
@@ -140,11 +255,11 @@ async fn mount_completed_child(
         },
         sse(vec![
             ev_response_created(prompt),
-            ev_assistant_message(&format!("{prompt}-message"), "worker completed"),
+            ev_assistant_message(&format!("{prompt}-message"), completion),
             ev_completed(prompt),
         ]),
     )
-    .await
+    .await;
 }
 
 #[test_case(Some("priority"), None; "disabling fast mode updates active and idle child work")]
@@ -171,6 +286,7 @@ async fn root_service_tier_change_updates_existing_subagent(
 
     mount_root_collaboration_call(
         &server,
+        test.session_configured.thread_id,
         ROOT_PROMPT,
         SPAWN_CALL_ID,
         json!({
@@ -182,7 +298,7 @@ async fn root_service_tier_change_updates_existing_subagent(
     )
     .await;
 
-    let initial_child_request = mount_sse_once_match(
+    mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
             body_contains(request, CHILD_PROMPT)
@@ -201,7 +317,7 @@ async fn root_service_tier_change_updates_existing_subagent(
         ]),
     )
     .await;
-    let continued_child_request = mount_sse_once_match(
+    mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
             body_contains(request, PAUSE_CALL_ID) && !body_contains(request, ROOT_PROMPT)
@@ -227,7 +343,7 @@ async fn root_service_tier_change_updates_existing_subagent(
         _ => None,
     })
     .await;
-    assert_request_service_tier(&initial_child_request, initial_service_tier);
+    assert_request_service_tier(&server, child_thread_id, 1, initial_service_tier).await;
 
     submit_thread_settings(
         &test.codex,
@@ -243,6 +359,14 @@ async fn root_service_tier_change_updates_existing_subagent(
         "the root routing policy must not rewrite child-owned settings"
     );
 
+    let continued_parent = mount_parent_result(
+        &server,
+        test.session_configured.thread_id,
+        "/root/worker",
+        "child continued",
+        "root handled continued child",
+    )
+    .await;
     child
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: "continue after the service-tier update".to_string(),
@@ -250,9 +374,16 @@ async fn root_service_tier_change_updates_existing_subagent(
         }]))
         .await?;
     wait_for_turn_complete(&child).await;
-    assert_request_service_tier(&continued_child_request, updated_request_service_tier);
+    assert_request_service_tier(&server, child_thread_id, 2, updated_request_service_tier).await;
+    assert_parent_result(
+        &test.codex,
+        &continued_parent,
+        "root handled continued child",
+        updated_request_service_tier,
+    )
+    .await;
 
-    let child_compaction_request = mount_sse_once_match(
+    mount_sse_once_match(
         &server,
         |request: &wiremock::Request| body_contains(request, "compaction_trigger"),
         sse(vec![
@@ -268,11 +399,34 @@ async fn root_service_tier_change_updates_existing_subagent(
         ]),
     )
     .await;
+    let compacted_parent = mount_parent_result(
+        &server,
+        test.session_configured.thread_id,
+        "/root/worker",
+        "",
+        "root handled compacted child",
+    )
+    .await;
     child.submit(Op::Compact).await?;
     wait_for_turn_complete(&child).await;
-    assert_request_service_tier(&child_compaction_request, updated_request_service_tier);
+    assert_request_service_tier(&server, child_thread_id, 3, updated_request_service_tier).await;
+    assert_parent_result(
+        &test.codex,
+        &compacted_parent,
+        "root handled compacted child",
+        updated_request_service_tier,
+    )
+    .await;
 
-    let future_child_request = mount_completed_child(&server, FOLLOWUP_PROMPT, ROOT_PROMPT).await;
+    mount_completed_child(&server, FOLLOWUP_PROMPT, ROOT_PROMPT, "worker completed").await;
+    let future_parent = mount_parent_result(
+        &server,
+        test.session_configured.thread_id,
+        "/root/worker",
+        "worker completed",
+        "root handled future child",
+    )
+    .await;
     child
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: FOLLOWUP_PROMPT.to_string(),
@@ -280,10 +434,18 @@ async fn root_service_tier_change_updates_existing_subagent(
         }]))
         .await?;
     wait_for_turn_complete(&child).await;
-    assert_request_service_tier(&future_child_request, updated_request_service_tier);
+    assert_request_service_tier(&server, child_thread_id, 4, updated_request_service_tier).await;
+    assert_parent_result(
+        &test.codex,
+        &future_parent,
+        "root handled future child",
+        updated_request_service_tier,
+    )
+    .await;
 
     mount_root_collaboration_call(
         &server,
+        test.session_configured.thread_id,
         FRESH_ROOT_PROMPT,
         FRESH_SPAWN_CALL_ID,
         json!({
@@ -294,13 +456,33 @@ async fn root_service_tier_change_updates_existing_subagent(
         }),
     )
     .await;
-    let fresh_child_request =
-        mount_completed_child(&server, FRESH_CHILD_PROMPT, FRESH_ROOT_PROMPT).await;
-    test.submit_text_turn(FRESH_ROOT_PROMPT).await?;
+    mount_completed_child(
+        &server,
+        FRESH_CHILD_PROMPT,
+        FRESH_ROOT_PROMPT,
+        "worker completed",
+    )
+    .await;
+    let fresh_parent = mount_parent_result(
+        &server,
+        test.session_configured.thread_id,
+        "/root/fresh",
+        "worker completed",
+        "root handled fresh child",
+    )
+    .await;
+    start_root_prompt(&test.codex, FRESH_ROOT_PROMPT).await?;
     let fresh_thread_id = created_threads.recv().await?;
     let fresh_thread = test.thread_manager.get_thread(fresh_thread_id).await?;
     wait_for_turn_complete(&fresh_thread).await;
-    assert_request_service_tier(&fresh_child_request, updated_request_service_tier);
+    assert_request_service_tier(&server, fresh_thread_id, 1, updated_request_service_tier).await;
+    assert_parent_result(
+        &test.codex,
+        &fresh_parent,
+        "root handled fresh child",
+        updated_request_service_tier,
+    )
+    .await;
     Ok(())
 }
 
@@ -319,6 +501,7 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
 
     mount_root_collaboration_call(
         &server,
+        test.session_configured.thread_id,
         ROOT_PROMPT,
         SPAWN_CALL_ID,
         json!({
@@ -329,16 +512,32 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
         }),
     )
     .await;
-    let original_request = mount_completed_child(&server, CHILD_PROMPT, ROOT_PROMPT).await;
-    test.submit_text_turn(ROOT_PROMPT).await?;
+    mount_completed_child(&server, CHILD_PROMPT, ROOT_PROMPT, "worker completed").await;
+    let original_parent = mount_parent_result(
+        &server,
+        test.session_configured.thread_id,
+        "/root/original",
+        "worker completed",
+        "root handled original child",
+    )
+    .await;
+    start_root_prompt(&test.codex, ROOT_PROMPT).await?;
     let original_thread_id = created_threads.recv().await?;
     let original_thread = test.thread_manager.get_thread(original_thread_id).await?;
     wait_for_turn_complete(&original_thread).await;
-    assert_request_service_tier(&original_request, Some("priority"));
+    assert_request_service_tier(&server, original_thread_id, 1, Some("priority")).await;
+    assert_parent_result(
+        &test.codex,
+        &original_parent,
+        "root handled original child",
+        Some("priority"),
+    )
+    .await;
     drop(original_thread);
 
     mount_root_collaboration_call(
         &server,
+        test.session_configured.thread_id,
         FRESH_ROOT_PROMPT,
         FRESH_SPAWN_CALL_ID,
         json!({
@@ -348,14 +547,36 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
         }),
     )
     .await;
-    mount_completed_child(&server, FRESH_CHILD_PROMPT, FRESH_ROOT_PROMPT).await;
-    test.submit_text_turn(FRESH_ROOT_PROMPT).await?;
+    mount_completed_child(
+        &server,
+        FRESH_CHILD_PROMPT,
+        FRESH_ROOT_PROMPT,
+        "worker completed",
+    )
+    .await;
+    let replacement_parent = mount_parent_result(
+        &server,
+        test.session_configured.thread_id,
+        "/root/replacement",
+        "worker completed",
+        "root handled replacement child",
+    )
+    .await;
+    start_root_prompt(&test.codex, FRESH_ROOT_PROMPT).await?;
     let replacement_thread_id = created_threads.recv().await?;
     let replacement_thread = test
         .thread_manager
         .get_thread(replacement_thread_id)
         .await?;
     wait_for_turn_complete(&replacement_thread).await;
+    assert_request_service_tier(&server, replacement_thread_id, 1, Some("priority")).await;
+    assert_parent_result(
+        &test.codex,
+        &replacement_parent,
+        "root handled replacement child",
+        Some("priority"),
+    )
+    .await;
     assert!(
         test.thread_manager
             .get_thread(original_thread_id)
@@ -381,7 +602,21 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
         "reload ignores the role tier and preserves the root-owned preference"
     );
 
-    let reloaded_request = mount_completed_child(&server, FOLLOWUP_PROMPT, ROOT_PROMPT).await;
+    mount_completed_child(
+        &server,
+        FOLLOWUP_PROMPT,
+        ROOT_PROMPT,
+        "reloaded worker completed",
+    )
+    .await;
+    let reloaded_parent = mount_parent_result(
+        &server,
+        test.session_configured.thread_id,
+        "/root/original",
+        "reloaded worker completed",
+        "root handled reloaded child",
+    )
+    .await;
     reloaded_thread
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: FOLLOWUP_PROMPT.to_string(),
@@ -389,7 +624,14 @@ async fn evicted_role_subagent_uses_root_service_tier_after_reload() -> Result<(
         }]))
         .await?;
     wait_for_turn_complete(&reloaded_thread).await;
-    assert_request_service_tier(&reloaded_request, /*expected*/ None);
+    assert_request_service_tier(&server, original_thread_id, 2, /*expected*/ None).await;
+    assert_parent_result(
+        &test.codex,
+        &reloaded_parent,
+        "root handled reloaded child",
+        /*expected_tier*/ None,
+    )
+    .await;
     reloaded_thread.shutdown_and_wait().await?;
     test.codex.shutdown_and_wait().await?;
 
