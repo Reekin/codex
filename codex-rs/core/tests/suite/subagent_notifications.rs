@@ -59,6 +59,7 @@ use serde_json::Value;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use test_case::test_case;
@@ -760,68 +761,6 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         "agent_type": "worker",
     }))?;
 
-    mount_sse_once_match(
-        &server,
-        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
-        sse(vec![
-            ev_response_created("resp-turn1-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                MULTI_AGENT_V1_NAMESPACE,
-                "spawn_agent",
-                &spawn_args,
-            ),
-            ev_completed("resp-turn1-1"),
-        ]),
-    )
-    .await;
-
-    let first_child_request = mount_sse_once_match(
-        &server,
-        |req: &wiremock::Request| {
-            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
-        },
-        sse(vec![
-            ev_response_created("resp-child-1"),
-            ev_assistant_message("msg-child-1", "child done first"),
-            ev_completed("resp-child-1"),
-        ]),
-    )
-    .await;
-    let second_child_request = mount_sse_once_match(
-        &server,
-        |req: &wiremock::Request| {
-            body_contains(req, SUBAGENT_STOP_CONTINUATION) && !body_contains(req, SPAWN_CALL_ID)
-        },
-        sse(vec![
-            ev_response_created("resp-child-2"),
-            ev_assistant_message("msg-child-2", "child done final"),
-            ev_completed("resp-child-2"),
-        ]),
-    )
-    .await;
-
-    let _turn1_followup = mount_sse_once_match(
-        &server,
-        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
-        sse(vec![
-            ev_response_created("resp-turn1-2"),
-            ev_assistant_message("msg-turn1-2", "parent done"),
-            ev_completed("resp-turn1-2"),
-        ]),
-    )
-    .await;
-    let internal_request = mount_sse_once_match(
-        &server,
-        |req: &wiremock::Request| body_contains(req, INTERNAL_SUBAGENT_PROMPT),
-        sse(vec![
-            ev_response_created("resp-internal-1"),
-            ev_assistant_message("msg-internal-1", "internal subagent done"),
-            ev_completed("resp-internal-1"),
-        ]),
-    )
-    .await;
-
     let test = test_codex()
         .with_pre_build_hook(|home| {
             write_subagent_lifecycle_hooks(
@@ -840,10 +779,152 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         })
         .build(&server)
         .await?;
+    let root_id = test.session_configured.thread_id;
 
-    test.submit_turn(TURN_1_PROMPT).await?;
-    let _ = wait_for_requests(&first_child_request).await?;
-    let _ = wait_for_requests(&second_child_request).await?;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
+        sse(vec![
+            ev_response_created("resp-turn1-1"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                MULTI_AGENT_V1_NAMESPACE,
+                "spawn_agent",
+                &spawn_args,
+            ),
+            ev_completed("resp-turn1-1"),
+        ]),
+    )
+    .await;
+
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-child-1"),
+            ev_assistant_message("msg-child-1", "child done first"),
+            ev_completed("resp-child-1"),
+        ]),
+    )
+    .await;
+    mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, SUBAGENT_STOP_CONTINUATION) && !body_contains(req, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-child-2"),
+            ev_assistant_message("msg-child-2", "child done final"),
+            ev_completed("resp-child-2"),
+        ]),
+    )
+    .await;
+
+    let _turn1_followup = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, SPAWN_CALL_ID) && !body_contains(req, "<subagent_notification>")
+        },
+        sse(vec![
+            ev_response_created("resp-turn1-2"),
+            ev_assistant_message("msg-turn1-2", "parent done"),
+            ev_completed("resp-turn1-2"),
+        ]),
+    )
+    .await;
+    let parent_results = Arc::new(Mutex::new(Vec::new()));
+    let captured_parent_results = Arc::clone(&parent_results);
+    Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .and(move |req: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&decoded_body(req).expect("decoded body"))
+                .expect("request JSON");
+            if body["client_metadata"]["thread_id"] != json!(root_id)
+                || !body_contains(req, "<subagent_notification>")
+            {
+                return false;
+            }
+            let notifications: Vec<Value> = body["input"]
+                .as_array()
+                .expect("input array")
+                .iter()
+                .filter_map(|item| item["content"].as_array())
+                .flatten()
+                .filter_map(|content| content["text"].as_str())
+                .flat_map(|text| text.split("<subagent_notification>").skip(1))
+                .map(|text| {
+                    serde_json::from_str(text.split_once("</subagent_notification>").unwrap().0)
+                        .expect("notification JSON")
+                })
+                .collect();
+            assert_eq!(notifications.len(), 1);
+            assert_eq!(
+                notifications[0]["status"],
+                json!({"completed": "child done final"})
+            );
+            captured_parent_results
+                .lock()
+                .unwrap()
+                .push(notifications[0].clone());
+            true
+        })
+        .respond_with(sse_response(sse(vec![
+            ev_response_created("resp-stop-parent-result"),
+            ev_assistant_message(
+                "msg-stop-parent-result",
+                "parent handled final child result",
+            ),
+            ev_completed("resp-stop-parent-result"),
+        ])))
+        .with_priority(/*p*/ 1)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let (root_sandbox_policy, root_permission_profile) =
+        turn_permission_fields(PermissionProfile::Disabled, test.cwd_path());
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: TURN_1_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                approval_policy: Some(AskForApproval::Never),
+                sandbox_policy: Some(root_sandbox_policy),
+                permission_profile: root_permission_profile,
+                ..Default::default()
+            }),
+        )
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(completed)
+            if completed.last_agent_message.as_deref() == Some("parent handled final child result"))
+    })
+    .await;
+    let child_id = wait_for_spawned_thread_id(&test).await?;
+    assert_eq!(
+        *parent_results.lock().unwrap(),
+        vec![json!({"agent_path": child_id, "status": {"completed": "child done final"}})]
+    );
+    let requests_before_internal = server.received_requests().await.expect("recorded requests");
+    let child_requests: Vec<Value> = requests_before_internal
+        .iter()
+        .filter(|req| req.method == "POST")
+        .map(|req| serde_json::from_slice(&decoded_body(req).expect("decoded body")).unwrap())
+        .filter(|body: &Value| body["client_metadata"]["thread_id"] == json!(child_id))
+        .collect();
+    // Count every child attempt, not only requests captured by the one-shot response mocks.
+    assert_eq!(child_requests.len(), 2);
+    assert!(child_requests[0].to_string().contains(CHILD_PROMPT));
+    assert!(
+        child_requests[1]
+            .to_string()
+            .contains(SUBAGENT_STOP_CONTINUATION)
+    );
 
     let subagent_stop_inputs = wait_for_hook_log(
         test.codex_home_path(),
@@ -903,6 +984,23 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         })
         .await?;
 
+    let internal_id = internal_thread.thread_id;
+    mount_sse_once_match(
+        &server,
+        move |req: &wiremock::Request| {
+            let body: Value = serde_json::from_slice(&decoded_body(req).expect("decoded body"))
+                .expect("request JSON");
+            body["client_metadata"]["thread_id"] == json!(internal_id)
+                && body_contains(req, INTERNAL_SUBAGENT_PROMPT)
+        },
+        sse(vec![
+            ev_response_created("resp-internal-1"),
+            ev_assistant_message("msg-internal-1", "internal subagent done"),
+            ev_completed("resp-internal-1"),
+        ]),
+    )
+    .await;
+
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(PermissionProfile::Disabled, test.cwd_path());
     internal_thread
@@ -932,8 +1030,26 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
         _ => None,
     })
     .await;
-    let requests = wait_for_requests(&internal_request).await?;
-    assert_eq!(requests.len(), 1);
+    let requests_after_internal = server.received_requests().await.expect("recorded requests");
+    let internal_requests: Vec<Value> = requests_after_internal
+        .iter()
+        .filter(|req| req.method == "POST")
+        .map(|req| serde_json::from_slice(&decoded_body(req).expect("decoded body")).unwrap())
+        .filter(|body: &Value| body["client_metadata"]["thread_id"] == json!(internal_id))
+        .collect();
+    assert_eq!(internal_requests.len(), 1);
+    assert_eq!(
+        requests_after_internal
+            .iter()
+            .filter(|req| req.method == "POST" && req.url.path().ends_with("/responses"))
+            .count(),
+        requests_before_internal
+            .iter()
+            .filter(|req| req.method == "POST" && req.url.path().ends_with("/responses"))
+            .count()
+            + 1,
+        "the internal turn must not cause extra parent or child model requests"
+    );
 
     let subagent_stop_inputs_after_internal =
         read_hook_log(test.codex_home_path(), "subagent_stop_hook_log.jsonl")?;
