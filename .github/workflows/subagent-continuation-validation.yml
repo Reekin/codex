@@ -41,14 +41,14 @@ jobs:
         id: build
         run: cargo build --profile dev-small -p codex-cli -p codex-exec-server -p codex-code-mode-host -p codex-shell-escalation
       - name: Run core unit tests
-        if: ${{ false }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         # Known pre-feature guardian stack overflow is excluded, all other units are exercised.
         run: just test --cargo-profile dev-small -p codex-core --lib -E 'not test(guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history)'
       - name: Run agent integration regressions
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
-        run: just test --cargo-profile dev-small -p codex-core --test all -E 'test(suite::multi_agent_resume::cold_root_resume_restores_agent_identity_and_role_on_followup)'
+        run: just test --cargo-profile dev-small -p codex-core --test all -E 'test(suite::subagent) | test(suite::multi_agent) | test(suite::agent)'
       - name: Run compaction integration regressions
-        if: ${{ false }}
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
         run: just test --cargo-profile dev-small -p codex-core --test all -E 'test(suite::compact::) | test(suite::compact_resume_fork::) | test(suite::model_aware_compaction::)'
       - name: Preserve validation build cache
         if: ${{ !cancelled() && steps.build.outcome == 'success' }}
