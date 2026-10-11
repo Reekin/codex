@@ -79,6 +79,7 @@ mod mcp_skill_dependencies;
 mod mcp_tool_approval_templates;
 mod mcp_tool_exposure;
 mod network_policy_decision;
+mod request_input_preparation;
 pub use mcp::McpManager;
 mod original_image_detail;
 pub use codex_mcp::CodexAppsToolsCache;
