@@ -398,6 +398,9 @@ const fn is_true(value: &bool) -> bool {
 /// Model metadata returned by the Codex backend `/models` endpoint.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
 pub struct ModelInfo {
+    /// Optional backend limits for the outbound request projection, independent of token budgets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limits: Option<ModelInputLimits>,
     /// Model-owned approval coverage. Absent preserves legacy settings; an empty map disables
     /// ordinary Guardian review. Keys are computer_use, shell, code_mode, file_changes, mcp, network,
     /// and permissions. This does not override mandatory safety or administrator requirements.
@@ -505,6 +508,20 @@ pub struct ModelInfo {
     /// Reasoning effort used for multi-agent work when the user selects Ultra.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// Explicit limits applied to model requests without changing durable conversation history.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, TS, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelInputLimits {
+    /// Maximum width or height in pixels. Images are never enlarged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub max_image_dimension: Option<std::num::NonZeroU32>,
+    /// Maximum uncompressed outbound JSON bytes, including instructions and tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub max_request_bytes: Option<std::num::NonZeroU64>,
 }
 
 impl ModelInfo {
@@ -1026,6 +1043,7 @@ mod tests {
             supports_experimental_context: false,
             use_responses_lite: false,
             guardian: None,
+            input_limits: None,
             node_repl_auto_review_required: false,
             node_repl_disabled: false,
             auto_review_model_override: None,

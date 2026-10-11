@@ -67,6 +67,9 @@ use tracing::Instrument;
 use tracing_test::traced_test;
 
 const MODEL: &str = "gpt-5.4";
+
+#[path = "request_input_preparation.rs"]
+mod request_input_preparation;
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 const USER_AGENT_HEADER: &str = "user-agent";
 const WS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=2026-02-06";

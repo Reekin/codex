@@ -612,7 +612,7 @@ impl ModelClient {
             RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
             self.state.auth_env_telemetry.clone(),
         );
-        let request = self.build_responses_request(
+        let mut request = self.build_responses_request(
             prompt,
             model_info,
             settings.effort,
@@ -620,19 +620,42 @@ impl ModelClient {
             settings.service_tier,
             responses_metadata,
         )?;
+        self.prepare_response_items_for_request(&mut request.input);
+        request.access_programs =
+            cyber_access_program::for_auth(client_setup.auth.as_ref(), prompt.cyber_access_program);
+        crate::request_input_preparation::prepare(
+            &mut request,
+            model_info.input_limits,
+            |request| {
+                crate::request_input_preparation::json_bytes(&serde_json::to_value(
+                    &ApiCompactionInput {
+                        model: &request.model,
+                        input: &request.input,
+                        instructions: &request.instructions,
+                        tools: request.tools.clone(),
+                        parallel_tool_calls: request.parallel_tool_calls,
+                        reasoning: request.reasoning.clone(),
+                        service_tier: request.service_tier.as_deref(),
+                        prompt_cache_key: request.prompt_cache_key.as_deref(),
+                        text: request.text.clone(),
+                        access_programs: request.access_programs,
+                    },
+                )?)
+            },
+        )?;
         let ResponsesApiRequest {
             model,
             instructions,
-            mut input,
+            input,
             tools,
             parallel_tool_calls,
             reasoning,
             service_tier,
             prompt_cache_key,
             text,
+            access_programs,
             ..
         } = request;
-        self.prepare_response_items_for_request(&mut input);
         let payload = ApiCompactionInput {
             model: &model,
             input: &input,
@@ -643,10 +666,7 @@ impl ModelClient {
             service_tier: service_tier.as_deref(),
             prompt_cache_key: prompt_cache_key.as_deref(),
             text,
-            access_programs: cyber_access_program::for_auth(
-                client_setup.auth.as_ref(),
-                prompt.cyber_access_program,
-            ),
+            access_programs,
         };
 
         let mut extra_headers = ApiHeaderMap::new();
@@ -1663,6 +1683,11 @@ impl ModelClientSession {
             );
             self.client
                 .prepare_response_items_for_request(&mut request.input);
+            crate::request_input_preparation::prepare(
+                &mut request,
+                model_info.input_limits,
+                crate::request_input_preparation::json_bytes,
+            )?;
             let request_session_telemetry =
                 session_telemetry_for_request(session_telemetry, &request);
             let inference_trace_attempt = inference_trace.start_attempt();
@@ -1854,6 +1879,36 @@ impl ModelClientSession {
                 Err(err) => return Err(provider.map_api_error(err)),
             }
 
+            let mut prepared_metadata =
+                response_create_client_metadata(Some(client_metadata), request_trace.as_ref());
+            self.client.set_guardian_metadata(
+                &mut prepared_metadata,
+                responses_metadata.parent_response_id.as_deref(),
+                client_setup.auth.as_ref(),
+                endpoint,
+            );
+            prepared_metadata.get_or_insert_with(HashMap::new).insert(
+                X_CODEX_WS_STREAM_REQUEST_START_MS_CLIENT_METADATA_KEY.to_string(),
+                // Reserve the maximum timestamp width; stamp the real time only at send.
+                u64::MAX.to_string(),
+            );
+            crate::request_input_preparation::prepare(
+                &mut request,
+                model_info.input_limits,
+                |request| {
+                    let mut wire_request = request.clone();
+                    self.client
+                        .prepare_response_items_for_request(&mut wire_request.input);
+                    let payload = ResponseCreateWsRequest {
+                        generate: if warmup { Some(false) } else { None },
+                        client_metadata: prepared_metadata.clone(),
+                        ..ResponseCreateWsRequest::from(&wire_request)
+                    };
+                    crate::request_input_preparation::json_bytes(
+                        &ResponsesWsRequest::ResponseCreate(payload),
+                    )
+                },
+            )?;
             let (incremental_request, previous_response_id_from_untraced_warmup) =
                 self.prepare_websocket_request(&request);
             let inference_trace_attempt = if warmup {
@@ -1870,10 +1925,36 @@ impl ModelClientSession {
                 inference_trace_attempt.record_started(&request);
             }
 
-            let (previous_response_id, mut incremental_items) = match incremental_request {
+            let (mut previous_response_id, mut incremental_items) = match incremental_request {
                 Some((response_id, items)) => (Some(response_id), Some(items)),
                 None => (None, None),
             };
+            // A very short prefix can save fewer bytes than previous_response_id adds.
+            // The already-budgeted full request is always a safe alternative in that case.
+            if let Some(limit) = model_info
+                .input_limits
+                .and_then(|limits| limits.max_request_bytes)
+                && let Some(items) = incremental_items.as_ref()
+            {
+                let mut wire_items = items.clone();
+                self.client
+                    .prepare_response_items_for_request(&mut wire_items);
+                let payload = ResponseCreateWsRequest {
+                    previous_response_id: previous_response_id.clone(),
+                    input: &wire_items,
+                    generate: if warmup { Some(false) } else { None },
+                    client_metadata: prepared_metadata.clone(),
+                    ..ResponseCreateWsRequest::from(&request)
+                };
+                if crate::request_input_preparation::json_bytes(
+                    &ResponsesWsRequest::ResponseCreate(payload),
+                )? as u64
+                    > limit.get()
+                {
+                    previous_response_id = None;
+                    incremental_items = None;
+                }
+            }
             let original_item_ids = if let Some(incremental_items) = &mut incremental_items {
                 self.client
                     .prepare_response_items_for_request(incremental_items);
@@ -1888,22 +1969,13 @@ impl ModelClientSession {
                     .prepare_response_items_for_request(&mut request.input);
                 Some(original_item_ids)
             };
-            let mut ws_payload = ResponseCreateWsRequest {
+            let ws_payload = ResponseCreateWsRequest {
                 previous_response_id,
                 input: incremental_items.as_deref().unwrap_or(&request.input),
                 generate: if warmup { Some(false) } else { None },
-                client_metadata: response_create_client_metadata(
-                    Some(client_metadata),
-                    request_trace.as_ref(),
-                ),
+                client_metadata: prepared_metadata,
                 ..ResponseCreateWsRequest::from(&request)
             };
-            self.client.set_guardian_metadata(
-                &mut ws_payload.client_metadata,
-                responses_metadata.parent_response_id.as_deref(),
-                client_setup.auth.as_ref(),
-                endpoint,
-            );
             let mut ws_request = ResponsesWsRequest::ResponseCreate(ws_payload);
             stamp_ws_stream_request_start_ms(&mut ws_request);
             if !previous_response_id_from_untraced_warmup {
@@ -2126,10 +2198,7 @@ impl ModelClientSession {
     }
 }
 
-/// Stamp a ResponsesWsRequest with the current time.
-///
-/// Meant to be called just before sending the request over the socket, to capture realistic
-/// transport timing.
+/// Stamp transport timing after request preparation, immediately before sending.
 fn stamp_ws_stream_request_start_ms(request: &mut ResponsesWsRequest<'_>) {
     let ResponsesWsRequest::ResponseCreate(payload) = request;
     payload
