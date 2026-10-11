@@ -1,7 +1,7 @@
 use super::*;
-use pretty_assertions::assert_eq;
 use codex_protocol::openai_models::ModelInputLimits;
 use core_test_support::responses;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::num::NonZeroU64;
 use wiremock::Mock;
@@ -14,17 +14,21 @@ async fn request_input_generated_image_next_turn_omits_payload_without_losing_ca
 -> anyhow::Result<()> {
     let server = responses::start_mock_server().await;
     let mut state = 7u32;
-    let pixels = (0..512 * 512 * 3)
+    let pixels = (0..256 * 256 * 3)
         .map(|_| {
             state = state.wrapping_mul(1664525).wrapping_add(1013904223);
             (state >> 24) as u8
         })
         .collect();
-    let image = image::RgbImage::from_raw(512, 512, pixels).unwrap();
+    let image = image::RgbImage::from_raw(256, 256, pixels).unwrap();
     let mut bytes = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgb8(image).write_to(&mut bytes, image::ImageFormat::Png)?;
     let url = codex_utils_image::data_url_from_bytes("image/png", bytes.get_ref());
     let result = url.split_once(',').unwrap().1;
+    assert!(
+        result.len() > 200000,
+        "fixture must exceed the image byte budget"
+    );
     let mock = responses::mount_sse_sequence(
         &server,
         vec![
@@ -40,32 +44,35 @@ async fn request_input_generated_image_next_turn_omits_payload_without_losing_ca
             ]),
             responses::sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
             responses::sse(vec![ev_response_created("resp-3"), ev_completed("resp-3")]),
+            responses::sse(vec![ev_response_created("resp-4"), ev_completed("resp-4")]),
         ],
     )
     .await;
-    let mut builder = test_codex()
-        .with_model(MODEL)
-        .with_model_info_override(MODEL, |model| {
-            model.input_limits =
-                Some(serde_json::from_value(json!({"max_request_bytes":200000})).unwrap());
-        });
+    let mut builder = test_codex().with_model_info_override(MODEL, |model| {
+        model.input_limits = None;
+    });
     let test = builder.build_with_auto_env(&server).await?;
     test.submit_text_turn("generate a picture").await?;
     test.submit_text_turn("describe the generated picture")
         .await?;
-    core_test_support::submit_thread_settings(
-        &test.codex,
-        codex_protocol::protocol::ThreadSettingsOverrides {
-            model: Some("gpt-5.5".into()),
-            ..Default::default()
-        },
-    )
-    .await?;
-    test.submit_text_turn("inspect the original picture")
+    let mut bounded_builder = test_codex().with_model_info_override(MODEL, |model| {
+        model.input_limits =
+            Some(serde_json::from_value(json!({"max_request_bytes":200000})).unwrap());
+    });
+    let bounded_test = bounded_builder.restart(&server, &test).await?;
+    bounded_test
+        .submit_text_turn("describe under the byte budget")
+        .await?;
+    let mut restored_builder = test_codex().with_model_info_override(MODEL, |model| {
+        model.input_limits = None;
+    });
+    let restored_test = restored_builder.restart(&server, &bounded_test).await?;
+    restored_test
+        .submit_text_turn("inspect the original picture")
         .await?;
     let requests = mock.requests();
-    assert_eq!(requests.len(), 3);
-    let bounded = requests[1].body_json();
+    assert_eq!(requests.len(), 4);
+    let bounded = requests[2].body_json();
     assert!(serde_json::to_vec(&bounded)?.len() <= 200000);
     let find_call = |body: &Value| {
         body["input"]
@@ -76,17 +83,21 @@ async fn request_input_generated_image_next_turn_omits_payload_without_losing_ca
             .unwrap()
             .clone()
     };
+    assert_eq!(
+        find_call(&requests[1].body_json())["result"].as_str(),
+        Some(result)
+    );
     let omitted = find_call(&bounded);
-    let mut restored = find_call(&requests[2].body_json());
+    let mut restored = find_call(&requests[3].body_json());
     assert_eq!(restored["result"], result);
     restored["result"] = json!("");
-    // Model switches can add internal metadata, but the generated call identity and text remain.
+    // Resuming can add internal metadata, but the generated call identity and text remain.
     for field in ["id", "status", "revised_prompt", "result"] {
         assert_eq!(omitted[field], restored[field]);
     }
     assert_eq!(omitted["status"], "completed");
     assert_eq!(omitted["revised_prompt"], "keep revised prompt");
-    test.codex.shutdown_and_wait().await?;
+    restored_test.codex.shutdown_and_wait().await?;
     Ok(())
 }
 
@@ -111,6 +122,12 @@ fn image_item(url: &str) -> ResponseItem {
         {"type":"input_image","image_url":url}
     ]}))
     .unwrap()
+}
+
+fn fixture_prompt(input: Vec<ResponseItem>) -> Prompt {
+    // Prompt::default carries the full bundled instructions. Keep this focused wire fixture's
+    // non-image envelope deliberately small so image retention determines its budget boundary.
+    prompt_with_input_and_instructions(input, "Request input preparation fixture.")
 }
 
 fn images(body: &Value) -> Vec<String> {
@@ -146,9 +163,9 @@ async fn request_input_websocket_budget_resets_prefix_then_resumes_delta() {
         ..Default::default()
     });
     let mut session = harness.client.new_session();
-    let first = prompt_with_input(vec![image_item(&old)]);
-    let second = prompt_with_input(vec![image_item(&old), image_item(&newest)]);
-    let third = prompt_with_input(vec![
+    let first = fixture_prompt(vec![image_item(&old)]);
+    let second = fixture_prompt(vec![image_item(&old), image_item(&newest)]);
+    let third = fixture_prompt(vec![
         image_item(&old),
         image_item(&newest),
         message_item("next"),
@@ -230,7 +247,7 @@ async fn request_input_http_retry_dimensions_identity_and_unconfigured_model() {
             .unwrap(),
     );
     let original = image_url(3);
-    let prompt = prompt_with_input(vec![
+    let prompt = fixture_prompt(vec![
         serde_json::from_value(json!({"type":"function_call","call_id":"call-1","name":"look","arguments":"{}"})).unwrap(),
         serde_json::from_value(json!({"type":"function_call_output","call_id":"call-1","output":[
             {"type":"input_text","text":"keep tool text"},
@@ -396,7 +413,7 @@ async fn request_input_websocket_http_fallback_keeps_preparation() {
         serde_json::from_value(json!({"max_image_dimension":32,"max_request_bytes":10000}))
             .unwrap(),
     );
-    let prompt = prompt_with_input(vec![image_item(&image_url(5))]);
+    let prompt = fixture_prompt(vec![image_item(&image_url(5))]);
     stream_until_complete(&mut harness.client.new_session(), &harness, &prompt).await;
     let body = mock.single_request().body_json();
     let decoded = codex_utils_image::load_data_url_for_prompt_uncached(
