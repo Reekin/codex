@@ -8,6 +8,87 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_input_generated_image_next_turn_omits_payload_without_losing_call()
+-> anyhow::Result<()> {
+    let server = responses::start_mock_server().await;
+    let mut state = 7u32;
+    let pixels = (0..512 * 512 * 3)
+        .map(|_| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 24) as u8
+        })
+        .collect();
+    let image = image::RgbImage::from_raw(512, 512, pixels).unwrap();
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image).write_to(&mut bytes, image::ImageFormat::Png)?;
+    let url = codex_utils_image::data_url_from_bytes("image/png", bytes.get_ref());
+    let result = url.split_once(',').unwrap().1;
+    let mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            responses::sse(vec![
+                ev_response_created("resp-1"),
+                responses::ev_image_generation_call(
+                    "ig_original",
+                    "completed",
+                    "keep revised prompt",
+                    result,
+                ),
+                ev_completed("resp-1"),
+            ]),
+            responses::sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
+            responses::sse(vec![ev_response_created("resp-3"), ev_completed("resp-3")]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_model(MODEL)
+        .with_model_info_override(MODEL, |model| {
+            model.input_limits =
+                Some(serde_json::from_value(json!({"max_request_bytes":200000})).unwrap());
+        });
+    let test = builder.build_with_auto_env(&server).await?;
+    test.submit_text_turn("generate a picture").await?;
+    test.submit_text_turn("describe the generated picture")
+        .await?;
+    core_test_support::submit_thread_settings(
+        &test.codex,
+        codex_protocol::protocol::ThreadSettingsOverrides {
+            model: Some("gpt-5.5".into()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    test.submit_text_turn("inspect the original picture")
+        .await?;
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 3);
+    let bounded = requests[1].body_json();
+    assert!(serde_json::to_vec(&bounded)?.len() <= 200000);
+    let find_call = |body: &Value| {
+        body["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "image_generation_call")
+            .unwrap()
+            .clone()
+    };
+    let omitted = find_call(&bounded);
+    let mut restored = find_call(&requests[2].body_json());
+    assert_eq!(restored["result"], result);
+    restored["result"] = json!("");
+    // Model switches can add internal metadata, but the generated call identity and text remain.
+    for field in ["id", "status", "revised_prompt", "result"] {
+        assert_eq!(omitted[field], restored[field]);
+    }
+    assert_eq!(omitted["status"], "completed");
+    assert_eq!(omitted["revised_prompt"], "keep revised prompt");
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
 fn image_url(seed: u32) -> String {
     let image = image::RgbImage::from_fn(128, 64, |x, y| {
         image::Rgb([

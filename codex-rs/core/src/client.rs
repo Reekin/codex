@@ -612,7 +612,7 @@ impl ModelClient {
             RequestRouteTelemetry::for_endpoint(RESPONSES_COMPACT_ENDPOINT),
             self.state.auth_env_telemetry.clone(),
         );
-        let request = self.build_responses_request(
+        let mut request = self.build_responses_request(
             prompt,
             model_info,
             settings.effort,
@@ -620,19 +620,42 @@ impl ModelClient {
             settings.service_tier,
             responses_metadata,
         )?;
+        self.prepare_response_items_for_request(&mut request.input);
+        request.access_programs =
+            cyber_access_program::for_auth(client_setup.auth.as_ref(), prompt.cyber_access_program);
+        crate::request_input_preparation::prepare(
+            &mut request,
+            model_info.input_limits,
+            |request| {
+                crate::request_input_preparation::json_bytes(&serde_json::to_value(
+                    &ApiCompactionInput {
+                        model: &request.model,
+                        input: &request.input,
+                        instructions: &request.instructions,
+                        tools: request.tools.clone(),
+                        parallel_tool_calls: request.parallel_tool_calls,
+                        reasoning: request.reasoning.clone(),
+                        service_tier: request.service_tier.as_deref(),
+                        prompt_cache_key: request.prompt_cache_key.as_deref(),
+                        text: request.text.clone(),
+                        access_programs: request.access_programs,
+                    },
+                )?)
+            },
+        )?;
         let ResponsesApiRequest {
             model,
             instructions,
-            mut input,
+            input,
             tools,
             parallel_tool_calls,
             reasoning,
             service_tier,
             prompt_cache_key,
             text,
+            access_programs,
             ..
         } = request;
-        self.prepare_response_items_for_request(&mut input);
         let payload = ApiCompactionInput {
             model: &model,
             input: &input,
@@ -643,10 +666,7 @@ impl ModelClient {
             service_tier: service_tier.as_deref(),
             prompt_cache_key: prompt_cache_key.as_deref(),
             text,
-            access_programs: cyber_access_program::for_auth(
-                client_setup.auth.as_ref(),
-                prompt.cyber_access_program,
-            ),
+            access_programs,
         };
 
         let mut extra_headers = ApiHeaderMap::new();

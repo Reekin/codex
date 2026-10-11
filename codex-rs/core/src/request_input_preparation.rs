@@ -87,6 +87,20 @@ pub(crate) fn prepare(
     let Some(limits) = limits else { return Ok(()) };
     if let Some(dimension) = limits.max_image_dimension {
         visit_images(&mut request.input, |image| {
+            if let Image::Generated(result) = image {
+                if !result.is_empty() {
+                    let prepared = prepared_image(
+                        &format!("data:image/png;base64,{result}"),
+                        dimension.get(),
+                    )?;
+                    **result = prepared
+                        .split_once(',')
+                        .expect("prepared data URL")
+                        .1
+                        .to_owned();
+                }
+                return Ok(());
+            }
             let url = image.url();
             // External references cannot be inspected locally. Preserve them for the gateway's
             // final validation, while still charging their JSON bytes to the request budget.
@@ -125,6 +139,7 @@ pub(crate) fn prepare(
 enum Image<'a> {
     Message(&'a mut ContentItem),
     Tool(&'a mut FunctionCallOutputContentItem),
+    Generated(&'a mut String),
 }
 
 impl Image<'_> {
@@ -139,6 +154,7 @@ impl Image<'_> {
         match self {
             Self::Message(content) => json_bytes(content),
             Self::Tool(content) => json_bytes(content),
+            Self::Generated(result) => json_bytes(result),
         }
     }
     fn omit(&mut self) {
@@ -153,6 +169,9 @@ impl Image<'_> {
                     text: OMITTED_IMAGE.into(),
                 }
             }
+            // Keep the call record and required string field. Empty base64 represents an omitted
+            // payload without changing its ID, status or revised prompt.
+            Self::Generated(result) => result.clear(),
         }
     }
 }
@@ -163,6 +182,9 @@ fn visit_images(
 ) -> Result<()> {
     for item in input {
         match item {
+            ResponseItem::ImageGenerationCall { result, .. } => {
+                visit(&mut Image::Generated(result))?;
+            }
             ResponseItem::Message { content, .. } => {
                 for content in content {
                     if matches!(content, ContentItem::InputImage { .. }) {

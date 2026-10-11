@@ -123,3 +123,43 @@ fn request_input_limits_reject_zero_and_unknown_fields() {
         assert_eq!(serde_json::to_value(limits).unwrap(), value);
     }
 }
+
+#[test]
+fn request_input_large_history_budget_is_repeatable() {
+    let mut state = 13u32;
+    let pixels = (0..512 * 512 * 3)
+        .map(|_| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 24) as u8
+        })
+        .collect();
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(512, 512, pixels).unwrap())
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .unwrap();
+    let url = codex_utils_image::data_url_from_bytes("image/png", bytes.get_ref());
+    let mut original = request(json!([]));
+    for index in 0..40_000_000usize.div_ceil(url.len()) {
+        original.input.push(
+            serde_json::from_value(json!({"type":"message","role":"user","content":[
+                {"type":"input_text","text":format!("image {index}")},
+                {"type":"input_image","image_url":url}
+            ]}))
+            .unwrap(),
+        );
+    }
+    let limits = Some(
+        serde_json::from_value(json!({"max_image_dimension":2000,"max_request_bytes":30000000}))
+            .unwrap(),
+    );
+    let before = json_bytes(&original).unwrap();
+    let mut prepared = original.clone();
+    prepare(&mut prepared, limits, json_bytes).unwrap();
+    let after = json_bytes(&prepared).unwrap();
+    eprintln!("request_input_large_history: before={before} after={after} budget=30000000");
+    assert!(before >= 40_000_000);
+    assert!(after <= 30_000_000);
+    let mut repeated = original;
+    prepare(&mut repeated, limits, json_bytes).unwrap();
+    assert_eq!(prepared, repeated);
+}
