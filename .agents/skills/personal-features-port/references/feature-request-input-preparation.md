@@ -24,6 +24,27 @@ MUST keep preparation rules in a feature-owned module with small upstream hooks.
 
 Model metadata override loading; request construction before serialization and WebSocket delta comparison; image encoding/cache; session identity propagation; durable history/replay.
 
+## Configuration
+
+The model catalog entry accepts `input_limits.max_image_dimension` (positive pixels) and
+`input_limits.max_request_bytes` (positive uncompressed JSON bytes). Both are optional.
+For a gateway with a 32,000,000-byte provider limit, a client budget of 30,000,000 bytes
+reserves translation headroom; the gateway still validates its final provider request.
+
+```json
+"input_limits": {"max_image_dimension": 2000, "max_request_bytes": 30000000}
+```
+
+Inline message images, tool-result images and generated-image results participate. Remote
+image URLs are not downloaded; their URL JSON contributes to the byte budget and the gateway
+validates the referenced image. Budget removal replaces message/tool images with a short
+omission note and clears generated image payloads while retaining their call record.
+Remote compaction uses its own complete JSON envelope with the same preparation rules.
+
+The configured limit is not a promise of zero cache misses: crossing the budget can remove
+an older image and change that prefix. Stable session identity, unchanged retained prefixes,
+and deterministic image encoding avoid unrelated churn.
+
 ## P0 Acceptance
 
 1. Override configured and unconfigured models through the real model client: inspect captured HTTP bodies for dimensions and byte limits, unchanged unconfigured behavior, preserved text/tool pairing (REQ-1/2/3/5).
