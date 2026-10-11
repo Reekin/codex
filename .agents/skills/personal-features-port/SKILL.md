@@ -47,6 +47,7 @@ Read only the target feature reference unless integration work needs more.
 | Model-aware compaction | `ft/model-aware-compaction-<upstream-version>` | typed projection | `references/feature-model-aware-compaction.md` |
 | Local context compaction | `ft/local-context-compaction-<upstream-version>` | stateful core | `references/feature-local-context-compaction.md` |
 | Large request upload resilience | `ft/large-request-upload-resilience-<upstream-version>` | lifecycle policy | `references/feature-large-request-upload-resilience.md` |
+| Request input preparation | `ft/request-input-preparation-<upstream-version>` | typed projection | `references/feature-request-input-preparation.md` |
 | Stream retry timeout | `ft/stream-retry-timeout-<upstream-version>` | lifecycle policy | `references/feature-stream-retry-timeout.md` |
 | Auth-independent tool exposure | `ft/auth-independent-tools-<upstream-version>` | typed projection | `references/feature-auth-independent-tools.md` |
 | Image-generation options | `ft/imagegen-options-<upstream-version>` | typed projection | `references/feature-imagegen-options.md` |
