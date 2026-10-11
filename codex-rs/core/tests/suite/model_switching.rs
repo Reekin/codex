@@ -1103,6 +1103,7 @@ async fn generated_image_is_replayed_for_image_capable_models() -> Result<()> {
             sse(vec![
                 ev_response_created("resp-1"),
                 ev_image_generation_call("ig_123", "completed", "lobster", "Zm9v"),
+                ev_assistant_message("msg_generated", "The lobster image is ready."),
                 ev_completed_with_tokens("resp-1", /*total_tokens*/ 10),
             ]),
             sse_completed("resp-2"),
@@ -1158,6 +1159,13 @@ async fn generated_image_is_replayed_for_image_capable_models() -> Result<()> {
         1,
         "expected generated image history to be replayed as an image_generation_call"
     );
+    assert_eq!(second_request.body_json()["model"], image_model_slug);
+    assert!(
+        second_request
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text == "describe the generated image")
+    );
     assert_eq!(
         image_generation_calls[0]["result"].as_str(),
         Some("Zm9v"),
@@ -1200,6 +1208,7 @@ async fn model_change_from_generated_image_to_text_preserves_prior_generated_ima
             sse(vec![
                 ev_response_created("resp-1"),
                 ev_image_generation_call("ig_123", "completed", "lobster", "Zm9v"),
+                ev_assistant_message("msg_generated", "The lobster image is ready."),
                 ev_completed_with_tokens("resp-1", /*total_tokens*/ 10),
             ]),
             sse_completed("resp-2"),
@@ -1250,6 +1259,13 @@ async fn model_change_from_generated_image_to_text_preserves_prior_generated_ima
 
     let second_request = requests.last().expect("expected second request");
     let image_generation_calls = second_request.inputs_of_type("image_generation_call");
+    assert_eq!(second_request.body_json()["model"], text_model_slug);
+    assert!(
+        second_request
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text == "describe the generated image")
+    );
     assert!(
         second_request.message_input_image_urls("user").is_empty(),
         "second request should not rewrite generated images into message input images"
@@ -1299,6 +1315,7 @@ async fn thread_rollback_after_generated_image_drops_entire_image_turn_history()
             sse(vec![
                 ev_response_created("resp-1"),
                 ev_image_generation_call("ig_rollback", "completed", "lobster", "Zm9v"),
+                ev_assistant_message("msg_generated", "The lobster image is ready."),
                 ev_completed_with_tokens("resp-1", /*total_tokens*/ 10),
             ]),
             sse_completed("resp-2"),
@@ -1370,6 +1387,12 @@ async fn thread_rollback_after_generated_image_drops_entire_image_turn_history()
             .iter()
             .any(|text| text == "generate a lobster"),
         "rollback should remove the rolled-back image-generation user turn"
+    );
+    assert!(
+        second_request
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text == "after rollback")
     );
     assert!(
         second_request

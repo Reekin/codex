@@ -40,6 +40,7 @@ async fn request_input_generated_image_next_turn_omits_payload_without_losing_ca
                     "keep revised prompt",
                     result,
                 ),
+                ev_assistant_message("msg-generated", "The picture is ready."),
                 ev_completed("resp-1"),
             ]),
             responses::sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
@@ -60,6 +61,21 @@ async fn request_input_generated_image_next_turn_omits_payload_without_losing_ca
             Some(serde_json::from_value(json!({"max_request_bytes":200000})).unwrap());
     });
     let bounded_test = bounded_builder.restart(&server, &test).await?;
+    assert_eq!(
+        bounded_test
+            .config
+            .model_catalog
+            .as_ref()
+            .unwrap()
+            .models
+            .iter()
+            .find(|model| model.slug == MODEL)
+            .unwrap()
+            .input_limits
+            .and_then(|limits| limits.max_request_bytes)
+            .map(NonZeroU64::get),
+        Some(200000),
+    );
     bounded_test
         .submit_text_turn("describe under the byte budget")
         .await?;
@@ -72,6 +88,21 @@ async fn request_input_generated_image_next_turn_omits_payload_without_losing_ca
         .await?;
     let requests = mock.requests();
     assert_eq!(requests.len(), 4);
+    for (request, expected_text) in requests.iter().zip([
+        "generate a picture",
+        "describe the generated picture",
+        "describe under the byte budget",
+        "inspect the original picture",
+    ]) {
+        assert_eq!(request.body_json()["model"], MODEL);
+        assert!(
+            request
+                .message_input_texts("user")
+                .iter()
+                .any(|text| text == expected_text),
+            "captured request must correspond to the intended user turn"
+        );
+    }
     let bounded = requests[2].body_json();
     assert!(serde_json::to_vec(&bounded)?.len() <= 200000);
     let find_call = |body: &Value| {
