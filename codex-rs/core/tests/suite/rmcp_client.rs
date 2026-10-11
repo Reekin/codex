@@ -2775,6 +2775,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 supports_experimental_context: false,
                 use_responses_lite: false,
                 guardian: None,
+                input_limits: None,
                 node_repl_auto_review_required: false,
                 node_repl_disabled: false,
                 auto_review_model_override: None,
