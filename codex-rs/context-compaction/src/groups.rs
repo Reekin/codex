@@ -92,68 +92,108 @@ pub(crate) fn protected_start(items: &[ResponseItemEnvelope]) -> usize {
         .unwrap_or(0)
 }
 
-pub(crate) fn pinned(item: &ResponseItemEnvelope) -> bool {
-    match &item.item {
-        ResponseItem::Message { role, .. } if role == "developer" || role == "system" => true,
-        ResponseItem::Message {
-            role,
-            internal_chat_message_metadata_passthrough: Some(metadata),
-            ..
-        } if role == "user" => metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
-            kinds.iter().any(|kind| {
-                kind.0.ends_with(".instructions") || kind.0 == "environments.environment_context"
-            })
-        }),
-        _ => false,
-    }
+/// Messages Codex renders from typed fragments: instructions, environment and notices. Codex
+/// tags each part with its kind; user input carries `user.*` kinds and messages a client
+/// injected carry none, which reads as `unknown`.
+pub(crate) fn rendered(item: &ResponseItem) -> bool {
+    let ResponseItem::Message {
+        role,
+        internal_chat_message_metadata_passthrough: Some(metadata),
+        ..
+    } = item
+    else {
+        return false;
+    };
+    role != "assistant"
+        && metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
+            !kinds.is_empty()
+                && kinds
+                    .iter()
+                    .all(|kind| kind.0 != "unknown" && !kind.0.starts_with("user."))
+        })
 }
 
-/// Indices of instruction records that a later record of the same kind replaces. Harness
-/// instructions are re-sent whole whenever they change, so only the newest copy is current;
-/// untyped records count as the same only when their text is identical.
-pub(crate) fn superseded_instructions(items: &[ResponseItemEnvelope]) -> Vec<usize> {
+/// Developer or system messages a client injected; Codex cannot render them again.
+pub(crate) fn client_context(item: &ResponseItem) -> bool {
+    matches!(item, ResponseItem::Message { role, .. } if role == "developer" || role == "system")
+        && !rendered(item)
+}
+
+/// Older copies of client-injected messages that recur later with identical text.
+pub(crate) fn repeated_client_context(items: &[ResponseItemEnvelope]) -> Vec<usize> {
     let mut seen = HashSet::new();
-    let mut superseded: Vec<_> = items
+    let mut repeated: Vec<_> = items
         .iter()
         .enumerate()
         .rev()
         .filter_map(|(index, item)| {
-            let key = pinned(item)
-                .then(|| instruction_key(&item.item))
-                .flatten()?;
-            (!seen.insert(key)).then_some(index)
+            let ResponseItem::Message { role, content, .. } = &item.item else {
+                return None;
+            };
+            if !client_context(&item.item) {
+                return None;
+            }
+            let text: String = content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                        Some(text.as_str())
+                    }
+                    ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
+                })
+                .collect();
+            (!seen.insert((role.as_str(), text))).then_some(index)
         })
         .collect();
-    superseded.reverse();
-    superseded
+    repeated.reverse();
+    repeated
 }
 
-fn instruction_key(item: &ResponseItem) -> Option<String> {
+/// What removing message parts left of a record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removal {
+    Unchanged,
+    Partial,
+    All,
+}
+
+/// Removes the message parts whose kind is in `kinds`, for kinds the caller renders again in
+/// full. Kinds are matched exactly, so incremental notices of other kinds stay.
+pub fn remove_parts(item: &mut ResponseItem, kinds: &HashSet<String>) -> Removal {
     let ResponseItem::Message {
-        role,
         content,
-        internal_chat_message_metadata_passthrough,
+        internal_chat_message_metadata_passthrough: Some(metadata),
         ..
     } = item
     else {
-        return None;
+        return Removal::Unchanged;
     };
-    let kinds: Vec<&str> = internal_chat_message_metadata_passthrough
-        .as_ref()
-        .and_then(|metadata| metadata.content_item_kinds.as_ref())
-        .map(|kinds| kinds.iter().map(|kind| kind.0.as_str()).collect())
-        .unwrap_or_default();
-    if !kinds.is_empty() && !kinds.contains(&"unknown") {
-        return Some(format!("{role}:{}", kinds.join(",")));
-    }
-    let text: String = content
+    let Some(part_kinds) = metadata.content_item_kinds.as_mut() else {
+        return Removal::Unchanged;
+    };
+    let removed: Vec<bool> = part_kinds
         .iter()
-        .filter_map(|part| match part {
-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                Some(text.as_str())
-            }
-            ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
-        })
+        .map(|kind| kinds.contains(&kind.0))
         .collect();
-    Some(format!("{role}:text:{text}"))
+    if !removed.contains(&true) {
+        return Removal::Unchanged;
+    }
+    // Parts beyond the recorded kinds are unclassified and stay.
+    let mut index = 0;
+    content.retain(|_| {
+        let keep = !removed.get(index).copied().unwrap_or(false);
+        index += 1;
+        keep
+    });
+    let mut index = 0;
+    part_kinds.retain(|_| {
+        let keep = !removed[index];
+        index += 1;
+        keep
+    });
+    if content.is_empty() {
+        Removal::All
+    } else {
+        Removal::Partial
+    }
 }

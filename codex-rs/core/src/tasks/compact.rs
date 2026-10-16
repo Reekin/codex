@@ -81,9 +81,14 @@ impl SessionTask for CompactTask {
                     // Compaction prompt is synthesized; no UI element ranges to preserve.
                     text_elements: Vec::new(),
                 }];
-                crate::compact::run_compact_task(session.clone(), ctx, input)
-                    .or_cancel(&cancellation_token)
-                    .await?
+                crate::compact::run_compact_task(
+                    session.clone(),
+                    ctx,
+                    input,
+                    cancellation_token.clone(),
+                )
+                .or_cancel(&cancellation_token)
+                .await?
             }
         };
         if support == RemoteCompactionSupport::Unsupported {
