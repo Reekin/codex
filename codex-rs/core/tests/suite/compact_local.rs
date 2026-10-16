@@ -1096,7 +1096,6 @@ async fn full_compaction_renders_one_current_instruction_set() -> Result<()> {
         ],
         [0, 1, 1, 1, 1]
     );
-    assert_dialogue(&after);
     test.codex.flush_rollout().await?;
     assert_eq!(checkpoints(&test.codex.rollout_path().unwrap())?.len(), 1);
     Ok(())

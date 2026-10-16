@@ -95,7 +95,7 @@ pub(crate) fn protected_start(items: &[ResponseItemEnvelope]) -> usize {
 /// Messages Codex renders from typed fragments: instructions, environment and notices. Codex
 /// tags each part with its kind; user input carries `user.*` kinds and messages a client
 /// injected carry none, which reads as `unknown`.
-pub(crate) fn rendered(item: &ResponseItem) -> bool {
+pub fn rendered(item: &ResponseItem) -> bool {
     let ResponseItem::Message {
         role,
         internal_chat_message_metadata_passthrough: Some(metadata),

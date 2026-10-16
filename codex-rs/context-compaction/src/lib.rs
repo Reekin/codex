@@ -14,6 +14,7 @@ pub use cleanup::user_turn;
 pub use groups::Removal;
 pub use groups::is_user_direction;
 pub use groups::remove_parts;
+pub use groups::rendered;
 pub use tiers::SourceRange;
 pub use tiers::WindowPlan;
 
