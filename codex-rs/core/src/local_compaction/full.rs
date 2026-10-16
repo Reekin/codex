@@ -8,6 +8,7 @@ use codex_context_compaction::Removal;
 use codex_context_compaction::WindowPlan;
 use codex_context_compaction::dropped_reasoning;
 use codex_context_compaction::remove_parts;
+use codex_context_compaction::rendered;
 use codex_history::LocalCompactionKind;
 use codex_history::LocalCompactionSource;
 use codex_history::ResponseItemEnvelope;
@@ -196,6 +197,7 @@ pub(crate) async fn run_pipeline(
     } else {
         None
     };
+    let fresh_len = fresh.len();
     let mut replacement = fresh;
     replacement.extend(plan.kept_context.iter().map(|index| source[*index].clone()));
     replacement.extend(summary);
@@ -208,9 +210,17 @@ pub(crate) async fn run_pipeline(
             replacement.push(item);
         }
     }
-    // A compaction that frees nothing is not worth a checkpoint; the turn continues as it
-    // was, whatever the budget says, and the next compaction starts here.
-    if history_tokens(&replacement) >= history_tokens(&source) {
+    // Rendering the instructions again is not worth a checkpoint by itself: with nothing
+    // summarized and every other record unchanged, the turn continues as it was, whatever the
+    // budget says, and the next compaction starts here.
+    let others = |items: &[ResponseItemEnvelope]| {
+        items
+            .iter()
+            .filter(|item| !rendered(&item.item))
+            .map(|item| item.item.clone())
+            .collect::<Vec<_>>()
+    };
+    if plan.summarized.is_none() && others(&replacement[fresh_len..]) == others(&source) {
         return Ok(false);
     }
     if history_tokens(&replacement) > hard_history {
