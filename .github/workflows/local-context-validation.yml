@@ -1,0 +1,71 @@
+name: Fresh instruction set validation
+on:
+  push:
+    branches: ["validation/fresh-instructions-0.154.0"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - uses: ./.github/actions/setup-ci
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        id: cache
+        with:
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: local-context-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: local-context-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}-
+      - name: Install native dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev bubblewrap
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+        with:
+          tool: nextest
+      - name: Test policy and original history queries
+        run: |
+          just test --cargo-profile dev-small -p codex-context-compaction
+          just test --cargo-profile dev-small -p codex-rollout -E 'test(recall)'
+          just test --cargo-profile dev-small -p codex-app-server-protocol -E 'test(schema_fixtures)'
+      - name: Compile touched runtime and regression tests
+        run: cargo check --profile dev-small --tests -p codex-core -p codex-cli -p codex-app-server
+      - name: Build production test executables
+        id: binaries
+        run: cargo build --profile dev-small -p codex-cli -p codex-exec-server -p codex-code-mode-host -p codex-shell-escalation
+      - name: Exercise local compaction model-client paths
+        if: ${{ !cancelled() && steps.binaries.outcome == 'success' }}
+        run: just test --cargo-profile dev-small -p codex-core --test all -E 'test(suite::compact::local::) | test(suite::compact::tool_cleanup::) | test(suite::compact_resume_fork::) | test(suite::model_aware_compaction::) | test(suite::window_headers::) | test(suite::token_usage_rollout::) | test(deferred_executor_noop_cleanup_preserves_then_updates_environment_once)'
+      - name: Exercise runtime policies and tool registration
+        if: ${{ !cancelled() && steps.binaries.outcome == 'success' }}
+        run: just test --cargo-profile dev-small -p codex-core --lib -E 'test(local_compaction) | test(tools::spec_plan) | test(context_manager::history) | test(record_token_usage_info) | test(context_usage) | test(token_budget) | test(config::local_compaction)'
+      - name: Exercise app-server compaction
+        if: ${{ !cancelled() && steps.binaries.outcome == 'success' }}
+        run: just test --cargo-profile dev-small -p codex-app-server --test all -E 'test(suite::v2::compaction::)'
+      - name: Exercise recall CLI
+        if: ${{ !cancelled() && steps.binaries.outcome == 'success' }}
+        run: just test --cargo-profile dev-small -p codex-cli --test recall
+      - name: Production CLI and resume smoke
+        if: ${{ !cancelled() && steps.binaries.outcome == 'success' }}
+        working-directory: .
+        run: python3 scripts/local_context_compaction_smoke.py --codex "$CARGO_TARGET_DIR/dev-small/codex"
+      - uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        if: ${{ !cancelled() && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.cache.outputs.cache-primary-key }}
