@@ -999,3 +999,104 @@ async fn compatible_budget_change_applies_disjoint_cleanup_without_cancelling_ba
     assert_eq!(checkpoints(&path)?.len(), 2);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_compaction_renders_one_current_instruction_set() -> Result<()> {
+    use codex_protocol::config_types::CollaborationMode;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::config_types::Settings;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+    use codex_protocol::protocol::ThreadSettingsOverrides;
+
+    const CLIENT: &str = "CLIENT_INJECTED_SESSION_NOTE";
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    let test = test_codex()
+        .with_config(configure)
+        .build_with_auto_env(&server)
+        .await?;
+    let client_note = || ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: CLIENT.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let set_mode = |instructions: &'static str| {
+        core_test_support::submit_thread_settings(
+            &test.codex,
+            ThreadSettingsOverrides {
+                collaboration_mode: Some(CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: test.session_configured.model.clone(),
+                        reasoning_effort: None,
+                        developer_instructions: Some(instructions.to_string()),
+                    },
+                }),
+                ..Default::default()
+            },
+        )
+    };
+    // Count message parts carrying `marker`, across both roles.
+    let parts = |body: &Value, marker: &str| {
+        body["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .filter(|item| item["type"] == "message")
+            .flat_map(|item| item["content"].as_array().into_iter().flatten())
+            .filter(|content| {
+                content["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(marker))
+            })
+            .count()
+    };
+
+    test.codex
+        .inject_response_items(vec![client_note()])
+        .await?;
+    set_mode("MODE_ALPHA").await?;
+    seed_tools(&test, &model).await?;
+    test.codex
+        .inject_response_items(vec![client_note()])
+        .await?;
+    set_mode("MODE_BETA").await?;
+    model.text("Mode changed.");
+    test.submit_text_turn("Continue in the new mode.").await?;
+    let before = model.ordinary_bodies().last().unwrap().clone();
+    assert_eq!(
+        [
+            parts(&before, "MODE_ALPHA"),
+            parts(&before, "MODE_BETA"),
+            parts(&before, CLIENT)
+        ],
+        [1, 1, 2]
+    );
+
+    test.codex.submit(Op::Compact).await?;
+    complete(&test.codex).await;
+    model.text("Compacted.");
+    test.submit_text_turn("Inspect after compaction.").await?;
+    let after = model.ordinary_bodies().last().unwrap().clone();
+    // The current instructions appear once, the replaced ones not at all, and the client
+    // note, which Codex cannot render again, once.
+    assert_eq!(
+        [
+            parts(&after, "MODE_ALPHA"),
+            parts(&after, "MODE_BETA"),
+            parts(&after, CLIENT),
+            parts(&after, "<permissions instructions>"),
+            parts(&after, "<environment_context>"),
+        ],
+        [0, 1, 1, 1, 1]
+    );
+    test.codex.flush_rollout().await?;
+    assert_eq!(checkpoints(&test.codex.rollout_path().unwrap())?.len(), 1);
+    Ok(())
+}

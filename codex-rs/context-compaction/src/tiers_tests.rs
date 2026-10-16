@@ -6,6 +6,10 @@ use serde_json::json;
 
 use super::SourceRange;
 use super::WindowPlan;
+use crate::Removal;
+use crate::remove_parts;
+use codex_protocol::models::ResponseItem;
+use std::collections::HashSet;
 
 fn item(value: serde_json::Value) -> ResponseItemEnvelope {
     ResponseItemEnvelope::new(serde_json::from_value(value).unwrap())
@@ -72,8 +76,8 @@ fn first_window_within_budget_stays_verbatim_without_a_summary() {
         plan,
         WindowPlan {
             cut: 0,
-            kept_instructions: Vec::new(),
-            superseded: Vec::new(),
+            kept_context: Vec::new(),
+            repeated: Vec::new(),
             kept_input: None,
             summarized: None,
             projected_tokens: 50,
@@ -99,11 +103,11 @@ fn earlier_summary_and_previous_window_are_summarized_and_the_current_window_kep
         plan,
         WindowPlan {
             cut: 6,
-            kept_instructions: vec![0],
-            superseded: Vec::new(),
+            kept_context: Vec::new(),
+            repeated: Vec::new(),
             kept_input: None,
             summarized: range("origin_1", "reply_1"),
-            projected_tokens: 10 + 30 + 50,
+            projected_tokens: 30 + 50,
         }
     );
 }
@@ -125,8 +129,8 @@ fn an_oversized_window_summarizes_its_oldest_part_but_keeps_the_active_input() {
         plan,
         WindowPlan {
             cut: 3,
-            kept_instructions: Vec::new(),
-            superseded: Vec::new(),
+            kept_context: Vec::new(),
+            repeated: Vec::new(),
             kept_input: Some(0),
             summarized: range("call_a", "out_a"),
             projected_tokens: 10 + 1_030 + 50,
@@ -150,11 +154,12 @@ fn repeated_compaction_keeps_history_bounded() {
         let costs = vec![100; history.len()];
         let plan = WindowPlan::new(&history, &costs, 1_000, 200).unwrap();
         assert!(plan.projected_tokens <= 1_000, "round {round}: {plan:?}");
-        let mut next: Vec<_> = plan
-            .kept_instructions
-            .iter()
-            .map(|index| history[*index].clone())
-            .collect();
+        let mut next = vec![instructions()];
+        next.extend(
+            plan.kept_context
+                .iter()
+                .map(|index| history[*index].clone()),
+        );
         if let Some(range) = plan.summarized {
             next.push(summary(&range.first_item_id, &range.last_item_id));
         }
@@ -170,52 +175,75 @@ fn repeated_compaction_keeps_history_bounded() {
 }
 
 #[test]
-fn only_the_newest_copy_of_each_instruction_is_kept() {
-    let typed = |id: &str, text: &str| {
+fn rendered_instructions_are_left_to_the_caller_and_client_context_is_kept_once() {
+    let rendered = |id: &str, text: &str| {
         item(json!({"type":"message", "id":id, "role":"user",
             "content":[{"type":"input_text", "text":text}],
             "internal_chat_message_metadata_passthrough":{"content_item_kinds":["agents_md.instructions"]}}))
     };
-    let untyped = |id: &str, text: &str| {
+    let client = |id: &str, text: &str| {
         item(json!({"type":"message", "id":id, "role":"developer",
             "content":[{"type":"input_text", "text":text}],
             "internal_chat_message_metadata_passthrough":{"content_item_kinds":["unknown"]}}))
     };
     let items = vec![
-        typed("agents_1", "First rules."),
-        untyped("session_1", "Session A."),
+        rendered("agents_1", "First rules."),
+        client("session_1", "Session A."),
         message("user_1", "user", "Investigate."),
-        untyped("session_2", "Session A."),
-        untyped("session_b", "Session B."),
-        typed("agents_2", "Updated rules."),
+        client("session_2", "Session A."),
+        client("session_b", "Session B."),
+        rendered("agents_2", "Updated rules."),
         message("user_2", "user", "Continue."),
         call("a"),
         output("a"),
     ];
-    // Superseded copies cost nothing, wherever the cut falls.
-    let plan = WindowPlan::new(&items, &[100; 9], 1_000, 50).unwrap();
+    // The caller renders instructions again and prices their old copies at zero.
+    let costs = [0, 100, 100, 100, 100, 0, 100, 100, 100];
+    let plan = WindowPlan::new(&items, &costs, 1_000, 50).unwrap();
     assert_eq!(
         plan,
         WindowPlan {
             cut: 0,
-            kept_instructions: Vec::new(),
-            superseded: vec![0, 1],
+            kept_context: Vec::new(),
+            repeated: vec![1],
             kept_input: None,
             summarized: None,
-            projected_tokens: 700,
+            projected_tokens: 600,
         }
     );
-    // Older copies ahead of the cut are neither kept nor summarized.
-    let plan = WindowPlan::new(&items, &[100; 9], 650, 50).unwrap();
+    // Ahead of the cut, rendered records are neither kept nor summarized, and client
+    // context is kept once.
+    let plan = WindowPlan::new(&items, &costs, 560, 50).unwrap();
     assert_eq!(
         plan,
         WindowPlan {
             cut: 3,
-            kept_instructions: Vec::new(),
-            superseded: vec![0, 1],
+            kept_context: Vec::new(),
+            repeated: vec![1],
             kept_input: None,
             summarized: range("user_1", "user_1"),
-            projected_tokens: 600 + 50,
+            projected_tokens: 500 + 50,
         }
+    );
+}
+
+#[test]
+fn removing_rendered_kinds_keeps_the_other_parts_of_a_message() {
+    let mut combined: ResponseItem = serde_json::from_value(json!({"type":"message", "role":"user",
+        "content":[{"type":"input_text", "text":"Rules."}, {"type":"input_text", "text":"Notice."}],
+        "internal_chat_message_metadata_passthrough":{"content_item_kinds":["agents_md.instructions", "permissions.approved_command_prefix_saved"]}}))
+    .unwrap();
+    let kinds = HashSet::from(["agents_md.instructions".to_string()]);
+    assert_eq!(remove_parts(&mut combined, &kinds), Removal::Partial);
+    let expected: ResponseItem = serde_json::from_value(json!({"type":"message", "role":"user",
+        "content":[{"type":"input_text", "text":"Notice."}],
+        "internal_chat_message_metadata_passthrough":{"content_item_kinds":["permissions.approved_command_prefix_saved"]}}))
+    .unwrap();
+    assert_eq!(combined, expected);
+    let kinds = HashSet::from(["permissions.approved_command_prefix_saved".to_string()]);
+    assert_eq!(remove_parts(&mut combined, &kinds), Removal::All);
+    assert_eq!(
+        remove_parts(&mut message("user_1", "user", "Hi.").item, &kinds),
+        Removal::Unchanged
     );
 }

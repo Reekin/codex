@@ -70,11 +70,15 @@ keep original local records queryable without a hosted notes service.
   one new handoff summary of bounded size that keeps user goals, progress, key decisions,
   constraints and preferences, next steps, and critical references, merging the earlier summary.
   The summary request repeats the ordinary request's prefix up to the kept window and appends the
-  question; custom or manual guidance supplements it. After compaction the history is canonical
-  instructions, the summary, the active user input when it is older than the kept window, and the
-  cleaned window. Canonical instructions keep only the newest copy of each kind (untyped
-  instruction records only collapse when their text is identical); older copies are dropped from
-  both the kept instructions and the window. When the cleaned window alone would exceed the configured share of the window
+  question; custom or manual guidance supplements it. After compaction the history is a full
+  instruction set rendered afresh from the current state (as at session start, and the baseline
+  later turns diff against), client-injected developer messages, the summary, the active user
+  input when it is older than the kept window, and the cleaned window. Every earlier copy of what
+  the fresh set renders is gone: Codex-rendered records ahead of the window are dropped, and in
+  the window the message parts whose content kind the fresh set contains are removed. Parts of
+  other kinds, such as incremental notices and event notes, stay where they are. Client-injected
+  messages cannot be rendered again; they are kept, and only collapse when their text is
+  identical. Manual compaction captures a sampling step for this render. When the cleaned window alone would exceed the configured share of the window
   (50% by default), its oldest part is summarized too, at pair-safe boundaries, so repeated
   compaction converges and an arbitrarily long active turn is not indivisible. Pending call groups
   are never summarized. A first compaction with nothing older and a window that fits needs no
