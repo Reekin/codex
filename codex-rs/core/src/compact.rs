@@ -46,6 +46,7 @@ use codex_protocol::user_input::UserInput;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
 use codex_utils_output_truncation::truncate_text;
+use tokio_util::sync::CancellationToken;
 
 pub use codex_prompts::SUMMARY_PREFIX;
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
@@ -180,6 +181,7 @@ pub(crate) async fn run_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     input: Vec<UserInput>,
+    cancellation_token: CancellationToken,
 ) -> CodexResult<()> {
     let start_event = EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: turn_context.sub_id.clone(),
@@ -189,9 +191,13 @@ pub(crate) async fn run_compact_task(
         collaboration_mode_kind: turn_context.mode(),
     });
     sess.send_event(&turn_context, start_event).await;
+    // Full compaction renders fresh instructions from a sampling step's state.
+    let step_context = sess
+        .capture_step_context(turn_context, &cancellation_token)
+        .await?;
     run_compact_task_inner(
         sess.clone(),
-        LocalCompactionContext::from_turn(turn_context),
+        LocalCompactionContext::from_step(step_context),
         input,
         InitialContextInjection::DoNotInject,
         CompactionTrigger::Manual,

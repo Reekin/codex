@@ -1,19 +1,18 @@
 //! Private background marking and atomic installation at ordinary sampling boundaries.
 
+mod full;
 mod marks;
 mod request;
 mod tool_cleanup;
 
+pub(crate) use full::run_pipeline;
 pub use tool_cleanup::ToolCleanupOutcome;
 pub use tool_cleanup::ToolCleanupStatus;
 pub(crate) use tool_cleanup::apply_tool_cleanup;
 pub(crate) use tool_cleanup::tool_cleanup_status;
 
 use crate::compact::CompactedHistoryMetadata;
-use crate::compact::InitialContextInjection;
 use crate::compact::LocalCompactionContext;
-use crate::context::ContextualUserFragment;
-use crate::context::LocalCompactionFragment;
 use crate::context_manager::estimate_item_token_count;
 use crate::responses_metadata::CodexResponsesRequestKind;
 use crate::responses_metadata::CompactionTurnMetadata;
@@ -28,28 +27,18 @@ use codex_context_compaction::Budget;
 use codex_context_compaction::MAX_ANALYSIS_BYTES;
 use codex_context_compaction::MAX_CALL_SUMMARY_BYTES;
 use codex_context_compaction::MAX_FRAGMENT_BYTES;
-use codex_context_compaction::MAX_SUMMARY_BYTES;
 use codex_context_compaction::StagedDecisions;
-use codex_context_compaction::WindowPlan;
 use codex_context_compaction::dropped_reasoning;
 use codex_context_compaction::eligible_results;
 use codex_context_compaction::large_calls;
 use codex_context_compaction::user_turn;
-use codex_history::LocalCompactionKind;
-use codex_history::LocalCompactionSource;
 use codex_history::ResponseItemEnvelope;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::RawResponseCompletedEvent;
-use codex_protocol::user_input::UserInput;
-use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_token_count;
-use codex_utils_output_truncation::approx_tokens_from_byte_count;
-use codex_utils_output_truncation::truncate_text;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -392,189 +381,6 @@ async fn install_marks(
     }
     sess.recompute_token_usage(&context.turn).await;
     Ok(before_tokens - after_tokens)
-}
-
-pub(crate) async fn run_pipeline(
-    sess: &Arc<Session>,
-    context: &LocalCompactionContext,
-    input: Vec<UserInput>,
-    injection: InitialContextInjection,
-    metadata: CompactionTurnMetadata,
-) -> CodexResult<bool> {
-    let _boundary = sess.lock_local_compaction_boundary().await;
-    // Validated marks, including a finished batch, clean the window that stays verbatim.
-    let mut staged = prepared_state(sess, context).await.staged;
-    sess.cancel_local_compaction().await;
-    let generation = sess.get_local_compaction_state().await.generation;
-    let history = sess.clone_history().await;
-    let source = history.annotated_items().to_vec();
-    let revision = history
-        .conversation_history_snapshot()
-        .user_message_revision();
-    staged.retain_current(&source);
-    let (budget, scale) = budget(sess, context).await;
-    let hard_limit = to_estimate(sess.local_compaction_hard_limit(context).await, scale)
-        .min(budget.window_tokens);
-    // Leave space for continued work.
-    let hard_history = hard_limit
-        .saturating_sub(budget.fixed_tokens)
-        .saturating_sub(1);
-    // Tool cleanup keeps records in place, so plan on original indices; trimmed reasoning
-    // costs nothing.
-    let applied = staged.apply(&source).map_err(invalid)?;
-    let mut costs: Vec<_> = applied.iter().map(|item| item_tokens(&item.item)).collect();
-    let dropped = dropped_reasoning(&applied, reasoning_budget(context, budget), &costs);
-    for (cost, dropped) in costs.iter_mut().zip(&dropped) {
-        if *dropped {
-            *cost = 0;
-        }
-    }
-    // The summary and its wrapper are bounded in bytes, measured by the same estimator.
-    let summary_tokens = usize::try_from(approx_tokens_from_byte_count(MAX_SUMMARY_BYTES + 512))
-        .unwrap_or(usize::MAX);
-    let plan = WindowPlan::new(
-        &source,
-        &costs,
-        budget.history_target().min(hard_history),
-        summary_tokens,
-    )
-    .map_err(invalid)?;
-    let supplemental = input
-        .into_iter()
-        .filter_map(|item| match item {
-            UserInput::Text { text, .. } => Some(text),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let guidance = if supplemental.is_empty() {
-        context
-            .turn
-            .config
-            .compact_prompt
-            .clone()
-            .unwrap_or_default()
-    } else {
-        supplemental
-    };
-    let mut observed_response = None;
-    let summary = if let Some(range) = &plan.summarized {
-        let request = request::summary(&guidance)?;
-        let metadata = sess
-            .responses_metadata(
-                &context.turn,
-                CodexResponsesRequestKind::Compaction(metadata),
-            )
-            .await;
-        let mut client = sess.services.model_client.new_session();
-        // Everything before the cut is a prefix of the ordinary request.
-        let prompt = request::private_prompt(
-            context.step.as_deref(),
-            sess.get_prompt_base_instructions().await,
-            &source[..plan.cut],
-            &context.settings.model_info,
-            request,
-        );
-        let trace = inference_trace(sess, context);
-        let mut response =
-            request::infer_json(&prompt, context, &mut client, &metadata, &trace).await?;
-        if let Some(rate_limits) = response.rate_limits.take() {
-            sess.record_rate_limits_info(rate_limits).await;
-        }
-        sess.record_local_compaction_usage(
-            &context.turn,
-            &response.response_id,
-            response.usage.as_ref(),
-            AnalysisKind::Full,
-        )
-        .await?;
-        let text = response.json.trim();
-        if text.is_empty() {
-            return Err(invalid("the summary is empty"));
-        }
-        let text = truncate_text(text, TruncationPolicy::Bytes(MAX_SUMMARY_BYTES));
-        let summarized = LocalCompactionSource {
-            first_item_id: range.first_item_id.clone(),
-            last_item_id: range.last_item_id.clone(),
-            kind: LocalCompactionKind::OldestOverview,
-        };
-        let mut envelope =
-            ResponseItemEnvelope::new(ContextualUserFragment::into(LocalCompactionFragment {
-                text,
-                source: summarized.clone(),
-            }));
-        envelope.metadata.get_or_insert_default().local_compaction = Some(summarized);
-        envelope.item.set_turn_id_if_missing(&context.turn.sub_id);
-        observed_response = Some(response);
-        Some(envelope)
-    } else {
-        None
-    };
-    let mut replacement: Vec<_> = plan
-        .kept_instructions
-        .iter()
-        .map(|index| source[*index].clone())
-        .collect();
-    replacement.extend(summary);
-    replacement.extend(plan.kept_input.map(|index| source[index].clone()));
-    // The cleaned current window stays verbatim and is summarized by the next compaction.
-    for (index, (mut item, dropped)) in applied.into_iter().zip(dropped).enumerate().skip(plan.cut)
-    {
-        if !dropped && !plan.superseded.contains(&index) {
-            item.metadata.get_or_insert_default().previous_window = true;
-            replacement.push(item);
-        }
-    }
-    // Marking the window alone is not worth a checkpoint; the next compaction starts here.
-    // With nothing to change the turn continues as it was, whatever the budget says.
-    if replacement
-        .iter()
-        .map(|item| &item.item)
-        .eq(source.iter().map(|item| &item.item))
-    {
-        return Ok(false);
-    }
-    if history_tokens(&replacement) > hard_history {
-        return Err(invalid("compacted history exceeds its safe budget"));
-    }
-    let baseline = match injection {
-        InitialContextInjection::BeforeLastUserMessage { world_state, .. } => Some(world_state),
-        InitialContextInjection::DoNotInject => None,
-    };
-    let installed = sess
-        .install_local_compaction(
-            &source,
-            revision,
-            generation,
-            replacement,
-            sess.reference_context_item().await,
-            baseline,
-            checkpoint(
-                context,
-                observed_response
-                    .as_ref()
-                    .map(|response| response.response_id.clone()),
-            ),
-            hard_history,
-        )
-        .await?;
-    if installed {
-        if let Some(response) = observed_response {
-            // Full compaction retains its existing completion event after validated install.
-            // Usage was already charged privately; emitting this event must not charge twice.
-            sess.send_event(
-                &context.turn,
-                EventMsg::RawResponseCompleted(RawResponseCompletedEvent {
-                    response_id: response.response_id,
-                    token_usage: response.usage,
-                    usage_metadata: response.usage_metadata,
-                }),
-            )
-            .await;
-        }
-        sess.recompute_token_usage(&context.turn).await;
-    }
-    Ok(installed)
 }
 
 fn checkpoint(

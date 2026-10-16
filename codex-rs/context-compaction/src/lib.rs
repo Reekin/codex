@@ -11,7 +11,9 @@ pub use cleanup::dropped_reasoning;
 pub use cleanup::eligible_results;
 pub use cleanup::large_calls;
 pub use cleanup::user_turn;
+pub use groups::Removal;
 pub use groups::is_user_direction;
+pub use groups::remove_parts;
 pub use tiers::SourceRange;
 pub use tiers::WindowPlan;
 
