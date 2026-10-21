@@ -64,8 +64,12 @@ keep original local records queryable without a hosted notes service.
   occupancy, completion events, or current inference state.
 - **REQ-6**: Full compaction works in windows. The current window (L1, everything since the last
   full compaction) is cleaned by the REQ-3 rules, applying every validated mark regardless of the
-  savings requirement, and then stays verbatim: user and agent messages, kept or shortened tool
-  records, and the current turn's reasoning. It becomes the previous window (L2) of the next full
+  savings requirement. Tool work already judged low value (a shortened or dropped result, or one
+  an earlier cleanup replaced) then leaves the window with its call and the reasoning that led
+  into it; each uninterrupted run of such records becomes one line naming the tools, carrying the
+  shortened conclusions and the original range for recall. Everything else stays verbatim: user
+  and agent messages, tool records that are kept or not yet judged, and the remaining reasoning.
+  The newest work group and pending calls are never folded. The window becomes the previous window (L2) of the next full
   compaction. The earlier summary (L3) and the previous window are summarized by the model into
   one new handoff summary of bounded size that keeps user goals, progress, key decisions,
   constraints and preferences, next steps, and critical references, merging the earlier summary.
@@ -78,11 +82,12 @@ keep original local records queryable without a hosted notes service.
   the window the message parts whose content kind the fresh set contains are removed. Parts of
   other kinds, such as incremental notices and event notes, stay where they are. Client-injected
   messages cannot be rendered again; they are kept, and only collapse when their text is
-  identical. Manual compaction captures a sampling step for this render. When the cleaned window alone would exceed the configured share of the window
-  (50% by default), its oldest part is summarized too, at pair-safe boundaries, so repeated
-  compaction converges and an arbitrarily long active turn is not indivisible. Pending call groups
-  are never summarized. A first compaction with nothing older and a window that fits needs no
-  model request.
+  identical. Manual compaction captures a sampling step for this render. When the folded window
+  alone would exceed the configured share of the window (50% by default), its oldest dialogue and
+  remaining tool records are summarized too, in the same single summary request, at pair-safe
+  boundaries, so repeated compaction converges and an arbitrarily long active turn is not
+  indivisible. Pending call groups are never summarized. A first compaction with nothing older
+  and a window that fits needs no model request.
 - **REQ-7**: Classifier and summary output stays private until validated installation. Persist
   originals and a consistent replacement checkpoint before updating the active view. Failed analysis
   cannot partially install changes; an empty summary is a failure. Real analysis/storage failure or
