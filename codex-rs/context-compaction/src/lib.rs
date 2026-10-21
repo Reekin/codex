@@ -1,6 +1,7 @@
 //! Local compaction policy and validation, independent of model request orchestration.
 
 mod cleanup;
+mod condense;
 mod groups;
 mod tiers;
 
@@ -11,6 +12,8 @@ pub use cleanup::dropped_reasoning;
 pub use cleanup::eligible_results;
 pub use cleanup::large_calls;
 pub use cleanup::user_turn;
+pub use condense::ToolRun;
+pub use condense::tool_runs;
 pub use groups::Removal;
 pub use groups::is_user_direction;
 pub use groups::remove_parts;

@@ -1100,3 +1100,49 @@ async fn full_compaction_renders_one_current_instruction_set() -> Result<()> {
     assert_eq!(checkpoints(&test.codex.rollout_path().unwrap())?.len(), 1);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_compaction_folds_low_value_tool_work_and_keeps_dialogue() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    let test = test_codex()
+        .with_config(configure_marking)
+        .build_with_auto_env(&server)
+        .await?;
+    seed_tools(&test, &model).await?;
+    finish_marking(&test, &model, /*expected_batches*/ 1).await?;
+    test.codex.submit(Op::Compact).await?;
+    complete(&test.codex).await;
+    model.text("Compacted.");
+    test.submit_text_turn("Inspect after compaction.").await?;
+    let after = model.ordinary_bodies().last().unwrap().clone();
+    let input = after["input"].as_array().expect("input");
+    let tool_records = |call_id: &str| {
+        input
+            .iter()
+            .filter(|item| item["call_id"] == call_id)
+            .count()
+    };
+    // Shortened and dropped results go with their calls; the kept result, judged before the
+    // user wrote again, has expired and stays verbatim with its call.
+    assert_eq!(
+        [
+            tool_records("original-shorten"),
+            tool_records("original-drop"),
+            tool_records("original-keep"),
+        ],
+        [0, 0, 2]
+    );
+    let folded: Vec<_> = input
+        .iter()
+        .map(Value::to_string)
+        .filter(|item| item.contains("ToolRun; original range"))
+        .collect();
+    assert!(
+        folded.iter().any(|record| record.contains(SHORTENED)),
+        "{folded:?}"
+    );
+    assert_dialogue(&after);
+    Ok(())
+}

@@ -91,6 +91,8 @@ pub struct LocalCompactionSource {
 #[serde(rename_all = "snake_case")]
 pub enum LocalCompactionKind {
     ToolResult,
+    /// Low-value tool work that full compaction folded into one line.
+    ToolRun,
     CondensedDialogue,
     OldestOverview,
     ConstraintsLedger,

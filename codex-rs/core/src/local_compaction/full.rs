@@ -1,14 +1,17 @@
 //! Full compaction: a fresh instruction set, the handoff summary, and the cleaned current window.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use codex_context_compaction::MAX_SUMMARY_BYTES;
 use codex_context_compaction::Removal;
+use codex_context_compaction::ToolRun;
 use codex_context_compaction::WindowPlan;
 use codex_context_compaction::dropped_reasoning;
 use codex_context_compaction::remove_parts;
 use codex_context_compaction::rendered;
+use codex_context_compaction::tool_runs;
 use codex_history::LocalCompactionKind;
 use codex_history::LocalCompactionSource;
 use codex_history::ResponseItemEnvelope;
@@ -112,6 +115,13 @@ pub(crate) async fn run_pipeline(
             *cost = 0;
         }
     }
+    // Low-value tool work becomes one line per run wherever the cut falls.
+    for run in tool_runs(&applied, &staged, &dropped, 0) {
+        for index in &run.indices {
+            costs[*index] = 0;
+        }
+        costs[run.indices[0]] = item_tokens(&tool_run_record(&applied, &run).item);
+    }
     let fresh_tokens = history_tokens(&fresh);
     // The summary and its wrapper are bounded in bytes, measured by the same estimator.
     let summary_tokens = usize::try_from(approx_tokens_from_byte_count(MAX_SUMMARY_BYTES + 512))
@@ -202,10 +212,21 @@ pub(crate) async fn run_pipeline(
     replacement.extend(plan.kept_context.iter().map(|index| source[*index].clone()));
     replacement.extend(summary);
     replacement.extend(plan.kept_input.map(|index| source[index].clone()));
-    // The cleaned current window stays verbatim and is summarized by the next compaction.
+    // The cleaned current window, with low-value tool work folded, stays verbatim and is
+    // summarized by the next compaction.
+    let mut records = HashMap::new();
+    let mut folded = HashSet::new();
+    for run in tool_runs(&applied, &staged, &dropped, plan.cut) {
+        folded.extend(run.indices.iter().copied());
+        records.insert(run.indices[0], tool_run_record(&applied, &run));
+    }
     for (index, (mut item, dropped)) in applied.into_iter().zip(dropped).enumerate().skip(plan.cut)
     {
-        if !dropped && !plan.repeated.contains(&index) {
+        if let Some(mut record) = records.remove(&index) {
+            record.metadata.get_or_insert_default().previous_window = true;
+            replacement.push(record);
+        }
+        if !dropped && !folded.contains(&index) && !plan.repeated.contains(&index) {
             item.metadata.get_or_insert_default().previous_window = true;
             replacement.push(item);
         }
@@ -261,4 +282,23 @@ pub(crate) async fn run_pipeline(
         sess.recompute_token_usage(&context.turn).await;
     }
     Ok(installed)
+}
+
+/// One line standing in for a run of folded tool records; originals stay in recall.
+fn tool_run_record(items: &[ResponseItemEnvelope], run: &ToolRun) -> ResponseItemEnvelope {
+    let source = LocalCompactionSource {
+        first_item_id: run.first_item_id.clone(),
+        last_item_id: run.last_item_id.clone(),
+        kind: LocalCompactionKind::ToolRun,
+    };
+    let mut record =
+        ResponseItemEnvelope::new(ContextualUserFragment::into(LocalCompactionFragment {
+            text: run.text.clone(),
+            source: source.clone(),
+        }));
+    record.metadata.get_or_insert_default().local_compaction = Some(source);
+    if let Some(turn_id) = items[run.indices[0]].item.turn_id() {
+        record.item.set_turn_id_if_missing(turn_id);
+    }
+    record
 }
