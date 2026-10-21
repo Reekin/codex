@@ -1107,7 +1107,11 @@ async fn full_compaction_folds_low_value_tool_work_and_keeps_dialogue() -> Resul
     let server = start_mock_server().await;
     let model = LocalModel::mount(&server).await;
     let test = test_codex()
-        .with_config(configure_marking)
+        .with_config(|config| {
+            configure_marking(config);
+            // Room for the whole folded window, so only folding shapes the result.
+            config.local_compaction.compact_target_percent = 80;
+        })
         .build_with_auto_env(&server)
         .await?;
     seed_tools(&test, &model).await?;
