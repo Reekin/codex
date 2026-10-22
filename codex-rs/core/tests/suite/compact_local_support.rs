@@ -198,7 +198,13 @@ impl LocalModel {
                     match state.analysis {
                         Analysis::ForeignId => decisions[0]["id"] = json!("foreign-source-id"),
                         Analysis::DuplicateId => decisions.push(decisions[0].clone()),
-                        Analysis::Oversized => decisions[0] = json!({"id":ids[0],"action":"shorten","text":"x".repeat(3001)}),
+                        Analysis::Oversized => {
+                            let index = candidates
+                                .iter()
+                                .position(|candidate| candidate["call_id"].as_str().is_some_and(|call_id| call_id.contains("shorten")))
+                                .unwrap_or(0);
+                            decisions[index] = json!({"id":ids[index],"action":"shorten","text":"x".repeat(3001)});
+                        }
                         _ => {},
                     }
                     state.decisions.extend(decisions.clone());

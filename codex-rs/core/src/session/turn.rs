@@ -490,6 +490,14 @@ pub(crate) async fn run_turn(
                 .await;
                 let needs_follow_up = model_needs_follow_up || has_pending_input;
                 let token_limit_reached = token_status.token_limit_reached;
+                // The request that just returned put its prefix in the prompt cache; a marking
+                // batch extends that prefix. Compaction is about to replace the history instead.
+                if !token_limit_reached
+                    && let Err(error) =
+                        crate::local_compaction::start_marking(&sess, &step_context).await
+                {
+                    tracing::warn!(%error, "cannot start background local marking");
+                }
 
                 trace!(
                     turn_id = %turn_context.sub_id,

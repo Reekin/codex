@@ -16,17 +16,20 @@ keep original local records queryable without a hosted notes service.
 
 - **REQ-1**: A separate background request uses the current step's model and inference settings to
   classify completed, unmarked tool results, including results with images, as keep, shorten, or
-  drop. It repeats the next ordinary
-  request's instructions, tools and history unchanged and only appends the question, so the shared
-  prefix is served from the prompt cache. The question names each candidate by its result ID and the
+  drop. It is sent after an ordinary request returns and repeats that request's instructions,
+  tools and history unchanged, only appending the question, so the shared prefix is served from
+  the prompt cache. The question names each candidate by its result ID and the
   model-visible call ID. A result's size includes its paired call when that call carries large
-  arguments (1,000 bytes or more); such candidates also ask for a one-line call summary. Each batch
-  takes the largest unmarked results first and adds results while their worst-case replacements
-  (never larger than the original) fit half the response limit and the candidate list fits its
-  request cap, so many small results share one batch. Shorten includes concise evidence. Because
-  every batch resends the whole context, a batch starts only once unmarked tool volume reaches a
-  configurable share of the usable window (5% by default); record counts never start one. Only
-  one marking request is in flight per session; normal model work does not wait for it.
+  arguments (1,000 bytes or more); such candidates also ask for a one-line call summary. Because
+  every batch resends the whole context, marking starts only once unmarked tool volume reaches a
+  configurable share of the usable window (5% by default); record counts never start it. It then
+  works through the backlog unmarked at that point, oldest first, one batch at a time; output
+  produced meanwhile waits for the next start. A batch adds results while their worst-case
+  replacements (never larger than the original) fit half the response limit and the candidate
+  list fits its request cap, so many small results share one batch. A batch that is not full is
+  sent only when its results reach 1% of the window (or the start share, if smaller); a smaller
+  remainder waits for the next start. Shorten includes concise evidence. Only one marking
+  request is in flight per session; normal model work does not wait for it.
 - **REQ-2**: Results are stored by stable record ID and original content. Appended messages, new user
   input, and disjoint tool cleanup do not invalidate a batch. Only unchanged, still-present records
   can receive a result. Each decision is validated on its own: unreadable JSON rejects the batch,
@@ -64,7 +67,8 @@ keep original local records queryable without a hosted notes service.
   occupancy, completion events, or current inference state.
 - **REQ-6**: Full compaction works in windows. The current window (L1, everything since the last
   full compaction) is cleaned by the REQ-3 rules, applying every validated mark regardless of the
-  savings requirement. Tool work already judged low value (a shortened or dropped result, or one
+  savings requirement, without waiting for or starting marking; a batch still in flight is
+  cancelled. Tool work already judged low value (a shortened or dropped result, or one
   an earlier cleanup replaced) then leaves the window with its call and the reasoning that led
   into it; each uninterrupted run of such records becomes one line naming the tools, carrying the
   shortened conclusions and the original range for recall. Everything else stays verbatim: user
@@ -73,8 +77,9 @@ keep original local records queryable without a hosted notes service.
   compaction. The earlier summary (L3) and the previous window are summarized by the model into
   one new handoff summary of bounded size that keeps user goals, progress, key decisions,
   constraints and preferences, next steps, and critical references, merging the earlier summary.
-  The summary request repeats the ordinary request's prefix up to the kept window and appends the
-  question; custom or manual guidance supplements it. After compaction the history is a full
+  The summary request repeats the whole ordinary request and appends the question, so the
+  prefix is served from the prompt cache; custom or manual guidance supplements it. After
+  compaction the history is a full
   instruction set rendered afresh from the current state (as at session start, and the baseline
   later turns diff against), client-injected developer messages, the summary, the active user
   input when it is older than the kept window, and the cleaned window. Every earlier copy of what
@@ -83,11 +88,14 @@ keep original local records queryable without a hosted notes service.
   other kinds, such as incremental notices and event notes, stay where they are. Client-injected
   messages cannot be rendered again; they are kept, and only collapse when their text is
   identical. Manual compaction captures a sampling step for this render. When the folded window
-  alone would exceed the configured share of the window (50% by default), its oldest dialogue and
-  remaining tool records are summarized too, in the same single summary request, at pair-safe
-  boundaries, so repeated compaction converges and an arbitrarily long active turn is not
-  indivisible. Pending call groups are never summarized. A first compaction with nothing older
-  and a window that fits needs no model request.
+  would push the history over the configured share of the window (50% by default), earlier user
+  turns give way in value order, each layer oldest first and stopping once the rest fits: their
+  remaining tool records (kept or not yet judged) with their calls; then their intermediate
+  agent messages; then whole turns, including the user's message and the turn's final reply
+  (its last agent message). Removed records are covered by the same single summary request. The
+  current user turn gives way last, by the same layers, and keeps its user message, newest work
+  group and pending calls, so an arbitrarily long active turn is not indivisible. A first
+  compaction with nothing older and a window that fits needs no model request.
 - **REQ-7**: Classifier and summary output stays private until validated installation. Persist
   originals and a consistent replacement checkpoint before updating the active view. Failed analysis
   cannot partially install changes; an empty summary is a failure. Real analysis/storage failure or

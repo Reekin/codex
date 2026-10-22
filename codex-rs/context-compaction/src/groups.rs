@@ -25,6 +25,13 @@ pub fn is_user_direction(item: &ResponseItem) -> bool {
     }
 }
 
+/// A message the user wrote; it starts a user turn.
+pub(crate) fn user_input(item: &ResponseItem) -> bool {
+    matches!(item, ResponseItem::Message { role, .. } if role == "user")
+        && is_user_direction(item)
+        && !rendered(item)
+}
+
 // Type-qualified keys keep unrelated tool families from sharing a call ID.
 pub(crate) fn call_key(item: &ResponseItem) -> Option<(&str, &str)> {
     match item {

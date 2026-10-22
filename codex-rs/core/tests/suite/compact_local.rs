@@ -137,40 +137,46 @@ async fn keep_shorten_drop_preserves_dialogue_pairs_and_recalls_originals() -> R
         .iter()
         .find(|body| analysis_payload(body, CLASSIFY).is_some())
         .expect("classification request");
-    // The classifier repeats the ordinary request verbatim and only appends its question,
-    // so the provider can serve the shared prefix from its prompt cache.
+    // The classifier extends the ordinary request that just returned with that request's
+    // output and only appends its question, so the provider serves the shared prefix from
+    // its prompt cache.
     let classifier_input = classifier["input"].as_array().unwrap();
     let prefix = &classifier_input[..classifier_input.len() - 1];
     assert!(
         bodies.iter().any(|body| {
+            let input = body["input"].as_array().unwrap();
             analysis_payload(body, CLASSIFY).is_none()
                 && body["tools"] == classifier["tools"]
                 && body["instructions"] == classifier["instructions"]
-                && body["input"].as_array().unwrap().starts_with(prefix)
+                && prefix.starts_with(input)
+                && prefix[input.len()..]
+                    .iter()
+                    .all(|item| item["role"] != "user")
         }),
-        "classifier must reuse an ordinary request prefix"
+        "classifier must extend an ordinary request"
     );
     assert!(!classifier.to_string().contains("LOCAL_COMPACTION_SOURCE"));
-    // Candidates are visible tool results, largest first.
+    // Candidates are visible tool results, oldest first.
     let candidates = analysis_payload(classifier, CLASSIFY).unwrap()["candidates"]
         .as_array()
         .unwrap()
         .clone();
-    let sizes = candidates
+    let positions = candidates
         .iter()
         .map(|candidate| {
             prefix
                 .iter()
-                .find(|item| {
+                .position(|item| {
                     item["type"] == "function_call_output"
                         && item["call_id"] == candidate["call_id"]
                 })
-                .expect("candidate call ID is visible")["output"]
-                .to_string()
-                .len()
+                .expect("candidate call ID is visible")
         })
         .collect::<Vec<_>>();
-    assert!(sizes.windows(2).all(|pair| pair[0] >= pair[1]), "{sizes:?}");
+    assert!(
+        positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{positions:?}"
+    );
     let candidate_ids = candidates
         .iter()
         .map(|candidate| candidate["id"].clone())
@@ -292,7 +298,7 @@ async fn flawed_analysis_still_applies_its_usable_decisions(analysis: Analysis) 
         .await?;
     let after = model.ordinary_bodies().last().unwrap().clone();
     assert_dialogue(&after);
-    // The largest candidate carries the flaw; the other decisions still install.
+    // One candidate carries the flaw; the other decisions still install.
     assert!(
         output(&after, "original-drop")
             .to_string()
@@ -775,15 +781,12 @@ async fn keeps_are_reconsidered_after_new_user_input() -> Result<()> {
         .await?;
     seed_tools(&test, &model).await?;
     finish_marking(&test, &model, /*expected_batches*/ 1).await?;
-    let kept = model
-        .decisions()
+    let kept = model.decisions()[..4]
         .iter()
         .map(|decision| decision["id"].clone())
         .collect::<Vec<_>>();
-    assert_eq!(kept.len(), 4);
-    // Without new user input the keeps hold and nothing is classified again.
-    test.codex.flush_rollout().await?;
-    assert_eq!(model.decisions().len(), kept.len());
+    // A keep holds only for the user turn it was made in; after new user input the next
+    // batch reconsiders it.
     model.text("New direction acknowledged.");
     test.submit_text_turn("The task has moved on.").await?;
     finish_marking(&test, &model, /*expected_batches*/ 2).await?;
@@ -1148,5 +1151,31 @@ async fn full_compaction_folds_low_value_tool_work_and_keeps_dialogue() -> Resul
         "{folded:?}"
     );
     assert_dialogue(&after);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn full_compaction_summary_extends_the_ordinary_request_prefix() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let model = LocalModel::mount(&server).await;
+    let test = test_codex()
+        .with_config(configure)
+        .build_with_auto_env(&server)
+        .await?;
+    seed_tools(&test, &model).await?;
+    let before = model.ordinary_bodies().last().unwrap().clone();
+    test.codex.submit(Op::Compact).await?;
+    complete(&test.codex).await;
+    let bodies = model.bodies();
+    let summary = bodies
+        .iter()
+        .find(|body| analysis_payload(body, SUMMARIZE).is_some())
+        .expect("summary request");
+    // The whole history is sent, so the provider serves it from the prompt cache.
+    let input = summary["input"].as_array().unwrap();
+    assert!(input.starts_with(before["input"].as_array().unwrap()));
+    assert_eq!(summary["tools"], before["tools"]);
+    assert_eq!(summary["instructions"], before["instructions"]);
     Ok(())
 }

@@ -1,11 +1,13 @@
 //! Private background marking and atomic installation at ordinary sampling boundaries.
 
 mod full;
+mod marking;
 mod marks;
 mod request;
 mod tool_cleanup;
 
 pub(crate) use full::run_pipeline;
+pub(crate) use marking::start_marking;
 pub use tool_cleanup::ToolCleanupOutcome;
 pub use tool_cleanup::ToolCleanupStatus;
 pub(crate) use tool_cleanup::apply_tool_cleanup;
@@ -14,24 +16,12 @@ pub(crate) use tool_cleanup::tool_cleanup_status;
 use crate::compact::CompactedHistoryMetadata;
 use crate::compact::LocalCompactionContext;
 use crate::context_manager::estimate_item_token_count;
-use crate::responses_metadata::CodexResponsesRequestKind;
-use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
-use codex_analytics::CompactionImplementation;
-use codex_analytics::CompactionPhase;
-use codex_analytics::CompactionReason;
-use codex_analytics::CompactionTrigger;
 use codex_context_compaction::Budget;
-use codex_context_compaction::MAX_ANALYSIS_BYTES;
-use codex_context_compaction::MAX_CALL_SUMMARY_BYTES;
-use codex_context_compaction::MAX_FRAGMENT_BYTES;
 use codex_context_compaction::StagedDecisions;
 use codex_context_compaction::dropped_reasoning;
-use codex_context_compaction::eligible_results;
-use codex_context_compaction::large_calls;
-use codex_context_compaction::user_turn;
 use codex_history::ResponseItemEnvelope;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErr;
@@ -57,6 +47,8 @@ pub(crate) struct LocalCompactionState {
     /// Durable marks are replayed once per full window, after resume or full compaction.
     restored: bool,
     background: Option<Arc<BackgroundMarking>>,
+    /// Unmarked results present when marking started, still to be marked.
+    backlog: Option<std::collections::HashSet<String>>,
     retry_after: Option<Instant>,
     /// Serializes automatic and manual tool cleanup; survives full-window resets.
     boundary: Arc<tokio::sync::Mutex<()>>,
@@ -117,6 +109,7 @@ pub(crate) fn uses_local_route(turn: &TurnContext, model_info: &ModelInfo) -> bo
     ) == RemoteCompactionSupport::Unsupported
 }
 
+/// Installs validated marks before an ordinary request when they release enough.
 pub(crate) async fn maybe_clean_history(
     sess: &Arc<Session>,
     step: &Arc<StepContext>,
@@ -124,185 +117,9 @@ pub(crate) async fn maybe_clean_history(
     let _boundary = sess.lock_local_compaction_boundary().await;
     let context = LocalCompactionContext::from_step(Arc::clone(step));
     let mut state = prepared_state(sess, &context).await;
-    let result = clean_and_launch(sess, step, context, &mut state).await;
-    // A concurrent full-window reset owns the new generation and discards this batch.
+    let result = install_marks(sess, &context, &mut state, CleanupTrigger::Savings).await;
     sess.set_local_compaction_state(state).await;
-    result
-}
-
-async fn clean_and_launch(
-    sess: &Arc<Session>,
-    step: &Arc<StepContext>,
-    context: LocalCompactionContext,
-    state: &mut LocalCompactionState,
-) -> CodexResult<()> {
-    let (budget, _) = budget(sess, &context).await;
-    install_marks(sess, &context, state, CleanupTrigger::Savings).await?;
-    let history = sess.clone_history().await;
-    let source = history.annotated_items();
-    state.staged.retain_current(source);
-    if state.background.is_none()
-        && state
-            .retry_after
-            .is_none_or(|retry| Instant::now() >= retry)
-    {
-        let eligible = eligible_results(source);
-        let turn = user_turn(source);
-        // A result's weight includes the large call it is shortened together with.
-        let calls = large_calls(source);
-        let weight = |item: &ResponseItemEnvelope| {
-            item_tokens(&item.item).saturating_add(
-                item.item
-                    .id()
-                    .and_then(|id| calls.get(id.as_str()))
-                    .map_or(0, |&call| item_tokens(&source[call].item)),
-            )
-        };
-        let unmarked: Vec<_> = source
-            .iter()
-            .filter(|item| {
-                !state.staged.decided(item, turn.as_deref())
-                    && item
-                        .item
-                        .id()
-                        .is_some_and(|id| eligible.iter().any(|eligible| eligible == id.as_str()))
-            })
-            .collect();
-        let tokens: usize = unmarked.iter().map(|item| weight(*item)).sum();
-        // Every batch resends the whole context, so only enough unmarked volume justifies one.
-        let accumulated = tokens
-            >= budget
-                .window_tokens
-                .saturating_mul(usize::from(
-                    context
-                        .turn
-                        .config
-                        .local_compaction
-                        .mark_after_tokens_percent,
-                ))
-                .div_ceil(100)
-                .max(1);
-        // Marks are always useful: full compaction applies them to the window it keeps.
-        if !unmarked.is_empty() && accumulated {
-            // Each batch costs one full-context request; spend it on the largest outputs.
-            // A replacement is never larger than its original, so small outputs cost little
-            // response space and many fit in one batch; the request cap trims the rest.
-            let mut unmarked = unmarked;
-            unmarked.sort_by_key(|item| std::cmp::Reverse(weight(*item)));
-            let mut response_bytes = 0_usize;
-            let mut candidates: Vec<_> = unmarked
-                .into_iter()
-                .filter_map(|item| {
-                    let mut candidate = request::Candidate::new(&item.item)?;
-                    candidate.summarize_call = calls.contains_key(&candidate.id);
-                    let worst = item_tokens(&item.item)
-                        .saturating_mul(4)
-                        .min(MAX_FRAGMENT_BYTES)
-                        .saturating_add(candidate.id.len() + 64)
-                        .saturating_add(if candidate.summarize_call {
-                            MAX_CALL_SUMMARY_BYTES
-                        } else {
-                            0
-                        });
-                    Some((candidate, worst))
-                })
-                .take_while(|(_, worst)| {
-                    response_bytes = response_bytes.saturating_add(*worst);
-                    response_bytes <= MAX_ANALYSIS_BYTES / 2
-                })
-                .map(|(candidate, _)| candidate)
-                .collect();
-            let source = source.to_vec();
-            let request = match request::classifier(
-                &mut candidates,
-                context.turn.config.compact_prompt.as_deref().unwrap_or(""),
-            ) {
-                Ok(request) => request,
-                Err(error) => {
-                    tracing::warn!(%error, "cannot prepare background local marking");
-                    state.retry_after = Some(Instant::now() + Duration::from_secs(60));
-                    return Ok(());
-                }
-            };
-            let ids: Vec<_> = candidates
-                .into_iter()
-                .map(|candidate| candidate.id)
-                .collect();
-            let prompt = request::private_prompt(
-                Some(step),
-                sess.get_prompt_base_instructions().await,
-                &source,
-                &step.settings.model_info,
-                request,
-            );
-            let metadata = sess
-                .responses_metadata(
-                    &context.turn,
-                    CodexResponsesRequestKind::Compaction(CompactionTurnMetadata::new(
-                        CompactionTrigger::Auto,
-                        CompactionReason::ContextLimit,
-                        CompactionImplementation::Responses,
-                        CompactionPhase::MidTurn,
-                    )),
-                )
-                .await;
-            let mut client = sess.services.model_client.new_session();
-            if !sess
-                .begin_local_compaction_usage(&context.turn.sub_id, state.generation)
-                .await
-            {
-                return Ok(());
-            }
-            let trace = inference_trace(sess, &context);
-            let weak = Arc::downgrade(sess);
-            let completed = Arc::new(Mutex::new(MarkingResult::default()));
-            let result_slot = Arc::clone(&completed);
-            let task = tokio::spawn(async move {
-                let result = async {
-                    let response =
-                        request::infer_json(&prompt, &context, &mut client, &metadata, &trace)
-                            .await?;
-                    if let Some(sess) = weak.upgrade() {
-                        if let Some(rate_limits) = response.rate_limits {
-                            sess.record_rate_limits_info(rate_limits).await;
-                        }
-                        sess.record_local_compaction_usage(
-                            &context.turn,
-                            &response.response_id,
-                            response.usage.as_ref(),
-                            AnalysisKind::Background,
-                        )
-                        .await?;
-                    }
-                    let decisions = StagedDecisions::parse_candidates(source, &ids, &response.json)
-                        .map_err(invalid)?;
-                    if let Some(path) = weak
-                        .upgrade()
-                        .and_then(|sess| marks::path(&sess, &context.turn.config))
-                    {
-                        marks::append(path, &decisions).await;
-                    }
-                    Ok(decisions)
-                }
-                .await;
-                *result_slot.lock().expect("marking result lock") = MarkingResult {
-                    value: Some(result),
-                    finished: true,
-                };
-                if let Some(sess) = weak.upgrade() {
-                    // This event is also the observable ready barrier. Preserve the foreground
-                    // snapshot; this request may belong to a model used in an earlier turn.
-                    sess.send_local_compaction_token_count(&context.turn).await;
-                }
-            });
-            state.background = Some(Arc::new(BackgroundMarking {
-                abort: task.abort_handle(),
-                completed,
-            }));
-            state.retry_after = None;
-        }
-    }
-    Ok(())
+    result.map(|_| ())
 }
 
 /// Restores durable marks and takes a finished background batch. Callers hold the boundary lock.
