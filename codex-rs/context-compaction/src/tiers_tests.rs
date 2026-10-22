@@ -62,25 +62,37 @@ fn range(first: &str, last: &str) -> Option<SourceRange> {
     })
 }
 
+fn assistant(id: &str, text: &str) -> ResponseItemEnvelope {
+    message(id, "assistant", text)
+}
+
+/// Records removed by the plan, by index.
+fn removed(plan: &WindowPlan) -> Vec<usize> {
+    plan.removed
+        .iter()
+        .enumerate()
+        .filter_map(|(index, removed)| removed.then_some(index))
+        .collect()
+}
+
 #[test]
 fn first_window_within_budget_stays_verbatim_without_a_summary() {
     let items = vec![
-        instructions(),
         message("user_1", "user", "Investigate."),
         call("a"),
         output("a"),
-        message("reply_1", "assistant", "Found it."),
+        assistant("reply_1", "Found it."),
     ];
-    let plan = WindowPlan::new(&items, &[10; 5], 100, 50).unwrap();
+    let plan = WindowPlan::new(&items, &[10; 4], 100, 50).unwrap();
     assert_eq!(
         plan,
         WindowPlan {
-            cut: 0,
+            removed: vec![false; 4],
+            window_start: 0,
             kept_context: Vec::new(),
-            repeated: Vec::new(),
             kept_input: None,
             summarized: None,
-            projected_tokens: 50,
+            projected_tokens: 40,
         }
     );
 }
@@ -88,12 +100,12 @@ fn first_window_within_budget_stays_verbatim_without_a_summary() {
 #[test]
 fn earlier_summary_and_previous_window_are_summarized_and_the_current_window_kept() {
     let items = vec![
-        instructions(),
+        previous(instructions()),
         summary("origin_1", "origin_9"),
         previous(message("user_1", "user", "Investigate.")),
         previous(call("a")),
         previous(output("a")),
-        previous(message("reply_1", "assistant", "Found it.")),
+        previous(assistant("reply_1", "Found it.")),
         message("user_2", "user", "Now fix it."),
         call("b"),
         output("b"),
@@ -102,9 +114,9 @@ fn earlier_summary_and_previous_window_are_summarized_and_the_current_window_kep
     assert_eq!(
         plan,
         WindowPlan {
-            cut: 6,
+            removed: [vec![true; 6], vec![false; 3]].concat(),
+            window_start: 6,
             kept_context: Vec::new(),
-            repeated: Vec::new(),
             kept_input: None,
             summarized: range("origin_1", "reply_1"),
             projected_tokens: 30 + 50,
@@ -113,36 +125,92 @@ fn earlier_summary_and_previous_window_are_summarized_and_the_current_window_kep
 }
 
 #[test]
-fn an_oversized_window_summarizes_its_oldest_part_but_keeps_the_active_input() {
+fn an_active_input_ahead_of_the_window_is_kept() {
     let items = vec![
-        message("user_1", "user", "Investigate everything."),
-        call("a"),
-        output("a"),
-        message("reply_1", "assistant", "Next."),
+        previous(message("user_1", "user", "Keep going.")),
+        previous(call("a")),
+        previous(output("a")),
         call("b"),
         output("b"),
-        call("pending"),
     ];
-    let costs = [10, 10, 1_000, 10, 10, 1_000, 10];
-    let plan = WindowPlan::new(&items, &costs, 1_100, 50).unwrap();
+    let plan = WindowPlan::new(&items, &[10; 5], 1_000, 50).unwrap();
     assert_eq!(
-        plan,
-        WindowPlan {
-            cut: 3,
-            kept_context: Vec::new(),
-            repeated: Vec::new(),
-            kept_input: Some(0),
-            summarized: range("call_a", "out_a"),
-            projected_tokens: 10 + 1_030 + 50,
-        }
+        (removed(&plan), plan.kept_input, plan.summarized),
+        (vec![1, 2], Some(0), range("call_a", "out_a"))
     );
-    // Nothing fits: the latest cut is used, and the unresolved call is never summarized.
-    assert_eq!(WindowPlan::new(&items, &costs, 10, 50).unwrap().cut, 6);
+}
+
+#[test]
+fn earlier_turns_give_way_tool_records_then_interim_replies_then_whole_turns() {
+    let items = vec![
+        message("user_1", "user", "Investigate."),
+        call("a"),
+        output("a"),
+        assistant("interim_1", "Checking."),
+        call("b"),
+        output("b"),
+        assistant("reply_1", "Found it."),
+        message("user_2", "user", "Fix it."),
+        call("c"),
+        output("c"),
+        assistant("reply_2", "Fixed."),
+        message("user_3", "user", "Verify."),
+        call("d"),
+        output("d"),
+    ];
+    let costs: Vec<_> = items
+        .iter()
+        .map(|item| {
+            if matches!(item.item, ResponseItem::FunctionCallOutput { .. }) {
+                100
+            } else {
+                10
+            }
+        })
+        .collect();
+    // Tool records go oldest first, until the rest and the summary fit.
+    let plan = WindowPlan::new(&items, &costs, 400, 50).unwrap();
+    assert_eq!(
+        (removed(&plan), plan.summarized, plan.projected_tokens),
+        (vec![1, 2, 4, 5], range("call_a", "out_b"), 280 + 50)
+    );
+    let plan = WindowPlan::new(&items, &costs, 230, 50).unwrap();
+    assert_eq!(removed(&plan), vec![1, 2, 4, 5, 8, 9]);
+    // Then intermediate replies, then whole turns; the current turn's input and newest work
+    // group stay even when the rest cannot fit.
+    let plan = WindowPlan::new(&items, &costs, 210, 50).unwrap();
+    assert_eq!(removed(&plan), vec![1, 2, 3, 4, 5, 8, 9]);
+    let plan = WindowPlan::new(&items, &costs, 150, 50).unwrap();
+    assert_eq!(
+        (removed(&plan), plan.projected_tokens),
+        ((0..11).collect::<Vec<_>>(), 120 + 50)
+    );
+}
+
+#[test]
+fn the_current_turn_gives_way_last_outside_its_newest_work_group() {
+    let items = vec![
+        message("user_1", "user", "Work through it."),
+        call("a"),
+        output("a"),
+        assistant("interim_1", "Next."),
+        call("b"),
+        output("b"),
+        assistant("interim_2", "Next."),
+        call("c"),
+        output("c"),
+    ];
+    let costs = [10, 10, 100, 10, 10, 100, 10, 10, 100];
+    let plan = WindowPlan::new(&items, &costs, 200, 50).unwrap();
+    assert_eq!(
+        (removed(&plan), plan.projected_tokens),
+        (vec![1, 2, 4, 5], 140 + 50)
+    );
 }
 
 #[test]
 fn repeated_compaction_keeps_history_bounded() {
-    let mut history = vec![instructions()];
+    let mut history = Vec::new();
     for round in 0..6 {
         history.push(message(&format!("user_{round}"), "user", "Continue."));
         for step in 0..3 {
@@ -150,21 +218,27 @@ fn repeated_compaction_keeps_history_bounded() {
             history.push(call(&id));
             history.push(output(&id));
         }
-        history.push(message(&format!("reply_{round}"), "assistant", "Progress."));
+        history.push(assistant(&format!("reply_{round}"), "Progress."));
         let costs = vec![100; history.len()];
-        let plan = WindowPlan::new(&history, &costs, 1_000, 200).unwrap();
-        assert!(plan.projected_tokens <= 1_000, "round {round}: {plan:?}");
-        let mut next = vec![instructions()];
-        next.extend(
-            plan.kept_context
-                .iter()
-                .map(|index| history[*index].clone()),
-        );
-        if let Some(range) = plan.summarized {
+        let plan = WindowPlan::new(&history, &costs, 700, 200).unwrap();
+        assert!(plan.projected_tokens <= 700, "round {round}: {plan:?}");
+        let mut next: Vec<_> = plan
+            .kept_context
+            .iter()
+            .map(|index| history[*index].clone())
+            .collect();
+        if let Some(range) = &plan.summarized {
             next.push(summary(&range.first_item_id, &range.last_item_id));
         }
         next.extend(plan.kept_input.map(|index| history[index].clone()));
-        next.extend(history[plan.cut..].iter().cloned().map(previous));
+        next.extend(
+            history
+                .iter()
+                .zip(&plan.removed)
+                .skip(plan.window_start)
+                .filter(|(_, removed)| !**removed)
+                .map(|(item, _)| previous(item.clone())),
+        );
         history = next;
         assert!(
             history.len() <= 12,
@@ -175,51 +249,29 @@ fn repeated_compaction_keeps_history_bounded() {
 }
 
 #[test]
-fn rendered_instructions_are_left_to_the_caller_and_client_context_is_kept_once() {
-    let rendered = |id: &str, text: &str| {
-        item(json!({"type":"message", "id":id, "role":"user",
-            "content":[{"type":"input_text", "text":text}],
-            "internal_chat_message_metadata_passthrough":{"content_item_kinds":["agents_md.instructions"]}}))
-    };
+fn rendered_records_ahead_of_the_window_go_unsummarized_and_client_context_is_kept_once() {
     let client = |id: &str, text: &str| {
         item(json!({"type":"message", "id":id, "role":"developer",
             "content":[{"type":"input_text", "text":text}],
             "internal_chat_message_metadata_passthrough":{"content_item_kinds":["unknown"]}}))
     };
     let items = vec![
-        rendered("agents_1", "First rules."),
-        client("session_1", "Session A."),
-        message("user_1", "user", "Investigate."),
-        client("session_2", "Session A."),
-        client("session_b", "Session B."),
-        rendered("agents_2", "Updated rules."),
+        previous(instructions()),
+        previous(client("session_1", "Session A.")),
+        previous(message("user_1", "user", "Investigate.")),
+        previous(client("session_2", "Session A.")),
+        previous(client("session_b", "Session B.")),
         message("user_2", "user", "Continue."),
         call("a"),
         output("a"),
     ];
-    // The caller renders instructions again and prices their old copies at zero.
-    let costs = [0, 100, 100, 100, 100, 0, 100, 100, 100];
-    let plan = WindowPlan::new(&items, &costs, 1_000, 50).unwrap();
+    let plan = WindowPlan::new(&items, &[100; 8], 1_000, 50).unwrap();
     assert_eq!(
         plan,
         WindowPlan {
-            cut: 0,
-            kept_context: Vec::new(),
-            repeated: vec![1],
-            kept_input: None,
-            summarized: None,
-            projected_tokens: 600,
-        }
-    );
-    // Ahead of the cut, rendered records are neither kept nor summarized, and client
-    // context is kept once.
-    let plan = WindowPlan::new(&items, &costs, 560, 50).unwrap();
-    assert_eq!(
-        plan,
-        WindowPlan {
-            cut: 3,
-            kept_context: Vec::new(),
-            repeated: vec![1],
+            removed: [vec![true; 3], vec![false; 5]].concat(),
+            window_start: 5,
+            kept_context: vec![3, 4],
             kept_input: None,
             summarized: range("user_1", "user_1"),
             projected_tokens: 500 + 50,

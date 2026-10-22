@@ -1,6 +1,5 @@
 //! Full compaction: a fresh instruction set, the handoff summary, and the cleaned current window.
 
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -100,34 +99,41 @@ pub(crate) async fn run_pipeline(
     let hard_history = hard_limit
         .saturating_sub(budget.fixed_tokens)
         .saturating_sub(1);
-    // Tool cleanup keeps records in place, so plan on original indices; trimmed reasoning
-    // and instruction parts rendered again cost nothing.
     let mut applied = staged.apply(&source).map_err(invalid)?;
-    let mut costs: Vec<_> = applied.iter().map(|item| item_tokens(&item.item)).collect();
+    let costs: Vec<_> = applied.iter().map(|item| item_tokens(&item.item)).collect();
     let mut dropped = dropped_reasoning(&applied, reasoning_budget(context, budget), &costs);
-    for ((item, cost), dropped) in applied.iter_mut().zip(&mut costs).zip(&mut dropped) {
-        match remove_parts(&mut item.item, &fresh_kinds) {
-            Removal::Unchanged => {}
-            Removal::Partial => *cost = item_tokens(&item.item),
-            Removal::All => *dropped = true,
-        }
-        if *dropped {
-            *cost = 0;
+    for (item, dropped) in applied.iter_mut().zip(&mut dropped) {
+        if remove_parts(&mut item.item, &fresh_kinds) == Removal::All {
+            *dropped = true;
         }
     }
-    // Low-value tool work becomes one line per run wherever the cut falls.
-    for run in tool_runs(&applied, &staged, &dropped, 0) {
-        for index in &run.indices {
-            costs[*index] = 0;
+    // The plan works on the cleaned history, with low-value tool work folded into one line
+    // per run.
+    let runs = tool_runs(&applied, &staged, &dropped, 0);
+    let folded: HashSet<usize> = runs.iter().flat_map(|run| run.indices.clone()).collect();
+    let mut records: Vec<_> = runs
+        .iter()
+        .map(|run| (run.indices[0], tool_run_record(&applied, run)))
+        .collect();
+    records.reverse();
+    let mut working = Vec::with_capacity(applied.len());
+    for (index, (item, dropped)) in applied.into_iter().zip(dropped).enumerate() {
+        if records.last().is_some_and(|(first, _)| *first == index)
+            && let Some((_, record)) = records.pop()
+        {
+            working.push(record);
         }
-        costs[run.indices[0]] = item_tokens(&tool_run_record(&applied, &run).item);
+        if !dropped && !folded.contains(&index) {
+            working.push(item);
+        }
     }
+    let costs: Vec<_> = working.iter().map(|item| item_tokens(&item.item)).collect();
     let fresh_tokens = history_tokens(&fresh);
     // The summary and its wrapper are bounded in bytes, measured by the same estimator.
     let summary_tokens = usize::try_from(approx_tokens_from_byte_count(MAX_SUMMARY_BYTES + 512))
         .unwrap_or(usize::MAX);
     let plan = WindowPlan::new(
-        &source,
+        &working,
         &costs,
         budget
             .history_target()
@@ -164,11 +170,13 @@ pub(crate) async fn run_pipeline(
             )
             .await;
         let mut client = sess.services.model_client.new_session();
-        // Everything before the cut is a prefix of the ordinary request.
+        // The whole history is the ordinary request's prefix, so it is served from the
+        // prompt cache; a truncated prefix would miss it on providers that cache at request
+        // boundaries.
         let prompt = request::private_prompt(
             context.step.as_deref(),
             sess.get_prompt_base_instructions().await,
-            &source[..plan.cut],
+            &source,
             &context.settings.model_info,
             request,
         );
@@ -209,24 +217,20 @@ pub(crate) async fn run_pipeline(
     };
     let fresh_len = fresh.len();
     let mut replacement = fresh;
-    replacement.extend(plan.kept_context.iter().map(|index| source[*index].clone()));
+    replacement.extend(
+        plan.kept_context
+            .iter()
+            .map(|index| working[*index].clone()),
+    );
     replacement.extend(summary);
-    replacement.extend(plan.kept_input.map(|index| source[index].clone()));
-    // The cleaned current window, with low-value tool work folded, stays verbatim and is
-    // summarized by the next compaction.
-    let mut records = HashMap::new();
-    let mut folded = HashSet::new();
-    for run in tool_runs(&applied, &staged, &dropped, plan.cut) {
-        folded.extend(run.indices.iter().copied());
-        records.insert(run.indices[0], tool_run_record(&applied, &run));
-    }
-    for (index, (mut item, dropped)) in applied.into_iter().zip(dropped).enumerate().skip(plan.cut)
+    replacement.extend(plan.kept_input.map(|index| working[index].clone()));
+    // What stays of the current window is verbatim and summarized by the next compaction.
+    for (mut item, removed) in working
+        .into_iter()
+        .zip(plan.removed)
+        .skip(plan.window_start)
     {
-        if let Some(mut record) = records.remove(&index) {
-            record.metadata.get_or_insert_default().previous_window = true;
-            replacement.push(record);
-        }
-        if !dropped && !folded.contains(&index) && !plan.repeated.contains(&index) {
+        if !removed {
             item.metadata.get_or_insert_default().previous_window = true;
             replacement.push(item);
         }
@@ -284,7 +288,8 @@ pub(crate) async fn run_pipeline(
     Ok(installed)
 }
 
-/// One line standing in for a run of folded tool records; originals stay in recall.
+/// One line standing in for a run of folded tool records; originals stay in recall. It belongs
+/// to the window its records belonged to.
 fn tool_run_record(items: &[ResponseItemEnvelope], run: &ToolRun) -> ResponseItemEnvelope {
     let source = LocalCompactionSource {
         first_item_id: run.first_item_id.clone(),
@@ -297,6 +302,10 @@ fn tool_run_record(items: &[ResponseItemEnvelope], run: &ToolRun) -> ResponseIte
             source: source.clone(),
         }));
     record.metadata.get_or_insert_default().local_compaction = Some(source);
+    record.metadata.get_or_insert_default().previous_window = items[run.indices[0]]
+        .metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.previous_window);
     if let Some(turn_id) = items[run.indices[0]].item.turn_id() {
         record.item.set_turn_id_if_missing(turn_id);
     }
