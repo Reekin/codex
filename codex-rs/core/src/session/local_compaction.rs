@@ -120,10 +120,10 @@ impl Session {
             });
             info.total_token_usage.add_assign(usage);
             state.set_token_info(Some(info));
+            // Background requests add to the totals but never stand for foreground occupancy.
             let foreground = (kind == AnalysisKind::Background)
                 .then(|| state.latest_token_usage_record.clone())
-                .flatten()
-                .filter(|record| record.turn_id != turn.sub_id);
+                .flatten();
             let record = state.record_token_usage(
                 self.thread_id,
                 &turn.sub_id,
@@ -136,6 +136,9 @@ impl Session {
             );
             if let Some(mut foreground) = foreground {
                 foreground.thread_token_usage = record.thread_token_usage.clone();
+                if foreground.turn_id == record.turn_id {
+                    foreground.turn_token_usage = record.turn_token_usage.clone();
+                }
                 state.latest_token_usage_record = Some(foreground);
             }
             if kind == AnalysisKind::Background {

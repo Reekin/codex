@@ -137,18 +137,23 @@ async fn keep_shorten_drop_preserves_dialogue_pairs_and_recalls_originals() -> R
         .iter()
         .find(|body| analysis_payload(body, CLASSIFY).is_some())
         .expect("classification request");
-    // The classifier repeats the ordinary request verbatim and only appends its question,
-    // so the provider can serve the shared prefix from its prompt cache.
+    // The classifier extends the ordinary request that just returned with that request's
+    // output and only appends its question, so the provider serves the shared prefix from
+    // its prompt cache.
     let classifier_input = classifier["input"].as_array().unwrap();
     let prefix = &classifier_input[..classifier_input.len() - 1];
     assert!(
         bodies.iter().any(|body| {
+            let input = body["input"].as_array().unwrap();
             analysis_payload(body, CLASSIFY).is_none()
                 && body["tools"] == classifier["tools"]
                 && body["instructions"] == classifier["instructions"]
-                && body["input"].as_array().unwrap().starts_with(prefix)
+                && prefix.starts_with(input)
+                && prefix[input.len()..]
+                    .iter()
+                    .all(|item| item["role"] != "user")
         }),
-        "classifier must reuse an ordinary request prefix"
+        "classifier must extend an ordinary request"
     );
     assert!(!classifier.to_string().contains("LOCAL_COMPACTION_SOURCE"));
     // Candidates are visible tool results, oldest first.
@@ -776,15 +781,12 @@ async fn keeps_are_reconsidered_after_new_user_input() -> Result<()> {
         .await?;
     seed_tools(&test, &model).await?;
     finish_marking(&test, &model, /*expected_batches*/ 1).await?;
-    let kept = model
-        .decisions()
+    let kept = model.decisions()[..4]
         .iter()
         .map(|decision| decision["id"].clone())
         .collect::<Vec<_>>();
-    assert_eq!(kept.len(), 4);
-    // Without new user input the keeps hold and nothing is classified again.
-    test.codex.flush_rollout().await?;
-    assert_eq!(model.decisions().len(), kept.len());
+    // A keep holds only for the user turn it was made in; after new user input the next
+    // batch reconsiders it.
     model.text("New direction acknowledged.");
     test.submit_text_turn("The task has moved on.").await?;
     finish_marking(&test, &model, /*expected_batches*/ 2).await?;

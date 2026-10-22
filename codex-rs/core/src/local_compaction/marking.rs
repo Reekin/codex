@@ -106,7 +106,7 @@ async fn launch(
             .local_compaction
             .mark_after_tokens_percent,
     ));
-    let backlog: HashSet<String> = match state.backlog.take() {
+    let mut backlog: HashSet<String> = match state.backlog.take() {
         Some(backlog) => backlog,
         None if unmarked.iter().map(|item| weight(item)).sum::<usize>() >= start => unmarked
             .iter()
@@ -164,11 +164,15 @@ async fn launch(
     if candidates.is_empty() || (!full && batch_tokens < start.min(share(1))) {
         return Ok(());
     }
-    state.backlog = Some(backlog);
     let ids: Vec<_> = candidates
         .into_iter()
         .map(|candidate| candidate.id)
         .collect();
+    // Each result is sent once per backlog, even if its keep expires meanwhile.
+    for id in &ids {
+        backlog.remove(id);
+    }
+    state.backlog = (!backlog.is_empty()).then_some(backlog);
     let source = source.to_vec();
     let prompt = request::private_prompt(
         Some(step),
