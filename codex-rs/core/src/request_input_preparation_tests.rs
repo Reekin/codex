@@ -51,14 +51,20 @@ fn request_input_budget_preserves_text_tools_and_latest_images() {
         ..Default::default()
     });
     let mut projected = original.clone();
-    prepare(&mut projected, limits, json_bytes).unwrap();
+    prepare(
+        &mut projected,
+        limits,
+        &OmittedImages::default(),
+        json_bytes,
+    )
+    .unwrap();
     let mut expected = serde_json::to_value(&original).unwrap();
     expected["input"][0]["content"][1] = json!({"type":"input_text","text":OMITTED_IMAGE});
     expected["input"][2]["output"][1] = json!({"type":"input_text","text":OMITTED_IMAGE});
     assert_eq!(serde_json::to_value(&projected).unwrap(), expected);
     assert!(json_bytes(&projected).unwrap() as u64 <= budget);
     let mut retry = original.clone();
-    prepare(&mut retry, limits, json_bytes).unwrap();
+    prepare(&mut retry, limits, &OmittedImages::default(), json_bytes).unwrap();
     assert_eq!(retry, projected);
     let mut resumed: ResponsesApiRequest = original.clone();
     resumed.input = serde_json::from_slice(&serde_json::to_vec(&original.input).unwrap()).unwrap();
@@ -68,10 +74,16 @@ fn request_input_budget_preserves_text_tools_and_latest_images() {
         )
         .unwrap(),
     );
-    prepare(&mut resumed, limits, json_bytes).unwrap();
+    prepare(&mut resumed, limits, &OmittedImages::default(), json_bytes).unwrap();
     assert_eq!(resumed.input[..original.input.len()], projected.input);
     let mut unconfigured = original.clone();
-    prepare(&mut unconfigured, None, json_bytes).unwrap();
+    prepare(
+        &mut unconfigured,
+        None,
+        &OmittedImages::default(),
+        json_bytes,
+    )
+    .unwrap();
     assert_eq!(unconfigured, original);
 }
 
@@ -85,8 +97,20 @@ fn request_input_non_image_budget_counts_instructions_and_tools() {
             ..Default::default()
         })
     };
-    prepare(&mut request, limits(exact), json_bytes).unwrap();
-    let error = prepare(&mut request, limits(exact - 1), json_bytes).unwrap_err();
+    prepare(
+        &mut request,
+        limits(exact),
+        &OmittedImages::default(),
+        json_bytes,
+    )
+    .unwrap();
+    let error = prepare(
+        &mut request,
+        limits(exact - 1),
+        &OmittedImages::default(),
+        json_bytes,
+    )
+    .unwrap_err();
     assert!(error.to_string().contains("non-image content requires"));
 }
 
@@ -154,12 +178,74 @@ fn request_input_large_history_budget_is_repeatable() {
     );
     let before = json_bytes(&original).unwrap();
     let mut prepared = original.clone();
-    prepare(&mut prepared, limits, json_bytes).unwrap();
+    prepare(&mut prepared, limits, &OmittedImages::default(), json_bytes).unwrap();
     let after = json_bytes(&prepared).unwrap();
     eprintln!("request_input_large_history: before={before} after={after} budget=30000000");
     assert!(before >= 40_000_000);
     assert!(after <= 30_000_000);
     let mut repeated = original;
-    prepare(&mut repeated, limits, json_bytes).unwrap();
+    prepare(&mut repeated, limits, &OmittedImages::default(), json_bytes).unwrap();
     assert_eq!(prepared, repeated);
+}
+
+#[test]
+fn request_input_budget_omits_in_steps_and_keeps_earlier_omissions() {
+    let image = |index: usize| {
+        json!({"type":"message","role":"user","content":[
+            {"type":"input_image","image_url":format!("{index:04}{}", "x".repeat(996))}
+        ]})
+    };
+    let history = |count: usize| request(json!((0..count).map(image).collect::<Vec<_>>()));
+    let limit = json_bytes(&history(10)).unwrap() as u64;
+    let limits = Some(ModelInputLimits {
+        max_request_bytes: std::num::NonZeroU64::new(limit),
+        ..Default::default()
+    });
+    let omitted = OmittedImages::default();
+    let mut previous: Option<ResponsesApiRequest> = None;
+    let mut prefix_changes = 0;
+    for count in 1..=30 {
+        let mut prepared = history(count);
+        prepare(&mut prepared, limits, &omitted, json_bytes).unwrap();
+        assert!(json_bytes(&prepared).unwrap() as u64 <= limit);
+        let newest = serde_json::to_value(prepared.input.last().unwrap()).unwrap();
+        assert_eq!(newest, image(count - 1), "the newest image is kept");
+        if let Some(previous) = &previous
+            && !prepared.input.starts_with(&previous.input)
+        {
+            prefix_changes += 1;
+        }
+        previous = Some(prepared);
+    }
+    // Twenty images past the budget change the prefix a few times, not on every image.
+    assert!((3..=6).contains(&prefix_changes), "{prefix_changes}");
+}
+
+#[test]
+fn request_input_opaque_images_become_jpeg_and_transparent_ones_stay_png() {
+    let mut state = 29u32;
+    let mut noise = || {
+        state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+        (state >> 24) as u8
+    };
+    let opaque = image::RgbImage::from_fn(256, 256, |_, _| image::Rgb([noise(), noise(), noise()]));
+    let transparent = image::RgbaImage::from_fn(256, 256, |_, _| {
+        image::Rgba([noise(), noise(), noise(), 128])
+    });
+    let url = |image: image::DynamicImage| {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        codex_utils_image::data_url_from_bytes("image/png", bytes.get_ref())
+    };
+    let opaque_url = url(image::DynamicImage::ImageRgb8(opaque));
+    let prepared = prepared_image(&opaque_url, 2000).unwrap();
+    assert!(prepared.starts_with("data:image/jpeg;base64,"));
+    assert!(prepared.len() < opaque_url.len());
+    let decoded = load_data_url_for_prompt_uncached(&prepared, PromptImageMode::Original).unwrap();
+    assert_eq!((decoded.width, decoded.height), (256, 256));
+    let transparent_url = url(image::DynamicImage::ImageRgba8(transparent));
+    assert_eq!(
+        &*prepared_image(&transparent_url, 2000).unwrap(),
+        transparent_url
+    );
 }

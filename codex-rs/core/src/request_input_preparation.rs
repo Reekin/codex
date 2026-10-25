@@ -11,14 +11,27 @@ use codex_utils_image::PromptImageMode;
 use codex_utils_image::PromptImageResizeLimits;
 use codex_utils_image::load_data_url_for_prompt_uncached;
 use serde::Serialize;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 const OMITTED_IMAGE: &str = "[image omitted to fit request byte limit]";
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CACHE_ENTRIES: usize = 256;
+/// Prepared images are re-encoded as JPEG at this quality when that is smaller and nothing is
+/// transparent. Providers price images by pixel size, so only request bytes change.
+const JPEG_QUALITY: u8 = 85;
+/// Crossing the byte budget omits the oldest images until the request is back down to this
+/// share of it, so the prefix changes once per several images instead of on every new one.
+const REFILL_PERCENT: u64 = 70;
 type CacheKey = ([u8; 20], u32);
 static IMAGE_CACHE: Mutex<VecDeque<(CacheKey, Arc<str>)>> = Mutex::new(VecDeque::new());
+
+/// Images a session has omitted to fit its byte budget. They stay omitted, so later requests
+/// keep the same prefix instead of recomputing which images fit.
+#[derive(Debug, Default)]
+pub(crate) struct OmittedImages(Mutex<HashSet<[u8; 20]>>);
 
 fn prepared_image(url: &str, dimension: u32) -> Result<Arc<str>> {
     let key = (sha1_digest(url.as_bytes()), dimension);
@@ -42,7 +55,11 @@ fn prepared_image(url: &str, dimension: u32) -> Result<Arc<str>> {
     .map_err(|error| {
         CodexErr::InvalidRequest(format!("Request image preparation failed: {error}"))
     })?;
-    let result: Arc<str> = image.into_data_url().into();
+    let result: Arc<str> = match jpeg(&image.bytes, &image.mime) {
+        Some(jpeg) => codex_utils_image::data_url_from_bytes("image/jpeg", &jpeg),
+        None => image.into_data_url(),
+    }
+    .into();
     if result.len() <= MAX_CACHE_BYTES {
         let mut cache = IMAGE_CACHE
             .lock()
@@ -51,7 +68,7 @@ fn prepared_image(url: &str, dimension: u32) -> Result<Arc<str>> {
             return Ok(Arc::clone(image));
         }
         let mut bytes = cache.iter().map(|(_, image)| image.len()).sum::<usize>();
-        while cache.len() >= 32 || bytes + result.len() > MAX_CACHE_BYTES {
+        while cache.len() >= MAX_CACHE_ENTRIES || bytes + result.len() > MAX_CACHE_BYTES {
             if let Some((_, image)) = cache.pop_front() {
                 bytes -= image.len();
             }
@@ -59,6 +76,22 @@ fn prepared_image(url: &str, dimension: u32) -> Result<Arc<str>> {
         cache.push_back((key, Arc::clone(&result)));
     }
     Ok(result)
+}
+
+/// A smaller JPEG encoding of an opaque image, if there is one.
+fn jpeg(bytes: &[u8], mime: &str) -> Option<Vec<u8>> {
+    if mime.eq_ignore_ascii_case("image/jpeg") {
+        return None;
+    }
+    let image = image::load_from_memory(bytes).ok()?;
+    if image.color().has_alpha() && image.to_rgba8().pixels().any(|pixel| pixel[3] != u8::MAX) {
+        return None;
+    }
+    let mut encoded = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut encoded, JPEG_QUALITY)
+        .encode_image(&image::DynamicImage::ImageRgb8(image.to_rgb8()))
+        .ok()?;
+    (encoded.len() < bytes.len()).then_some(encoded)
 }
 
 pub(crate) fn json_bytes(value: &impl Serialize) -> Result<usize> {
@@ -82,6 +115,7 @@ pub(crate) fn json_bytes(value: &impl Serialize) -> Result<usize> {
 pub(crate) fn prepare(
     request: &mut ResponsesApiRequest,
     limits: Option<ModelInputLimits>,
+    omitted: &OmittedImages,
     wire_bytes: impl Fn(&ResponsesApiRequest) -> Result<usize>,
 ) -> Result<()> {
     let Some(limits) = limits else { return Ok(()) };
@@ -116,21 +150,43 @@ pub(crate) fn prepare(
     let Some(limit) = limits.max_request_bytes else {
         return Ok(());
     };
-    let mut bytes = wire_bytes(request)? as u64;
-    // Replace only image content, retaining every item, ID, text and tool relationship.
-    // Chronological traversal makes a fixed input deterministic and retains the newest images.
+    let limit = limit.get();
+    let mut omitted = omitted.0.lock().unwrap_or_else(|error| error.into_inner());
+    // Images omitted by earlier requests stay omitted, keeping the prefix the provider cached.
+    let mut remaining = 0usize;
     visit_images(&mut request.input, |image| {
-        if bytes > limit.get() {
-            let before = image.bytes()? as u64;
-            image.omit();
-            bytes = bytes - before + image.bytes()? as u64;
+        if let Some(digest) = image.digest() {
+            if omitted.contains(&digest) {
+                image.omit();
+            } else {
+                remaining += 1;
+            }
         }
         Ok(())
     })?;
-    if bytes > limit.get() {
+    let mut bytes = wire_bytes(request)? as u64;
+    // Replace only image content, retaining every item, ID, text and tool relationship.
+    // Chronological traversal makes a fixed input deterministic and retains the newest images;
+    // the newest one is omitted only when it alone does not fit.
+    if bytes > limit {
+        let refill = limit * REFILL_PERCENT / 100;
+        visit_images(&mut request.input, |image| {
+            let Some(digest) = image.digest() else {
+                return Ok(());
+            };
+            remaining -= 1;
+            if bytes > limit || (bytes > refill && remaining > 0) {
+                let before = image.bytes()? as u64;
+                image.omit();
+                bytes = bytes - before + image.bytes()? as u64;
+                omitted.insert(digest);
+            }
+            Ok(())
+        })?;
+    }
+    if bytes > limit {
         return Err(CodexErr::InvalidRequest(format!(
-            "Request exceeds max_request_bytes ({}): non-image content requires {bytes} bytes; shorten text, instructions or tools",
-            limit.get()
+            "Request exceeds max_request_bytes ({limit}): non-image content requires {bytes} bytes; shorten text, instructions or tools"
         )));
     }
     Ok(())
@@ -155,6 +211,17 @@ impl Image<'_> {
             Self::Message(content) => json_bytes(content),
             Self::Tool(content) => json_bytes(content),
             Self::Generated(result) => json_bytes(result),
+        }
+    }
+    /// Identifies a payload that is still present; omitted payloads have none.
+    fn digest(&mut self) -> Option<[u8; 20]> {
+        match self {
+            Self::Message(ContentItem::InputImage { .. })
+            | Self::Tool(FunctionCallOutputContentItem::InputImage { .. }) => {
+                Some(sha1_digest(self.url().as_bytes()))
+            }
+            Self::Generated(result) if !result.is_empty() => Some(sha1_digest(result.as_bytes())),
+            _ => None,
         }
     }
     fn omit(&mut self) {
