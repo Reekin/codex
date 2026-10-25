@@ -218,6 +218,8 @@ struct ModelClientState {
     disable_websockets: AtomicBool,
     agent_identity_session_fallback: AgentIdentitySessionFallback,
     cached_websocket_session: StdMutex<WebsocketSession>,
+    /// Images omitted to fit the model's byte budget, kept omitted for a stable prefix.
+    omitted_images: crate::request_input_preparation::OmittedImages,
 }
 
 /// Resolved API client setup for a single request attempt.
@@ -481,6 +483,7 @@ impl ModelClient {
                 disable_websockets: AtomicBool::new(false),
                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
+                omitted_images: crate::request_input_preparation::OmittedImages::default(),
             }),
             agent_identity_policy,
             prompt_cache_key_override: None,
@@ -626,6 +629,7 @@ impl ModelClient {
         crate::request_input_preparation::prepare(
             &mut request,
             model_info.input_limits,
+            &self.state.omitted_images,
             |request| {
                 crate::request_input_preparation::json_bytes(&serde_json::to_value(
                     &ApiCompactionInput {
@@ -1686,6 +1690,7 @@ impl ModelClientSession {
             crate::request_input_preparation::prepare(
                 &mut request,
                 model_info.input_limits,
+                &self.client.state.omitted_images,
                 crate::request_input_preparation::json_bytes,
             )?;
             let request_session_telemetry =
@@ -1895,6 +1900,7 @@ impl ModelClientSession {
             crate::request_input_preparation::prepare(
                 &mut request,
                 model_info.input_limits,
+                &self.client.state.omitted_images,
                 |request| {
                     let mut wire_request = request.clone();
                     self.client
