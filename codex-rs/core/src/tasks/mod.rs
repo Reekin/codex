@@ -472,7 +472,8 @@ impl Session {
     /// Starts a regular turn with the provided sub-id when pending work should wake an idle
     /// session.
     ///
-    /// Starts an idle turn for explicit follow-ups, durable sleep, or enabled message wakes.
+    /// Starts an idle turn for explicit follow-ups, durable sleep, child results after a natural
+    /// turn end, or enabled message wakes.
     pub(crate) async fn maybe_start_turn_for_pending_work_with_sub_id(
         self: &Arc<Self>,
         sub_id: String,
