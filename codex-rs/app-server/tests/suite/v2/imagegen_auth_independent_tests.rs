@@ -22,17 +22,25 @@ async fn installed_image_generation_exposure_preserves_entitlement_across_provid
     )
     .await;
     let codex_home = TempDir::new()?;
-    if auth == "custom-api" {
-        MockResponsesConfig::new(&server.uri())
+    let server_uri = server.uri();
+    let config = if auth == "custom-api" {
+        MockResponsesConfig::new(&server_uri)
             .with_model_provider("custom-images")
             .with_provider_name("Custom Responses")
             .with_provider_config(
                 "supports_websockets = false\nrequires_openai_auth = false\nenv_key = \"IMAGEGEN_TEST_API_KEY\"",
             )
-            .write(codex_home.path())?;
     } else {
-        create_config_toml(codex_home.path(), &server.uri(), ImagegenTestMode::Direct)?;
-    }
+        MockResponsesConfig::new(&server_uri)
+            .with_model_provider("openai-custom")
+            .with_provider_name("OpenAI")
+            .with_provider_base_url(&format!("{server_uri}/api/codex"))
+            .with_root_config(&format!("chatgpt_base_url = \"{server_uri}\""))
+            .with_provider_config("supports_websockets = false\nrequires_openai_auth = true")
+    };
+    config
+        .enable_feature(Feature::AuthIndependentTools)
+        .write(codex_home.path())?;
     let api_key = match auth {
         "api" => {
             login_with_api_key(

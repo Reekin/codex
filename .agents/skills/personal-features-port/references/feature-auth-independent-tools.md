@@ -13,6 +13,8 @@ Codex service session, including history notes, retain their service eligibility
 
 ## Stable Contract
 
+- **REQ-0**: `[features] auth_independent_tools = true` enables this behavior. With the flag off,
+  tool exposure is upstream's.
 - **REQ-1**: An installed image-generation tool is exposed with any provider, including custom
   Responses providers and API-key authentication. Provider identity, OpenAI authentication
   requirements, and provider image-generation capabilities must not suppress its specification.
