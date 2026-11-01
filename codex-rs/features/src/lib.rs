@@ -475,6 +475,9 @@ pub enum Feature {
     RuntimeAgentInstances,
     /// Enable workspace dependency support.
     WorkspaceDependencies,
+    /// Grow the stream waiting interval per retry and race a slow response against one
+    /// concurrent replacement request.
+    StreamRetryTimeout,
 
     // Removed
     /// Removed compatibility flag retained as a no-op so old configs can
@@ -2260,6 +2263,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "workspace_dependencies",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::StreamRetryTimeout,
+        key: "stream_retry_timeout",
+        stage: Stage::Stable,
+        default_enabled: false,
     },
 ];
 

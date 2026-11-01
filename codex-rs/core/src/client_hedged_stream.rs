@@ -30,10 +30,11 @@ impl ModelClientSession {
     /// Streams a single model request within the current turn.
     ///
     /// The caller is responsible for passing per-turn settings explicitly (model selection,
-    /// reasoning settings, telemetry context, and turn metadata). When the caller's retry state
-    /// allows it, a request that produces no complete tool call or answer within the waiting
-    /// interval gets a concurrent replacement on a separate connection with the same prompt and
-    /// turn identity. Events stream through unchanged until that replacement starts.
+    /// reasoning settings, telemetry context, and turn metadata). When `stream_retry_timeout` is
+    /// enabled and the caller's retry state allows it, a request that produces no complete tool
+    /// call or answer within the waiting interval gets a concurrent replacement on a separate
+    /// connection with the same prompt and turn identity. Events stream through unchanged until
+    /// that replacement starts. Otherwise this sends one request with the provider's timeout.
     pub async fn stream(
         &mut self,
         prompt: &Prompt,
@@ -46,10 +47,10 @@ impl ModelClientSession {
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
         self.adopt_selected_replacement();
-        let hedge_after = self.stream_idle_timeout;
+        let idle_timeout = self.stream_idle_timeout;
         // Requests are boxed: inline request futures would otherwise be embedded in every
         // caller's state machine and overflow the turn task's stack.
-        if !self.hedge_allowed {
+        let Some(hedge_after) = idle_timeout.filter(|_| self.hedge_allowed) else {
             return Box::pin(self.stream_once(
                 prompt,
                 model_info,
@@ -59,10 +60,10 @@ impl ModelClientSession {
                 service_tier,
                 responses_metadata,
                 inference_trace,
-                hedge_after,
+                idle_timeout,
             ))
             .await;
-        }
+        };
 
         let hedge_at = tokio::time::Instant::now().checked_add(hedge_after);
         let selection_window = hedge_after.saturating_add(STREAM_IDLE_TIMEOUT_INCREMENT);
@@ -87,7 +88,7 @@ impl ModelClientSession {
             responses_metadata,
             inference_trace,
             // Keep the original eligible for the replacement's whole waiting interval.
-            hedge_after.saturating_add(selection_window),
+            Some(hedge_after.saturating_add(selection_window)),
         ))
         .await?;
         let state = Arc::new(HedgeState::default());
@@ -143,7 +144,7 @@ impl ModelClientSession {
                 auth_owner_generation: self.websocket_session.auth_owner_generation,
                 ..Default::default()
             },
-            stream_idle_timeout: idle_timeout,
+            stream_idle_timeout: Some(idle_timeout),
             hedge_allowed: false,
             hedge: None,
             cache_websocket_on_drop: false,
@@ -164,7 +165,7 @@ impl ModelClientSession {
                 service_tier,
                 &responses_metadata,
                 &inference_trace,
-                idle_timeout,
+                Some(idle_timeout),
             ))
             .await?;
             Ok::<_, CodexErr>((stream, std::mem::take(&mut replacement.websocket_session)))

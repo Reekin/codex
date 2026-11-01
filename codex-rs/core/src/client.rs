@@ -326,8 +326,9 @@ pub struct ModelClient {
 pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
-    /// Waiting interval for the next request; retry loops grow it per logical request.
-    stream_idle_timeout: Duration,
+    /// Waiting interval for the next request when `stream_retry_timeout` is enabled; retry loops
+    /// grow it per logical request. `None` keeps the provider's configured idle timeout.
+    stream_idle_timeout: Option<Duration>,
     /// Whether the next request may start a concurrent replacement after the interval.
     hedge_allowed: bool,
     /// Shared with the latest request's stream: whether it started a replacement, which consumes
@@ -762,7 +763,7 @@ impl ModelClient {
         ModelClientSession {
             client: self.clone(),
             websocket_session,
-            stream_idle_timeout: self.state.provider.info().stream_idle_timeout(),
+            stream_idle_timeout: None,
             hedge_allowed: false,
             hedge: None,
             cache_websocket_on_drop: true,
@@ -1590,7 +1591,7 @@ mod hedged_stream;
 impl ModelClientSession {
     /// Applies the logical request's retry state to the next stream request.
     pub(crate) fn set_stream_retry_options(&mut self, timeout: Duration, remaining_retries: u64) {
-        self.stream_idle_timeout = timeout;
+        self.stream_idle_timeout = Some(timeout);
         self.hedge_allowed = remaining_retries > 0;
     }
 
@@ -1618,9 +1619,9 @@ impl<'a> ResponsesHttpExecutor<'a> {
         }
     }
 
-    /// Overrides the provider idle timeout for streams started by this executor.
-    pub(crate) fn with_stream_idle_timeout(mut self, timeout: Duration) -> Self {
-        self.stream_idle_timeout = Some(timeout);
+    /// Overrides the provider idle timeout for streams started by this executor when set.
+    pub(crate) fn with_stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.stream_idle_timeout = timeout;
         self
     }
 
@@ -2166,7 +2167,7 @@ impl ModelClientSession {
         warmup: bool,
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
-        idle_timeout: Duration,
+        idle_timeout: Option<Duration>,
     ) -> Result<WebsocketStreamOutcome> {
         let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
         let provider = Arc::clone(&self.client.state.provider);
@@ -2392,7 +2393,9 @@ impl ModelClientSession {
                     ))
                 })?;
             // Reused connections keep their connect-time timeout unless each request sets it.
-            websocket_connection.set_idle_timeout(idle_timeout);
+            if let Some(idle_timeout) = idle_timeout {
+                websocket_connection.set_idle_timeout(idle_timeout);
+            }
             request_session_telemetry.counter(
                 WEBSOCKET_CONTINUATION_COUNT_METRIC,
                 /*inc*/ 1,
@@ -2564,7 +2567,7 @@ impl ModelClientSession {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
-        idle_timeout: Duration,
+        idle_timeout: Option<Duration>,
     ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
