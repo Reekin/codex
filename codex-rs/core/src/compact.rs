@@ -240,13 +240,13 @@ async fn run_compact_task_inner_impl(
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
-    let installed = crate::local_compaction::run_pipeline(
+    let installed = Box::pin(crate::local_compaction::run_pipeline(
         &sess,
         &step_context,
         &replacement_step_context,
         &world_state,
         compaction_metadata,
-    )
+    ))
     .await?;
     sess.emit_turn_item_completed(&turn_context, compaction_item)
         .await;
