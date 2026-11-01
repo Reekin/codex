@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 
 fn child_source(parent_thread_id: ThreadId) -> SessionSource {
     SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
