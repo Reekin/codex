@@ -7,11 +7,63 @@ use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
 use codex_http_client::RetryAfter;
 use codex_protocol::error::CodexErr;
+use pretty_assertions::assert_eq;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 use tracing_test::internal::MockWriter;
+
+#[test]
+fn idle_timeout_tracks_failures_independently_of_transport_retry_budget() {
+    let mut state = ResponsesStreamRetryState {
+        failed_attempts: 2,
+        retries: 2,
+        ..Default::default()
+    };
+    let configured_timeout = Duration::from_secs(90);
+    let timeout = state.stream_idle_timeout(configured_timeout);
+    assert_eq!(timeout, Duration::from_secs(690));
+
+    // Transport fallback resets the retry counter but not the waiting-interval growth.
+    state.retries = 0;
+    assert_eq!(state.stream_idle_timeout(configured_timeout), timeout);
+    state.failed_attempts += 1;
+    assert_eq!(
+        state.stream_idle_timeout(configured_timeout),
+        Duration::from_secs(990)
+    );
+    assert_eq!(state.stream_idle_timeout(Duration::MAX), Duration::MAX);
+    state.failed_attempts = u32::MAX;
+    assert_eq!(
+        state.stream_idle_timeout(configured_timeout),
+        configured_timeout.saturating_add(Duration::from_secs(300).saturating_mul(u32::MAX))
+    );
+    assert_eq!(
+        ResponsesStreamRetryState::default().stream_idle_timeout(configured_timeout),
+        configured_timeout
+    );
+}
+
+#[test]
+fn concurrent_replacement_consumes_one_retry_and_one_interval_step() {
+    let mut state = ResponsesStreamRetryState::default();
+    assert_eq!(state.remaining_retries(/*max_retries*/ 2), 2);
+
+    state.record_failed_attempt(/*hedged*/ true);
+    assert_eq!(state.retries, 1);
+    assert_eq!(state.failed_attempts, 2);
+    assert_eq!(state.remaining_retries(/*max_retries*/ 2), 1);
+    assert_eq!(
+        state.stream_idle_timeout(Duration::from_secs(300)),
+        Duration::from_secs(900)
+    );
+
+    state.record_failed_attempt(/*hedged*/ false);
+    assert_eq!(state.retries, 1);
+    assert_eq!(state.failed_attempts, 3);
+    assert_eq!(state.remaining_retries(/*max_retries*/ 1), 0);
+}
 
 #[tokio::test]
 async fn sampling_retry_logs_stream_error_context() {

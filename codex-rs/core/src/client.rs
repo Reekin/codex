@@ -326,6 +326,14 @@ pub struct ModelClient {
 pub struct ModelClientSession {
     client: ModelClient,
     websocket_session: WebsocketSession,
+    /// Waiting interval for the next request; retry loops grow it per logical request.
+    stream_idle_timeout: Duration,
+    /// Whether the next request may start a concurrent replacement after the interval.
+    hedge_allowed: bool,
+    /// Whether the latest request started a replacement, which consumes one retry.
+    hedge_started: bool,
+    /// Replacement candidates must not publish their WebSocket state into the shared cache.
+    cache_websocket_on_drop: bool,
     /// Turn state for sticky routing.
     ///
     /// This is an `OnceLock` that stores the turn state value received from the server
@@ -343,6 +351,7 @@ pub struct ModelClientSession {
 /// Executes HTTP Responses requests without owning a turn's WebSocket state.
 pub(crate) struct ResponsesHttpExecutor<'a> {
     client: &'a ModelClient,
+    stream_idle_timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -752,6 +761,10 @@ impl ModelClient {
         ModelClientSession {
             client: self.clone(),
             websocket_session,
+            stream_idle_timeout: self.state.provider.info().stream_idle_timeout(),
+            hedge_allowed: false,
+            hedge_started: false,
+            cache_websocket_on_drop: true,
             turn_state: Arc::new(OnceLock::new()),
         }
     }
@@ -1561,13 +1574,28 @@ impl ModelClient {
 
 impl Drop for ModelClientSession {
     fn drop(&mut self) {
-        let websocket_session = std::mem::take(&mut self.websocket_session);
-        self.client
-            .store_cached_websocket_session(websocket_session);
+        if self.cache_websocket_on_drop {
+            let websocket_session = std::mem::take(&mut self.websocket_session);
+            self.client
+                .store_cached_websocket_session(websocket_session);
+        }
     }
 }
 
+#[path = "client_hedged_stream.rs"]
+mod hedged_stream;
+
 impl ModelClientSession {
+    /// Applies the logical request's retry state to the next stream request.
+    pub(crate) fn set_stream_retry_options(&mut self, timeout: Duration, remaining_retries: u64) {
+        self.stream_idle_timeout = timeout;
+        self.hedge_allowed = remaining_retries > 0;
+    }
+
+    pub(crate) fn take_hedged_retry(&mut self) -> bool {
+        std::mem::take(&mut self.hedge_started)
+    }
+
     pub(crate) fn inference_tools_changed(&self, tools: &Arc<[ToolSpec]>) -> bool {
         let previous = self
             .client
@@ -1582,7 +1610,16 @@ impl ModelClientSession {
 
 impl<'a> ResponsesHttpExecutor<'a> {
     pub(crate) fn new(client: &'a ModelClient) -> Self {
-        Self { client }
+        Self {
+            client,
+            stream_idle_timeout: None,
+        }
+    }
+
+    /// Overrides the provider idle timeout for streams started by this executor.
+    pub(crate) fn with_stream_idle_timeout(mut self, timeout: Duration) -> Self {
+        self.stream_idle_timeout = Some(timeout);
+        self
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1936,10 +1973,13 @@ impl ResponsesHttpExecutor<'_> {
         let mut provider_auth_recovery_attempted = false;
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
-            let client_setup = self
+            let mut client_setup = self
                 .client
                 .current_client_setup(ClientRouting::Workspace)
                 .await?;
+            if let Some(timeout) = self.stream_idle_timeout {
+                client_setup.api_provider.stream_idle_timeout = timeout;
+            }
             if expected_auth_owner.is_some_and(|owner| {
                 Some(owner) != client_setup.auth_owner_generation
                     || Some(owner) != self.client.auth_owner_generation()
@@ -2124,6 +2164,7 @@ impl ModelClientSession {
         warmup: bool,
         request_trace: Option<W3cTraceContext>,
         inference_trace: &InferenceTraceContext,
+        idle_timeout: Duration,
     ) -> Result<WebsocketStreamOutcome> {
         let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
         let provider = Arc::clone(&self.client.state.provider);
@@ -2341,12 +2382,15 @@ impl ModelClientSession {
                 inference_trace_attempt.record_started(&ws_request);
             }
 
+            let connection_reused = self.websocket_session.connection_reused();
             let websocket_connection =
-                self.websocket_session.connection.as_ref().ok_or_else(|| {
+                self.websocket_session.connection.as_mut().ok_or_else(|| {
                     self.client.state.provider.map_api_error(ApiError::Stream(
                         "websocket connection is unavailable".to_string(),
                     ))
                 })?;
+            // Reused connections keep their connect-time timeout unless each request sets it.
+            websocket_connection.set_idle_timeout(idle_timeout);
             request_session_telemetry.counter(
                 WEBSOCKET_CONTINUATION_COUNT_METRIC,
                 /*inc*/ 1,
@@ -2365,7 +2409,7 @@ impl ModelClientSession {
             let stream_result = websocket_connection
                 .stream_request(
                     ws_request,
-                    self.websocket_session.connection_reused(),
+                    connection_reused,
                     Some(Arc::clone(&self.turn_state)),
                 )
                 .await;
@@ -2478,6 +2522,7 @@ impl ModelClientSession {
                 /*warmup*/ true,
                 current_span_w3c_trace_context(),
                 &disabled_trace,
+                self.stream_idle_timeout,
             )
             .await
         {
@@ -2501,15 +2546,13 @@ impl ModelClientSession {
     }
 
     #[allow(clippy::too_many_arguments)]
-    /// Streams a single model request within the current turn.
+    /// Sends one model request attempt within the current turn.
     ///
-    /// The caller is responsible for passing per-turn settings explicitly (model selection,
-    /// reasoning settings, telemetry context, and turn metadata). This method will prefer the
-    /// Responses WebSocket transport when the provider supports it and it remains healthy, and will
-    /// fall back to the HTTP Responses API transport otherwise. The trace context may be enabled or
-    /// disabled, but is always explicit so transport paths do not need separate trace/no-trace
-    /// branches.
-    pub async fn stream(
+    /// Prefers the Responses WebSocket transport when the provider supports it and it remains
+    /// healthy, and falls back to the HTTP Responses API transport otherwise. The trace context
+    /// may be enabled or disabled, but is always explicit so transport paths do not need separate
+    /// trace/no-trace branches.
+    async fn stream_once(
         &mut self,
         prompt: &Prompt,
         model_info: &ModelInfo,
@@ -2519,6 +2562,7 @@ impl ModelClientSession {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
+        idle_timeout: Duration,
     ) -> Result<ResponseStream> {
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
@@ -2537,6 +2581,7 @@ impl ModelClientSession {
                             /*warmup*/ false,
                             request_trace,
                             inference_trace,
+                            idle_timeout,
                         )
                         .await?
                     {
@@ -2548,6 +2593,7 @@ impl ModelClientSession {
                 }
 
                 ResponsesHttpExecutor::new(&self.client)
+                    .with_stream_idle_timeout(idle_timeout)
                     .stream_responses_http(
                         &self.turn_state,
                         /*expected_auth_owner*/ None,
@@ -2831,6 +2877,7 @@ where
     });
 
     ResponseStream {
+        buffered: Default::default(),
         routing_affinity: None,
         rx_event,
         interrupt: None,

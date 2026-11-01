@@ -22,6 +22,7 @@ use tracing::warn;
 
 const INITIAL_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_CONNECTION_RETRY_DELAY: Duration = Duration::from_secs(60);
+pub(crate) const STREAM_IDLE_TIMEOUT_INCREMENT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ResponsesStreamRequest {
@@ -30,6 +31,9 @@ pub(crate) enum ResponsesStreamRequest {
 }
 
 pub(crate) struct ResponsesStreamRetryState {
+    /// Failed attempts of this logical request, including concurrent replacements. Unlike
+    /// `retries`, this survives transport fallback so the waiting interval keeps growing.
+    failed_attempts: u32,
     retries: u64,
     connection_retries: u64,
     connection_retry_delay: Duration,
@@ -38,10 +42,33 @@ pub(crate) struct ResponsesStreamRetryState {
 impl Default for ResponsesStreamRetryState {
     fn default() -> Self {
         Self {
+            failed_attempts: 0,
             retries: 0,
             connection_retries: 0,
             connection_retry_delay: INITIAL_CONNECTION_RETRY_DELAY,
         }
+    }
+}
+
+impl ResponsesStreamRetryState {
+    /// Waiting interval for the next attempt: the initial interval plus five minutes per
+    /// failed attempt.
+    pub(crate) fn stream_idle_timeout(&self, initial_timeout: Duration) -> Duration {
+        initial_timeout
+            .saturating_add(STREAM_IDLE_TIMEOUT_INCREMENT.saturating_mul(self.failed_attempts))
+    }
+
+    pub(crate) fn remaining_retries(&self, max_retries: u64) -> u64 {
+        max_retries.saturating_sub(self.retries)
+    }
+
+    /// Records a failed attempt; a started concurrent replacement also consumes one retry.
+    fn record_failed_attempt(&mut self, hedged: bool) {
+        self.retries = self.retries.saturating_add(u64::from(hedged));
+        self.failed_attempts = self
+            .failed_attempts
+            .saturating_add(1)
+            .saturating_add(u32::from(hedged));
     }
 }
 
@@ -65,6 +92,7 @@ pub(crate) async fn handle_response_stream_error(
     request: ResponsesStreamRequest,
 ) -> Result<(), CodexErr> {
     let turn_context = &step_context.turn;
+    retry_state.record_failed_attempt(client_session.take_hedged_retry());
     if matches!(request, ResponsesStreamRequest::Sampling)
         && matches!(err.details(), CodexErrorDetails::ContentFilter)
     {
