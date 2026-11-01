@@ -23,6 +23,7 @@ Give each requirement a stable ID:
 
 Cover only applicable surfaces:
 
+- the `[features]` flag that enables the feature, when it changes default behavior;
 - user-visible or model-visible behavior;
 - durable state and replay;
 - public API, tool, or schema behavior;
