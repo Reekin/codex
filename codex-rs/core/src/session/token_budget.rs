@@ -11,16 +11,16 @@ use codex_protocol::account::PlanType;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::openai_models::ModelInfo;
 
-/// Local full compaction owns the context window of a local-route model, so no token-budget
-/// window reset, tool, reminder or fallback buffer stands in for it or moves its trigger.
-/// Clears token-budget activation and settings for such a model and reports whether it did;
-/// every later token-budget check then sees the feature off.
+/// With local context compaction on, local full compaction owns the context window of a
+/// local-route model, so no token-budget window reset, tool, reminder or fallback buffer stands
+/// in for it or moves its trigger. Clears token-budget activation and settings for such a model
+/// and reports whether it did; every later token-budget check then sees the feature off.
 pub(super) fn disable_for_local_route(
     config: &mut Config,
     provider_support: RemoteCompactionSupport,
     model_info: &ModelInfo,
 ) -> bool {
-    if !crate::local_compaction::is_local_route(provider_support, model_info) {
+    if !crate::local_compaction::owns_window(config, provider_support, model_info) {
         return false;
     }
     if let Err(error) = config.features.disable(Feature::TokenBudget) {
@@ -98,16 +98,11 @@ pub(super) fn has_explicit_settings(config: &Config) -> bool {
 }
 
 /// Resolves user-configured token-budget preferences against the current model's defaults.
-/// A local-route model resolves none (see [`disable_for_local_route`]).
 pub(super) fn resolve_token_budget(
     configured_token_budget: Option<&TokenBudgetConfig>,
     use_model_defaults: bool,
-    provider_support: RemoteCompactionSupport,
     model_info: &ModelInfo,
 ) -> Option<TokenBudgetConfig> {
-    if crate::local_compaction::is_local_route(provider_support, model_info) {
-        return None;
-    }
     if !use_model_defaults {
         return configured_token_budget.cloned();
     }
@@ -142,6 +137,27 @@ pub(super) fn resolve_token_budget(
     }
 
     Some(token_budget)
+}
+
+/// [`resolve_token_budget`] for a step model of `turn`, which may differ from the turn's model.
+/// A model whose window local full compaction owns resolves none (see
+/// [`disable_for_local_route`]).
+pub(super) fn resolve_for_model(
+    turn: &TurnContext,
+    model_info: &ModelInfo,
+) -> Option<TokenBudgetConfig> {
+    if crate::local_compaction::owns_window(
+        &turn.config,
+        turn.provider.capabilities().remote_compaction,
+        model_info,
+    ) {
+        return None;
+    }
+    resolve_token_budget(
+        turn.configured_token_budget.as_ref(),
+        turn.use_model_token_budget_defaults,
+        model_info,
+    )
 }
 
 /// Applies model activation defaults before thread extensions are initialized.
@@ -286,6 +302,10 @@ mod tests {
                     config.model_auto_compact_token_limit = Some(90_000);
                     config.model_provider = provider;
                     config.features.enable(Feature::TokenBudget).unwrap();
+                    config
+                        .features
+                        .enable(Feature::LocalContextCompaction)
+                        .unwrap();
                     config.token_budget = Some(TokenBudgetConfig {
                         auto_compact_fallback_prompt: Some("Save state.".to_string()),
                         auto_compact_fallback_buffer_tokens: Some(FALLBACK_BUFFER_TOKENS),

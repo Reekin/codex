@@ -1,6 +1,9 @@
 //! Runtime adapter for local context compaction: background marking, installation of validated
 //! marks at ordinary sampling boundaries, and the local full-compaction route. Policy lives in
 //! `codex_context_compaction`.
+//!
+//! Everything here is enabled by `[features] local_context_compaction`; with it off every route
+//! keeps the upstream behavior and the entry points below are not reached.
 
 mod full;
 mod marking;
@@ -27,6 +30,7 @@ use codex_context_compaction::cleaned;
 use codex_context_compaction::marks_path;
 use codex_context_compaction::restore_marks;
 use codex_context_compaction::visible_tokens;
+use codex_features::Feature;
 use codex_history::ResponseItemEnvelope;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErr;
@@ -34,6 +38,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 
+use crate::config::Config;
 use crate::context_manager::estimate_item_token_count;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
@@ -135,7 +140,22 @@ enum CleanupTrigger {
     Manual,
 }
 
-/// Whether full compaction uses the local pipeline: the provider or the model lacks native
+/// Whether local context compaction is on (`[features] local_context_compaction`).
+pub(crate) fn enabled(config: &Config) -> bool {
+    config.features.enabled(Feature::LocalContextCompaction)
+}
+
+/// Whether local full compaction owns the context window of `model_info`: the feature is on and
+/// the provider or the model lacks native compaction.
+pub(crate) fn owns_window(
+    config: &Config,
+    provider_support: RemoteCompactionSupport,
+    model_info: &ModelInfo,
+) -> bool {
+    enabled(config) && is_local_route(provider_support, model_info)
+}
+
+/// Whether full compaction uses the local route: the provider or the model lacks native
 /// compaction. Tool cleanup runs on every route.
 pub(crate) fn uses_local_route(turn: &TurnContext, model_info: &ModelInfo) -> bool {
     is_local_route(turn.provider.capabilities().remote_compaction, model_info)
@@ -166,6 +186,18 @@ pub(crate) async fn has_local_records(sess: &Session) -> bool {
 /// Cancels marking for the current full window; full compaction and shutdown start here.
 pub(crate) async fn cancel(sess: &Session) {
     sess.cancel_local_compaction().await;
+}
+
+/// Native full compaction starts a new window, so marking for the old one stops. The local
+/// pipeline cancels it itself after applying the marks already validated.
+pub(crate) async fn before_full_compaction(
+    sess: &Session,
+    turn: &TurnContext,
+    model_info: &ModelInfo,
+) {
+    if enabled(&turn.config) && !uses_local_route(turn, model_info) {
+        cancel(sess).await;
+    }
 }
 
 /// Installs validated marks before an ordinary request when they release enough.

@@ -53,6 +53,7 @@ use crate::stream_events_utils::TurnItemContributorPolicy;
 use crate::stream_events_utils::finalize_non_tool_response_item;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
+use crate::stream_events_utils::last_assistant_message_from_item;
 use crate::stream_events_utils::mark_thread_memory_mode_polluted_if_external_context;
 use crate::stream_events_utils::raw_assistant_output_text_from_item;
 use crate::stream_events_utils::record_completed_response_item_with_finalized_facts;
@@ -577,15 +578,18 @@ pub(crate) async fn run_turn(
             // Validated tool marks are installed before the next ordinary request once they
             // release enough; prior tool results and accepted input are already recorded.
             // Local compaction futures are boxed to keep them out of the turn task's stack frame.
-            Box::pin(crate::local_compaction::maybe_clean_history(
-                &sess,
-                &step_context,
-            ))
-            .or_cancel(&cancellation_token)
-            .await??;
-            // Cleanup installed here or by an out-of-turn request is announced before sampling.
-            if run_pending_session_start_hooks(&sess, &turn_context).await {
-                return Err(CodexErr::TurnAborted);
+            if crate::local_compaction::enabled(&turn_context.config) {
+                Box::pin(crate::local_compaction::maybe_clean_history(
+                    &sess,
+                    &step_context,
+                ))
+                .or_cancel(&cancellation_token)
+                .await??;
+                // Cleanup installed here or by an out-of-turn request is announced before
+                // sampling.
+                if run_pending_session_start_hooks(&sess, &turn_context).await {
+                    return Err(CodexErr::TurnAborted);
+                }
             }
 
             // Construct the input that we will send to the model.
@@ -649,6 +653,7 @@ pub(crate) async fn run_turn(
                 // The request that just returned put its prefix in the prompt cache; a marking
                 // batch extends that prefix. Compaction is about to replace the history instead.
                 if !token_limit_reached
+                    && crate::local_compaction::enabled(&turn_context.config)
                     && let Err(error) =
                         Box::pin(crate::local_compaction::start_marking(&sess, &step_context)).await
                 {
@@ -1641,11 +1646,12 @@ async fn run_auto_compact(
         conversation.id = %sess.thread_id,
         turn.id = %turn_context.sub_id,
     );
-    // Full compaction starts a new window and marking for the old one stops; the local
-    // pipeline first applies the marks already validated.
-    if !crate::local_compaction::uses_local_route(turn_context, &step_context.settings.model_info) {
-        crate::local_compaction::cancel(sess).await;
-    }
+    crate::local_compaction::before_full_compaction(
+        sess,
+        turn_context,
+        &step_context.settings.model_info,
+    )
+    .await;
     if turn_context.config.features.enabled(Feature::TokenBudget) {
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.
@@ -2099,7 +2105,8 @@ pub(crate) async fn built_tools(
             .await
         };
     // Recall reads the thread's local archive, which ephemeral threads do not have.
-    let recall_available = sess.live_thread().is_some()
+    let recall_available = crate::local_compaction::enabled(&turn_context.config)
+        && sess.live_thread().is_some()
         && (crate::local_compaction::uses_local_route(turn_context, model_info)
             || crate::local_compaction::has_local_records(sess).await);
     Ok(Arc::new(build_tool_router(
@@ -3596,6 +3603,17 @@ async fn try_run_sampling_request(
     }
 
     outcome
+}
+
+pub(crate) fn get_last_assistant_message_from_turn<'a>(
+    responses: impl DoubleEndedIterator<Item = &'a ResponseItem>,
+) -> Option<String> {
+    for item in responses.rev() {
+        if let Some(message) = last_assistant_message_from_item(item, /*plan_mode*/ false) {
+            return Some(message);
+        }
+    }
+    None
 }
 
 #[cfg(test)]

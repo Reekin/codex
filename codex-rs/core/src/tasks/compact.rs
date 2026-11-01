@@ -11,6 +11,7 @@ use codex_features::Feature;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Default)]
@@ -49,10 +50,12 @@ impl SessionTask for CompactTask {
                 .build_world_state_for_step(&step_context, /*new_window*/ true)
                 .await?,
         );
-        if !crate::local_compaction::uses_local_route(&ctx, &step_context.settings.model_info) {
-            // The local pipeline first applies the marks already validated.
-            crate::local_compaction::cancel(&session).await;
-        }
+        crate::local_compaction::before_full_compaction(
+            &session,
+            &ctx,
+            &step_context.settings.model_info,
+        )
+        .await;
         if ctx.config.features.enabled(Feature::TokenBudget) {
             crate::compact_token_budget::run_manual_compact_task(
                 session,
@@ -86,7 +89,18 @@ impl SessionTask for CompactTask {
                     "local",
                     /*manual*/ true,
                 );
-                crate::compact::run_compact_task(session.clone(), step_context, world_state).await
+                let input = vec![UserInput::Text {
+                    text: ctx
+                        .config
+                        .compact_prompt
+                        .as_deref()
+                        .unwrap_or(crate::compact::SUMMARIZATION_PROMPT)
+                        .to_string(),
+                    // Compaction prompt is synthesized; no UI element ranges to preserve.
+                    text_elements: Vec::new(),
+                }];
+                crate::compact::run_compact_task(session.clone(), step_context, world_state, input)
+                    .await
             }
         };
         if let Err(err) = result {

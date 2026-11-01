@@ -1058,10 +1058,9 @@ impl Session {
         let available_models = models_manager.try_list_models().unwrap_or_default();
 
         let mut per_turn_config = per_turn_config;
-        let provider_compaction = provider.capabilities().remote_compaction;
         super::token_budget::disable_for_local_route(
             &mut per_turn_config,
-            provider_compaction,
+            provider.capabilities().remote_compaction,
             model_info,
         );
         let configured_token_budget = per_turn_config.token_budget.clone();
@@ -1071,7 +1070,6 @@ impl Session {
         per_turn_config.token_budget = resolve_token_budget(
             configured_token_budget.as_ref(),
             use_model_token_budget_defaults,
-            provider_compaction,
             model_info,
         );
         if per_turn_config

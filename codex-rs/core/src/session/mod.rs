@@ -828,7 +828,8 @@ impl Session {
         )
         .capabilities()
         .remote_compaction;
-        let local_route = crate::local_compaction::is_local_route(provider_compaction, &model_info);
+        let local_route =
+            crate::local_compaction::owns_window(&config, provider_compaction, &model_info);
         // Forked subagents keep their parent's activation with the copied history.
         // Fresh children restore configured preferences before applying startup defaults.
         // A local-route child clears any inherited activation.
@@ -4109,12 +4110,8 @@ impl Session {
             }
         }
         let dynamic_tools = self.dynamic_tools().await;
-        let token_budget = token_budget::resolve_token_budget(
-            turn_context.configured_token_budget.as_ref(),
-            turn_context.use_model_token_budget_defaults,
-            turn_context.provider.capabilities().remote_compaction,
-            settings.model_info.as_ref(),
-        );
+        let token_budget =
+            token_budget::resolve_for_model(&turn_context, settings.model_info.as_ref());
         let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
         let environments = environments.or_cancel(cancellation_token).await?;
         let inherited_environments = inherited_environments.unwrap_or_else(|| environments.clone());

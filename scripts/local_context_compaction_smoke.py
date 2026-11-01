@@ -205,6 +205,7 @@ class Rpc:
             "model_reasoning_effort": '"low"',
             "features.code_mode": "false",
             "features.enable_request_compression": "false",
+            "features.local_context_compaction": "true",
             "features.local_thread_store_compression": "false",
             "model_providers.fixture.name": '"Local compaction fixture"',
             "model_providers.fixture.base_url": json.dumps(
