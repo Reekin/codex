@@ -229,10 +229,15 @@ async fn prediction_context_failure_does_not_compact(reset_context: bool) -> Res
     }
     let mock = responses::mount_sse_sequence(&server, mock_responses).await;
     let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), /*auto_compact_limit*/ 200_000)
+    let mut config = compaction_config(&server.uri(), /*auto_compact_limit*/ 200_000)
         .with_root_config("model_post_turn_compact_threshold_percent = 0")
-        .with_features(&BTreeMap::from([(Feature::TokenBudget, reset_context)]))
-        .write(codex_home.path())?;
+        .with_features(&BTreeMap::from([(Feature::TokenBudget, reset_context)]));
+    if reset_context {
+        // Context resets belong to the native compaction route; local compaction owns the
+        // window of a local-route model and resolves no token budget.
+        config = config.with_provider_config("capabilities = { remote_compaction = \"v2\" }");
+    }
+    config.write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
