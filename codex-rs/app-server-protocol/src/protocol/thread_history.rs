@@ -1435,6 +1435,16 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_turn_started(&mut self, payload: &TurnStartedEvent) {
+        // A thread runs one turn at a time, so a turn still open when another one starts has
+        // stopped running, usually because a crash cut it off before its terminal record. Its
+        // own terminal record can still arrive later and then decides how it ended.
+        if let Some(turn) = self.current_turn.as_mut().filter(|turn| {
+            turn.id != payload.turn_id && matches!(turn.status, TurnStatus::InProgress)
+        }) {
+            turn.status = TurnStatus::Interrupted;
+            let changed_turn = ThreadHistoryTurnMetadata::from_pending_turn(turn);
+            self.record_changed_turn(changed_turn);
+        }
         self.finish_current_turn();
         let mut turn = self
             .new_turn(Some(payload.turn_id.clone()))
@@ -1457,7 +1467,10 @@ impl ThreadHistoryBuilder {
             if let Some(error) = terminal_error.as_ref() {
                 turn.status = TurnStatus::Failed;
                 turn.error = Some(error.clone());
-            } else if matches!(turn.status, TurnStatus::Completed | TurnStatus::InProgress) {
+            } else if matches!(
+                turn.status,
+                TurnStatus::Completed | TurnStatus::InProgress | TurnStatus::Interrupted
+            ) {
                 turn.status = TurnStatus::Completed;
             }
             turn.completed_at = payload.completed_at;
@@ -1485,7 +1498,12 @@ impl ThreadHistoryBuilder {
             if let Some(error) = terminal_error.as_ref() {
                 turn.status = TurnStatus::Failed;
                 turn.error = Some(error.clone());
-            } else if matches!(turn.status, TurnStatus::Completed | TurnStatus::InProgress) {
+            } else if matches!(
+                turn.status,
+                // A turn interrupted because a later turn started can still record its own
+                // completion afterwards; that record decides how the turn ended.
+                TurnStatus::Completed | TurnStatus::InProgress | TurnStatus::Interrupted
+            ) {
                 turn.status = TurnStatus::Completed;
             }
             turn.completed_at = payload.completed_at;
@@ -4820,6 +4838,196 @@ mod tests {
         assert_eq!(turns[1].id, "turn-b");
         assert_eq!(turns[1].status, TurnStatus::InProgress);
         assert_eq!(turns[1].items.len(), 2);
+    }
+
+    fn superseded_turn_started(turn_id: &str, started_at: Option<i64>) -> RolloutItem {
+        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+            turn_attribution: None,
+            turn_id: turn_id.into(),
+            root_turn_id: None,
+            trace_id: None,
+            started_at,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        }))
+    }
+
+    fn superseded_turn_completed(
+        turn_id: &str,
+        error: Option<ErrorEvent>,
+        completed_at: i64,
+    ) -> RolloutItem {
+        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+            root_turn_id: None,
+            turn_id: turn_id.into(),
+            started_at: None,
+            last_agent_message: None,
+            error,
+            completed_at: Some(completed_at),
+            duration_ms: Some(1_000),
+            time_to_first_token_ms: None,
+        }))
+    }
+
+    fn superseded_user_message(message: &str) -> RolloutItem {
+        RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            client_id: None,
+            message: message.into(),
+            images: None,
+            text_elements: Vec::new(),
+            local_images: Vec::new(),
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn turn_start_interrupts_superseded_in_progress_turn() {
+        let items = vec![
+            superseded_turn_started("turn-a", Some(10)),
+            superseded_user_message("orphaned"),
+            superseded_turn_started("turn-b", Some(30)),
+            superseded_user_message("next"),
+            superseded_turn_completed("turn-b", /*error*/ None, /*completed_at*/ 40),
+        ];
+
+        let mut builder = ThreadHistoryBuilder::new();
+        builder.handle_rollout_item_with_changes(&items[0]);
+        builder.handle_rollout_item_with_changes(&items[1]);
+        assert_eq!(
+            builder.handle_rollout_item_with_changes(&items[2]),
+            ThreadHistoryChangeSet {
+                changed_items: Vec::new(),
+                changed_turns: vec![
+                    ThreadHistoryTurnMetadata {
+                        turn_id: "turn-a".into(),
+                        root_turn_id: None,
+                        status: TurnStatus::Interrupted,
+                        error: None,
+                        started_at: Some(10),
+                        completed_at: None,
+                        duration_ms: None,
+                    },
+                    ThreadHistoryTurnMetadata {
+                        turn_id: "turn-b".into(),
+                        root_turn_id: None,
+                        status: TurnStatus::InProgress,
+                        error: None,
+                        started_at: Some(30),
+                        completed_at: None,
+                        duration_ms: None,
+                    },
+                ],
+                removed_turn_ids: Vec::new(),
+            }
+        );
+
+        assert_eq!(
+            build_turns_from_rollout_items(&items),
+            vec![
+                Turn {
+                    id: "turn-a".into(),
+                    root_turn_id: None,
+                    items_view: TurnItemsView::Full,
+                    items: vec![ThreadItem::untimed(ThreadItemPayload::UserMessage {
+                        id: "item-1".into(),
+                        client_id: None,
+                        content: vec![UserInput::Text {
+                            text: "orphaned".into(),
+                            text_elements: Vec::new(),
+                        }],
+                    })],
+                    status: TurnStatus::Interrupted,
+                    error: None,
+                    started_at: Some(10),
+                    completed_at: None,
+                    duration_ms: None,
+                },
+                Turn {
+                    id: "turn-b".into(),
+                    root_turn_id: None,
+                    items_view: TurnItemsView::Full,
+                    items: vec![ThreadItem::untimed(ThreadItemPayload::UserMessage {
+                        id: "item-2".into(),
+                        client_id: None,
+                        content: vec![UserInput::Text {
+                            text: "next".into(),
+                            text_elements: Vec::new(),
+                        }],
+                    })],
+                    status: TurnStatus::Completed,
+                    error: None,
+                    started_at: Some(30),
+                    completed_at: Some(40),
+                    duration_ms: Some(1_000),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn turn_start_leaves_latest_completed_and_repeated_turns_unchanged() {
+        let turns = build_turns_from_rollout_items(&[
+            superseded_turn_started("completed-turn", /*started_at*/ None),
+            superseded_turn_completed(
+                "completed-turn",
+                /*error*/ None,
+                /*completed_at*/ 20,
+            ),
+            superseded_turn_started("repeated-turn", /*started_at*/ None),
+            superseded_turn_started("repeated-turn", /*started_at*/ None),
+        ]);
+        assert_eq!(
+            turns
+                .iter()
+                .map(|turn| (turn.id.as_str(), turn.status.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("completed-turn", TurnStatus::Completed),
+                ("repeated-turn", TurnStatus::InProgress),
+                ("repeated-turn", TurnStatus::InProgress),
+            ]
+        );
+    }
+
+    #[test]
+    fn late_terminal_record_decides_superseded_turn_status() {
+        let completed = build_turns_from_rollout_items(&[
+            superseded_turn_started("turn-a", /*started_at*/ None),
+            superseded_turn_started("turn-b", /*started_at*/ None),
+            superseded_turn_completed("turn-a", /*error*/ None, /*completed_at*/ 20),
+            superseded_turn_completed("turn-b", /*error*/ None, /*completed_at*/ 40),
+        ]);
+        assert_eq!(
+            completed
+                .iter()
+                .map(|turn| (turn.id.as_str(), turn.status.clone(), turn.completed_at))
+                .collect::<Vec<_>>(),
+            vec![
+                ("turn-a", TurnStatus::Completed, Some(20)),
+                ("turn-b", TurnStatus::Completed, Some(40)),
+            ]
+        );
+
+        let failed = build_turns_from_rollout_items(&[
+            superseded_turn_started("turn-a", /*started_at*/ None),
+            superseded_turn_started("turn-b", /*started_at*/ None),
+            superseded_turn_completed(
+                "turn-a",
+                Some(ErrorEvent {
+                    message: "late failure".into(),
+                    codex_error_info: None,
+                    misalignment: None,
+                }),
+                /*completed_at*/ 20,
+            ),
+        ]);
+        assert_eq!(failed[0].status, TurnStatus::Failed);
+        assert_eq!(
+            failed[0].error.as_ref().map(|error| error.message.as_str()),
+            Some("late failure")
+        );
+        assert_eq!(failed[0].completed_at, Some(20));
+        assert_eq!(failed[1].status, TurnStatus::InProgress);
     }
 
     #[test]
