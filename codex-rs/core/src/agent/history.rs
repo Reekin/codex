@@ -24,6 +24,7 @@ use crate::thread_manager::ThreadManagerState;
 use crate::thread_manager::fork_history_from_snapshot;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::to_annotated_content;
+use codex_features::Feature;
 use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
 use codex_history::RolloutItem;
@@ -484,11 +485,13 @@ pub(super) async fn prepare_forked_history(
             | RolloutItem::SecurityRiskScore(_) => false,
         }
     });
-    insert_fork_history_boundaries(
-        &mut forked_rollout_items,
-        &AgentIdentity::from_session_source(session_source),
-        preserve_context_baselines,
-    );
+    if config.features.enabled(Feature::SubagentIdentity) {
+        insert_fork_history_boundaries(
+            &mut forked_rollout_items,
+            &AgentIdentity::from_session_source(session_source),
+            preserve_context_baselines,
+        );
+    }
     if preserve_fork_prefix {
         forked_rollout_items.push(RolloutItem::ResponseItem(
             ContextualUserFragment::into(MultiAgentUsageHint::new(

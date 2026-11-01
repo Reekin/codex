@@ -3,6 +3,7 @@ use crate::agent::AgentIdentity;
 use crate::session::InputQueueActivity;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
+use codex_features::Feature;
 use codex_tools::ToolSpec;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -109,11 +110,17 @@ impl Handler {
                 },
             )],
         );
-        let current_agent_name = AgentIdentity::from_session_source(&turn.session_source)
-            .current_agent_name(session.thread_id);
+        let mailbox_owner = turn
+            .config
+            .features
+            .enabled(Feature::SubagentIdentity)
+            .then(|| {
+                AgentIdentity::from_session_source(&turn.session_source)
+                    .current_agent_name(session.thread_id)
+            });
         let result = WaitAgentResult::from_outcome(
             outcome,
-            &current_agent_name,
+            mailbox_owner.as_deref(),
             requested_timeout_ms,
             timeout_ms,
         );
@@ -159,21 +166,26 @@ pub(crate) struct WaitAgentResult {
 }
 
 impl WaitAgentResult {
+    /// Builds the wait result; `mailbox_owner` names the waiting agent's mailbox when
+    /// subagent identity is enabled.
     fn from_outcome(
         outcome: WaitOutcome,
-        current_agent_name: &str,
+        mailbox_owner: Option<&str>,
         requested_timeout_ms: Option<i64>,
         timeout_ms: i64,
     ) -> Self {
-        let message = match outcome {
-            WaitOutcome::MailboxActivity => format!(
-                "Wait completed for your mailbox as `{current_agent_name}`. This wait only observed an update delivered to your own mailbox; it did not wait for another agent's mailbox."
+        let message = match (outcome, mailbox_owner) {
+            (WaitOutcome::MailboxActivity, None) => "Wait completed.".to_string(),
+            (WaitOutcome::Steered, None) => "Wait interrupted by new input.".to_string(),
+            (WaitOutcome::TimedOut, None) => "Wait timed out.".to_string(),
+            (WaitOutcome::MailboxActivity, Some(owner)) => format!(
+                "Wait completed for your mailbox as `{owner}`. This wait only observed an update delivered to your own mailbox; it did not wait for another agent's mailbox."
             ),
-            WaitOutcome::Steered => format!(
-                "Wait for your mailbox as `{current_agent_name}` was interrupted by new input."
-            ),
-            WaitOutcome::TimedOut => format!(
-                "Wait timed out for your mailbox as `{current_agent_name}`. This wait only observes updates delivered to your own mailbox; it does not wait for `/root`'s child tasks unless you are `/root`."
+            (WaitOutcome::Steered, Some(owner)) => {
+                format!("Wait for your mailbox as `{owner}` was interrupted by new input.")
+            }
+            (WaitOutcome::TimedOut, Some(owner)) => format!(
+                "Wait timed out for your mailbox as `{owner}`. This wait only observes updates delivered to your own mailbox; it does not wait for `/root`'s child tasks unless you are `/root`."
             ),
         };
         let message = match requested_timeout_ms {

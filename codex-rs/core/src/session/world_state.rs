@@ -388,9 +388,15 @@ impl Session {
             multi_agent_mode = multi_agent_mode.with_usage_hint(&usage_hint);
             world_state.add_section(usage_hint);
         }
-        let agent_identity = AgentIdentity::from_session_source(&turn_context.session_source);
-        if agent_identity.thread_spawn().is_some() {
-            world_state.add_section(SubagentIdentityState::new(agent_identity));
+        if turn_context
+            .config
+            .features
+            .enabled(Feature::SubagentIdentity)
+        {
+            let agent_identity = AgentIdentity::from_session_source(&turn_context.session_source);
+            if agent_identity.thread_spawn().is_some() {
+                world_state.add_section(SubagentIdentityState::new(agent_identity));
+            }
         }
         world_state.add_section(multi_agent_mode);
         let spawn_tool = match turn_context.multi_agent_version {

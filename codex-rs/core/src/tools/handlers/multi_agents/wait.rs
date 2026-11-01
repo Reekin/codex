@@ -5,6 +5,7 @@ use crate::agent::status::is_final;
 use crate::session::session::Session;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v1;
+use codex_features::Feature;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_tools::ToolSpec;
@@ -68,7 +69,9 @@ impl Handler {
         let arguments = function_arguments(payload)?;
         let args: WaitArgs = parse_arguments(&arguments)?;
         let receiver_thread_ids = parse_agent_id_targets(args.targets)?;
-        if receiver_thread_ids.contains(&session.thread_id) {
+        if turn.config.features.enabled(Feature::SubagentIdentity)
+            && receiver_thread_ids.contains(&session.thread_id)
+        {
             let current_agent_name = AgentIdentity::from_session_source(&turn.session_source)
                 .current_agent_name(session.thread_id);
             return Err(FunctionCallError::RespondToModel(format!(

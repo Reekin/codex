@@ -31,6 +31,32 @@ pub(crate) struct ThreadSpawnIdentity<'a> {
 }
 
 impl AgentIdentity {
+    /// Longest task name a spawned agent may use, so identity context stays bounded.
+    pub(crate) const MAX_AGENT_NAME_BYTES: usize = 128;
+    /// Longest canonical path a spawned agent may own, so identity context stays bounded.
+    pub(crate) const MAX_AGENT_PATH_BYTES: usize = 4_096;
+
+    /// Joins a spawned agent's task name under its parent path within the identity bounds.
+    pub(crate) fn join_spawned_agent_path(
+        parent: &AgentPath,
+        agent_name: &str,
+    ) -> Result<AgentPath, String> {
+        if agent_name.len() > Self::MAX_AGENT_NAME_BYTES {
+            return Err(format!(
+                "agent_name must not exceed {} UTF-8 bytes",
+                Self::MAX_AGENT_NAME_BYTES
+            ));
+        }
+        let path = parent.join(agent_name)?;
+        if path.as_str().len() > Self::MAX_AGENT_PATH_BYTES {
+            return Err(format!(
+                "agent path must not exceed {} UTF-8 bytes",
+                Self::MAX_AGENT_PATH_BYTES
+            ));
+        }
+        Ok(path)
+    }
+
     pub(crate) fn from_session_source(session_source: &SessionSource) -> Self {
         match session_source {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {

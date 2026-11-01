@@ -2,6 +2,7 @@
 //!
 //! Callers supply captured step settings; the configured agent backend owns child lifetimes.
 
+use crate::agent::AgentIdentity;
 use crate::agent::api::AgentInput;
 use crate::agent::api::SpawnRequest;
 use crate::agent::child_config::SpawnConfigOptions;
@@ -18,6 +19,7 @@ use crate::config::Config;
 use crate::session::multi_agents::resolve_usage_hints;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
+use codex_features::Feature;
 use codex_prompts::ResolvedModelMessages;
 use codex_protocol::AgentPath;
 use codex_protocol::error::CodexErr;
@@ -153,12 +155,16 @@ pub(crate) async fn prepare(
     .await
     .map_err(ThreadSpawnError::Preparation)?;
     let config = prepared.config;
-    let task_name = turn
+    let parent_path = turn
         .session_source
         .get_agent_path()
-        .unwrap_or_else(AgentPath::root)
-        .join(&task_name)
-        .map_err(ThreadSpawnError::Preparation)?;
+        .unwrap_or_else(AgentPath::root);
+    let task_name = if turn.config.features.enabled(Feature::SubagentIdentity) {
+        AgentIdentity::join_spawned_agent_path(&parent_path, &task_name)
+    } else {
+        parent_path.join(&task_name)
+    }
+    .map_err(ThreadSpawnError::Preparation)?;
     let spawn_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id: session.thread_id,
         depth: next_thread_spawn_depth(&turn.session_source),
