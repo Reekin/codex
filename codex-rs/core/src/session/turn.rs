@@ -744,6 +744,10 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     if !final_answer_retry_used
+                        && turn_context
+                            .config
+                            .features
+                            .enabled(Feature::FinalAnswerRetry)
                         && turn_context.mode() == ModeKind::Default
                         && final_answer.lacks_visible_final_answer()
                     {

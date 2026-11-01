@@ -7,6 +7,7 @@ use anyhow::Context;
 use codex_core::CodexThread;
 use codex_core::TurnInputRequest;
 use codex_core::TurnInputSubmission;
+use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -31,6 +32,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
+use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
@@ -42,6 +44,15 @@ use tokio::time::sleep;
 const RECOVERY_PROMPT_ROLE: &str = "developer";
 const RECOVERY_PROMPT_SNIPPET: &str = "previous response did not provide a visible final answer";
 const RECOVERED_ANSWER: &str = "Recovered final answer.";
+
+fn final_answer_retry_codex() -> TestCodexBuilder {
+    test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::FinalAnswerRetry)
+            .expect("enable final answer retry");
+    })
+}
 
 fn assistant_message_with_phase(id: &str, text: &str, phase: &str) -> Value {
     json!({
@@ -109,7 +120,9 @@ async fn empty_final_answer_retries_once_and_persists_recovery_prompt() -> anyho
         ],
     )
     .await;
-    let test = test_codex().build_with_auto_env(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_auto_env(&server)
+        .await?;
 
     let submission = start_user_turn(&test.codex, "please answer").await?;
     assert!(matches!(submission, TurnInputSubmission::Started { .. }));
@@ -169,7 +182,9 @@ async fn retry_budget_is_shared_across_missing_and_empty_responses() -> anyhow::
         ],
     )
     .await;
-    let test = test_codex().build_with_auto_env(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_auto_env(&server)
+        .await?;
 
     start_user_turn(&test.codex, "please answer").await?;
     let completed = wait_for_turn_complete(&test.codex).await;
@@ -200,7 +215,9 @@ async fn retry_response_without_output_does_not_request_another_recovery() -> an
         ],
     )
     .await;
-    let test = test_codex().build_with_auto_env(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_auto_env(&server)
+        .await?;
 
     test.submit_turn("please answer").await?;
 
@@ -231,7 +248,9 @@ async fn non_empty_final_answer_dominates_empty_final_messages(
     }
     events.push(ev_completed("resp-mixed"));
     let response_log = mount_sse_once(&server, sse(events)).await;
-    let test = test_codex().build_with_auto_env(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_auto_env(&server)
+        .await?;
 
     test.submit_turn("please answer").await?;
 
@@ -258,7 +277,9 @@ async fn commentary_only_response_retries_for_missing_final_answer() -> anyhow::
         ],
     )
     .await;
-    let test = test_codex().build_with_auto_env(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_auto_env(&server)
+        .await?;
 
     start_user_turn(&test.codex, "please answer").await?;
     let completed = wait_for_turn_complete(&test.codex).await;
@@ -284,7 +305,9 @@ async fn completed_response_without_output_does_not_retry() -> anyhow::Result<()
         ]),
     )
     .await;
-    let test = test_codex().build_with_auto_env(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_auto_env(&server)
+        .await?;
 
     test.submit_turn("please answer").await?;
 
@@ -304,7 +327,9 @@ async fn plan_mode_does_not_retry_empty_final_answer() -> anyhow::Result<()> {
         ]),
     )
     .await;
-    let test = test_codex().build_with_auto_env(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_auto_env(&server)
+        .await?;
 
     test.codex
         .start_or_steer_turn(
@@ -356,7 +381,9 @@ async fn tool_follow_up_precedes_missing_final_answer_recovery() -> anyhow::Resu
         ],
     )
     .await;
-    let test = test_codex().build_with_auto_env(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_auto_env(&server)
+        .await?;
 
     start_user_turn(&test.codex, "inspect and answer").await?;
     let completed = wait_for_turn_complete(&test.codex).await;
@@ -392,7 +419,9 @@ async fn output_presence_does_not_carry_across_tool_follow_up() -> anyhow::Resul
         ],
     )
     .await;
-    let test = test_codex().build_with_auto_env(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_auto_env(&server)
+        .await?;
 
     test.submit_turn("inspect and answer").await?;
 
@@ -427,7 +456,9 @@ async fn model_follow_up_precedes_final_answer_recovery() -> anyhow::Result<()> 
         ],
     )
     .await;
-    let test = test_codex().build_with_auto_env(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_auto_env(&server)
+        .await?;
 
     test.submit_turn("please answer").await?;
 
@@ -486,7 +517,9 @@ async fn pending_user_input_precedes_final_answer_recovery() -> anyhow::Result<(
     ])];
     let (server, _completions) =
         start_streaming_sse_server(vec![first_chunks, second_chunks]).await;
-    let test = test_codex().build_with_streaming_server(&server).await?;
+    let test = final_answer_retry_codex()
+        .build_with_streaming_server(&server)
+        .await?;
 
     let submission = start_user_turn(&test.codex, "first prompt").await?;
     assert!(matches!(submission, TurnInputSubmission::Started { .. }));
@@ -618,7 +651,7 @@ async fn terminal_hooks_and_completion_observe_only_recovered_answer() -> anyhow
         ],
     )
     .await;
-    let mut builder = test_codex()
+    let mut builder = final_answer_retry_codex()
         .with_pre_build_hook(|home| {
             write_terminal_hook_fixtures(home).expect("write terminal hook fixtures");
         })

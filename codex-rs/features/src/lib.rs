@@ -439,6 +439,8 @@ pub enum Feature {
     CurrentTimeReminder,
     /// Report failed clock reads to the model without failing the turn.
     NonfatalClockReadErrors,
+    /// Continue a regular turn once when it ends without a non-empty final answer.
+    FinalAnswerRetry,
     /// Route MCP tool approval prompts through the MCP elicitation request path.
     ToolCallMcpElicitation,
     /// Prompt Codex Apps connector auth failures through MCP URL elicitations.
@@ -2097,6 +2099,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::NonfatalClockReadErrors,
         key: "nonfatal_clock_read_errors",
         stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::FinalAnswerRetry,
+        key: "final_answer_retry",
+        stage: Stage::Stable,
         default_enabled: false,
     },
     FeatureSpec {
