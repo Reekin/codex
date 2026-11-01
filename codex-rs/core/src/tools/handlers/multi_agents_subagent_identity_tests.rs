@@ -1,6 +1,7 @@
 //! Subagent identity behavior of the multi-agent handlers, enabled by `Feature::SubagentIdentity`.
 
 use super::*;
+use pretty_assertions::assert_eq;
 use crate::agent::AgentIdentity;
 use crate::session::session::Session;
 use crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult;

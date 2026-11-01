@@ -1,6 +1,7 @@
 //! Reconstruction of the fork-history boundary that subagent identity records for forked children.
 
 use super::*;
+use pretty_assertions::assert_eq;
 use crate::context::ForkedHistoryBoundary;
 use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::RenderedFragment;

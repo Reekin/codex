@@ -1,6 +1,7 @@
 //! Fork-history boundaries for full-history forks, enabled by `Feature::SubagentIdentity`.
 
 use super::*;
+use pretty_assertions::assert_eq;
 
 const FORK_START: &str = "forked parent conversation history begins";
 const FORK_END: &str = "forked parent conversation history ends";
