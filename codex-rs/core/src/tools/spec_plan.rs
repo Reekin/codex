@@ -22,6 +22,7 @@ use crate::tools::handlers::ListMcpResourcesHandler;
 use crate::tools::handlers::NewContextWindowHandler;
 use crate::tools::handlers::PlanHandler;
 use crate::tools::handlers::ReadMcpResourceHandler;
+use crate::tools::handlers::RecallHandler;
 use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
 use crate::tools::handlers::RequestUserInputAsyncHandler;
@@ -116,6 +117,8 @@ struct CoreToolPlanContext<'a> {
     wait_for_environment_tool_config: Option<&'a Arc<crate::WaitForEnvironmentToolConfig>>,
     default_agent_type_description: &'a str,
     wait_agent_timeouts: WaitAgentTimeoutOptions,
+    /// History contains locally compacted records whose originals the recall tools read.
+    has_local_compaction_history: bool,
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -130,6 +133,7 @@ pub(crate) fn build_tool_router(
     step_store: &ExtensionData,
     tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
     dynamic_tools: &[DynamicToolSpec],
+    has_local_compaction_history: bool,
 ) -> CodexResult<ToolRouter> {
     let default_agent_type_description =
         crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
@@ -147,6 +151,7 @@ pub(crate) fn build_tool_router(
         wait_for_environment_tool_config: wait_for_environment_tool_config.as_ref(),
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        has_local_compaction_history,
     };
     let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
     add_core_tool_sources(&context, &mut registry);
@@ -314,6 +319,7 @@ pub(crate) fn build_core_tool_registry(
         wait_for_environment_tool_config,
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
+        has_local_compaction_history: false,
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
@@ -1358,7 +1364,20 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
         registry.add(RequestPermissionsHandler);
     }
 
-    if features.enabled(Feature::TokenBudget) {
+    // Local full compaction replaces history with summaries; tool cleanup on any route
+    // replaces results. Either way the originals stay readable through recall.
+    let local_route = crate::compaction_policy::remote_compaction_support(
+        turn_context.provider.capabilities().remote_compaction,
+        context.model_info,
+    ) == codex_model_provider::RemoteCompactionSupport::Unsupported;
+    if context.has_local_compaction_history || local_route {
+        for action in ["list_turns", "search", "read_turn", "read_item"] {
+            registry.add(RecallHandler(action));
+        }
+    }
+
+    // A token-budget window reset never stands in for local full compaction.
+    if features.enabled(Feature::TokenBudget) && !local_route {
         let model_messages = ResolvedModelMessages::from_model(context.model_info);
         let messages = model_messages.context_management();
         registry.add_with_exposure(

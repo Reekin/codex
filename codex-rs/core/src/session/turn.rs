@@ -187,8 +187,8 @@ pub(crate) async fn run_turn(
         .thread_extension_data
         .get::<AutoCompactionDisabled>()
         .is_none();
-    let auto_summarization_enabled =
-        auto_compaction_enabled && !turn_context.config.features.enabled(Feature::TokenBudget);
+    let auto_summarization_enabled = auto_compaction_enabled
+        && !crate::local_compaction::token_budget_route(&turn_context, turn_context.model_info());
     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
     }
@@ -575,6 +575,16 @@ pub(crate) async fn run_turn(
             sess.record_reasoning_effort_override(step_context.as_ref())
                 .await;
 
+            // Validated tool marks are installed before the next ordinary request once they
+            // release enough; prior tool results and accepted input are already recorded.
+            crate::local_compaction::maybe_clean_history(&sess, &step_context)
+                .or_cancel(&cancellation_token)
+                .await??;
+            // Cleanup installed here or by an out-of-turn request is announced before sampling.
+            if run_pending_session_start_hooks(&sess, &turn_context).await {
+                return Err(CodexErr::TurnAborted);
+            }
+
             // Construct the input that we will send to the model.
             let sampling_request_input: Vec<ResponseItem> = async {
                 sess.clone_history()
@@ -633,6 +643,14 @@ pub(crate) async fn run_turn(
                 .await;
                 let needs_follow_up = model_needs_follow_up || has_pending_input;
                 let token_limit_reached = token_status.token_limit_reached;
+                // The request that just returned put its prefix in the prompt cache; a marking
+                // batch extends that prefix. Compaction is about to replace the history instead.
+                if !token_limit_reached
+                    && let Err(error) =
+                        crate::local_compaction::start_marking(&sess, &step_context).await
+                {
+                    warn!(%error, "cannot start background local marking");
+                }
 
                 super::async_compaction::maybe_start(
                     &sess,
@@ -693,7 +711,10 @@ pub(crate) async fn run_turn(
                 };
                 let should_roll_over = auto_compaction_enabled
                     && needs_follow_up
-                    && (sess.take_new_context_window_request().await
+                    && ((crate::local_compaction::token_budget_route(
+                        &turn_context,
+                        &step_context.settings.model_info,
+                    ) && sess.take_new_context_window_request().await)
                         || token_limit_reached
                         || candidate.is_some());
                 if auto_compaction_enabled {
@@ -1620,7 +1641,13 @@ async fn run_auto_compact(
         conversation.id = %sess.thread_id,
         turn.id = %turn_context.sub_id,
     );
-    if turn_context.config.features.enabled(Feature::TokenBudget) {
+    // Full compaction starts a new window and marking for the old one stops; the local
+    // pipeline first applies the marks already validated.
+    if !crate::local_compaction::uses_local_route(turn_context, &step_context.settings.model_info) {
+        crate::local_compaction::cancel(sess).await;
+    }
+    if crate::local_compaction::token_budget_route(turn_context, &step_context.settings.model_info)
+    {
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.
         crate::compact_token_budget::run_inline_auto_compact_task(
@@ -1697,8 +1724,7 @@ async fn run_auto_compact(
                 reason,
                 phase,
             )
-            .await?;
-            Ok(true)
+            .await
         }
     }
 }
@@ -2073,6 +2099,7 @@ pub(crate) async fn built_tools(
             .instrument(trace_span!("built_tools.load_discoverable_tools"))
             .await
         };
+    let has_local_compaction_history = crate::local_compaction::has_local_records(sess).await;
     Ok(Arc::new(build_tool_router(
         sess,
         turn_context,
@@ -2083,6 +2110,7 @@ pub(crate) async fn built_tools(
         step_store,
         tool_suggest_candidates.as_ref(),
         dynamic_tools,
+        has_local_compaction_history,
     )?))
 }
 

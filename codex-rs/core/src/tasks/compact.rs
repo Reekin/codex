@@ -7,11 +7,9 @@ use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
-use codex_features::Feature;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::CodexErrorInfo;
-use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Default)]
@@ -50,7 +48,11 @@ impl SessionTask for CompactTask {
                 .build_world_state_for_step(&step_context, /*new_window*/ true)
                 .await?,
         );
-        if ctx.config.features.enabled(Feature::TokenBudget) {
+        if !crate::local_compaction::uses_local_route(&ctx, &step_context.settings.model_info) {
+            // The local pipeline first applies the marks already validated.
+            crate::local_compaction::cancel(&session).await;
+        }
+        if crate::local_compaction::token_budget_route(&ctx, &step_context.settings.model_info) {
             crate::compact_token_budget::run_manual_compact_task(
                 session,
                 step_context,
@@ -83,18 +85,7 @@ impl SessionTask for CompactTask {
                     "local",
                     /*manual*/ true,
                 );
-                let input = vec![UserInput::Text {
-                    text: ctx
-                        .config
-                        .compact_prompt
-                        .as_deref()
-                        .unwrap_or(crate::compact::SUMMARIZATION_PROMPT)
-                        .to_string(),
-                    // Compaction prompt is synthesized; no UI element ranges to preserve.
-                    text_elements: Vec::new(),
-                }];
-                crate::compact::run_compact_task(session.clone(), step_context, world_state, input)
-                    .await
+                crate::compact::run_compact_task(session.clone(), step_context, world_state).await
             }
         };
         if let Err(err) = result {
