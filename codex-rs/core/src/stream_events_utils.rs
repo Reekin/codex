@@ -350,14 +350,23 @@ pub(crate) async fn handle_output_item_done(
 
             let cancellation_token = ctx.cancellation_token.child_token();
             let runtime = ctx.tool_runtime.clone();
+            let exec_argv_enabled = ctx
+                .step_context
+                .turn
+                .config
+                .features
+                .enabled(codex_features::Feature::ExecArgv);
             // handle_tool_call dispatches immediately, not when its future is polled.
             // Defer for post-model hooks or to cancel buffered calls during mailbox drains.
             let tool_future: InFlightFuture<'static> = if ctx.defer_tool_dispatch {
                 Box::pin(async move {
                     if cancellation_token.is_cancelled() {
                         // The call is already in history; resume needs its output even if we never dispatch.
-                        let output =
-                            ToolCallRuntime::aborted_response(&call, /*elapsed_secs*/ None);
+                        let output = ToolCallRuntime::aborted_response(
+                            &call,
+                            /*elapsed_secs*/ None,
+                            exec_argv_enabled,
+                        );
                         return Ok(output.into_response());
                     }
                     runtime.handle_tool_call(call, cancellation_token).await

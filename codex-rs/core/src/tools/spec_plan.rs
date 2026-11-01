@@ -1265,11 +1265,13 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         include_windows_shell_guidance: should_include_windows_shell_guidance(context.environments),
     };
     if features.enabled(Feature::UnifiedExec) {
-        registry.add(ExecArgvHandler::new(ExecArgvHandlerOptions {
-            allow_tty: options.allow_tty,
-            exec_permission_approvals_enabled,
-            include_environment_id,
-        }));
+        if features.enabled(Feature::ExecArgv) {
+            registry.add(ExecArgvHandler::new(ExecArgvHandlerOptions {
+                allow_tty: options.allow_tty,
+                exec_permission_approvals_enabled,
+                include_environment_id,
+            }));
+        }
         registry.add(ExecCommandHandler::new(options));
         registry.add(WriteStdinHandler);
     } else {

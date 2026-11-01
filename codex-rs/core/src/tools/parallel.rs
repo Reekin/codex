@@ -241,6 +241,10 @@ impl ToolCallRuntime {
         let abort_session = Arc::clone(&session);
         let abort_source = source.clone();
         let abort_turn = Arc::clone(&turn);
+        let exec_argv_enabled = turn
+            .config
+            .features
+            .enabled(codex_features::Feature::ExecArgv);
         let dispatch_call_state = Arc::clone(&call_state);
         let dispatch_call = call.clone();
         let thread_id = session.thread_id;
@@ -382,7 +386,8 @@ impl ToolCallRuntime {
                             Ok(result) => result,
                             Err(err) if err.is_cancelled() => {
                                 let _reservation = call_state.invocation.take();
-                                let response = Self::aborted_response(&call, Some(secs));
+                                let response =
+                                    Self::aborted_response(&call, Some(secs), exec_argv_enabled);
                                 call_trace::result_ready(
                                     thread_id,
                                     &abort_turn.sub_id,
@@ -425,6 +430,7 @@ impl ToolCallRuntime {
                 result = Ok(Self::aborted_response(
                     &call,
                     Some(started.elapsed().as_secs_f32().max(0.1)),
+                    exec_argv_enabled,
                 ));
             }
             // Use one completion measurement for logging and response formatting.
@@ -478,24 +484,36 @@ impl ToolCallRuntime {
         }
     }
 
-    pub(crate) fn aborted_response(call: &ToolCall, elapsed_secs: Option<f32>) -> AnyToolResult {
+    pub(crate) fn aborted_response(
+        call: &ToolCall,
+        elapsed_secs: Option<f32>,
+        exec_argv_enabled: bool,
+    ) -> AnyToolResult {
         AnyToolResult {
             call_id: call.call_id.clone(),
             payload: call.payload.clone(),
             result: Box::new(AbortedToolOutput {
-                message: Self::abort_message(call, elapsed_secs),
+                message: Self::abort_message(call, elapsed_secs, exec_argv_enabled),
             }),
             post_tool_use_payload: None,
         }
     }
 
-    fn abort_message(call: &ToolCall, elapsed_secs: Option<f32>) -> String {
+    /// Unified-exec process tools report aborts in their wall-time output format.
+    fn abort_message(
+        call: &ToolCall,
+        elapsed_secs: Option<f32>,
+        exec_argv_enabled: bool,
+    ) -> String {
         let Some(secs) = elapsed_secs else {
             return "aborted before dispatch".to_string();
         };
-        if call.tool_name.is_default_namespace()
-            && matches!(call.tool_name.name.as_str(), "exec_argv" | "exec_command")
-        {
+        let is_exec_tool = match call.tool_name.name.as_str() {
+            "exec_command" => true,
+            "exec_argv" => exec_argv_enabled,
+            _ => false,
+        };
+        if call.tool_name.is_default_namespace() && is_exec_tool {
             format!("Wall time: {secs:.1} seconds\naborted by user")
         } else {
             format!("aborted by user after {secs:.1}s")

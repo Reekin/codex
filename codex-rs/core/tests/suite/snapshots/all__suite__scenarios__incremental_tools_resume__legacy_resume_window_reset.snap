@@ -16,11 +16,10 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (2; hash=922fef25037322f0):
-        - namespace/functions; hash=5ce0ce95c51e93c4
+00:additional_tools/developer (2; hash=30feffe01b108a65):
+        - namespace/functions; hash=dfb4b8684addc20d
           - custom/exec
           - function/wait
-          - function/exec_argv
           - function/exec_command
           - function/write_stdin
           - function/request_user_input
@@ -54,11 +53,10 @@ Settings:
 ## Window 2 (after request 2: input diverged at item 03)
 Settings: same as window 1
 -- request 3 (turn) --
-00:additional_tools/developer (2; hash=922fef25037322f0):
-        - namespace/functions; hash=5ce0ce95c51e93c4
+00:additional_tools/developer (2; hash=30feffe01b108a65):
+        - namespace/functions; hash=dfb4b8684addc20d
           - custom/exec
           - function/wait
-          - function/exec_argv
           - function/exec_command
           - function/write_stdin
           - function/request_user_input
@@ -99,7 +97,6 @@ Settings: same as window 1
           - function/update_plan
 11:message/developer:
     The following tools are no longer available. Do not call them:
-    - functions.exec_argv
     - functions.exec_command
     - functions.write_stdin
 12:message/user:

@@ -1017,6 +1017,9 @@
             "enable_request_compression": {
               "type": "boolean"
             },
+            "exec_argv": {
+              "type": "boolean"
+            },
             "exec_permission_approvals": {
               "type": "boolean"
             },
@@ -7664,6 +7667,9 @@
           "type": "boolean"
         },
         "enable_request_compression": {
+          "type": "boolean"
+        },
+        "exec_argv": {
           "type": "boolean"
         },
         "exec_permission_approvals": {

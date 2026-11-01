@@ -163,6 +163,8 @@ pub enum Feature {
     UnifiedExec,
     /// Allow unified exec commands to allocate an interactive terminal.
     UnifiedExecTty,
+    /// Expose `exec_argv` for launching one native executable from an argv vector.
+    ExecArgv,
     /// Removed compatibility flag for the retired patched zsh backend.
     ShellZshFork,
     /// Removed compatibility flag for the retired patched zsh backend.
@@ -1154,6 +1156,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "unified_exec_tty",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::ExecArgv,
+        key: "exec_argv",
+        stage: Stage::Stable,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::ShellZshFork,
