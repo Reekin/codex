@@ -24,6 +24,11 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const AUTO_COMPACT_TOKEN_LIMIT: i64 = 50_000;
+const DEVELOPER_INSTRUCTIONS: &str =
+    "Report context usage fixture results in short sentences and keep every answer factual.";
+const AGENTS_MD_INSTRUCTIONS: &str =
+    "Workspace instructions for the context usage fixture: prefer small focused changes.";
 
 async fn read_token_usage_read(
     mcp: &mut TestAppServer,
@@ -120,6 +125,11 @@ async fn token_usage_carries_context_usage_and_is_readable_per_turn() -> Result<
             responses::ev_completed_with_tokens("resp-1", /*total_tokens*/ 5_000),
         ]),
         responses::sse(vec![
+            responses::ev_response_created("resp-tool"),
+            responses::ev_function_call("call-1", "unknown_test_tool", "{}"),
+            responses::ev_completed_with_tokens("resp-tool", /*total_tokens*/ 5_500),
+        ]),
+        responses::sse(vec![
             responses::ev_response_created("resp-2"),
             responses::ev_assistant_message("msg-2", "second answer"),
             responses::ev_completed_with_tokens("resp-2", /*total_tokens*/ 6_000),
@@ -129,12 +139,30 @@ async fn token_usage_carries_context_usage_and_is_readable_per_turn() -> Result<
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .with_model("gpt-5.4")
+        .with_root_config(&format!(
+            "model_auto_compact_token_limit = {AUTO_COMPACT_TOKEN_LIMIT}\ndeveloper_instructions = \"{DEVELOPER_INSTRUCTIONS}\""
+        ))
         .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
         .await?;
+    {
+        let auto_env = mcp.auto_env()?;
+        let environment_cwd = auto_env.selection().cwd.clone();
+        let agents_md = environment_cwd.join("AGENTS.md")?;
+        auto_env
+            .environment()
+            .get_filesystem()
+            .write_file(
+                &agents_md,
+                AGENTS_MD_INSTRUCTIONS.as_bytes().to_vec(),
+                Default::default(),
+                /*sandbox*/ None,
+            )
+            .await?;
+    }
     let start_id = mcp
         .send_thread_start_request_with_auto_env(ThreadStartParams {
             model: Some("gpt-5.4".to_string()),
@@ -145,6 +173,7 @@ async fn token_usage_carries_context_usage_and_is_readable_per_turn() -> Result<
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(start_id)).await??;
 
     let (first_turn_id, first) = run_turn(&mut mcp, &thread.id, "first question", 5_000).await?;
+    // The second turn calls a tool and receives its output before the final message.
     let (second_turn_id, second) = run_turn(&mut mcp, &thread.id, "second question", 6_000).await?;
 
     // The live notification reports the active context that drives auto-compaction. The turn
@@ -156,9 +185,15 @@ async fn token_usage_carries_context_usage_and_is_readable_per_turn() -> Result<
         .expect("live token usage should carry context usage");
     assert_eq!(context_usage.tokens, 6_000);
     assert_eq!(breakdown_sum(&context_usage), context_usage.tokens);
-    assert!(context_usage.auto_compact_token_limit.is_some());
+    assert_eq!(
+        context_usage.auto_compact_token_limit,
+        Some(AUTO_COMPACT_TOKEN_LIMIT)
+    );
+    assert!(context_usage.breakdown.developer_instructions > 0);
+    assert!(context_usage.breakdown.agents_md > 0);
     assert!(context_usage.breakdown.user_messages > 0);
     assert!(context_usage.breakdown.agent_messages > 0);
+    assert!(context_usage.breakdown.tool_calls > 0);
     assert!(context_usage.breakdown.tools > 0);
     assert!(first.token_usage.context_usage.is_some());
 
