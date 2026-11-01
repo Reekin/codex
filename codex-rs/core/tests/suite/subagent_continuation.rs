@@ -21,6 +21,7 @@ use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -387,5 +388,163 @@ async fn child_result_continues_parent(
     }
     child_server.shutdown().await;
     parent_server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v2_child_shutdown_notice_waits_for_next_user_turn() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    // The child stays running until it is shut down; its response is never released.
+    let (release_child, child_gate) = oneshot::channel();
+    let (child_server, _) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
+        gate: Some(child_gate),
+        body: answer("child", "child result"),
+    }]])
+    .await;
+    let test = test_codex()
+        .with_model("koffing")
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("enable collaboration");
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("select multi-agent version");
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+            config.model_provider.supports_websockets = false;
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let parent_id = test.session_configured.thread_id.to_string();
+    let mut created = test.thread_manager.subscribe_thread_created();
+    let spawn = sse(vec![
+        ev_response_created("spawn"),
+        ev_function_call_with_namespace(
+            "spawn-child",
+            "collaboration",
+            "spawn_agent",
+            &json!({"message": "do child work", "task_name": "worker", "fork_turns": "none"})
+                .to_string(),
+        ),
+        ev_completed("spawn"),
+    ]);
+    let parent_match_id = parent_id.clone();
+    let child_url = format!("{}/v1/responses", child_server.uri());
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(move |request: &wiremock::Request| {
+            if request_thread_id(request) != parent_match_id {
+                return ResponseTemplate::new(307).insert_header("location", child_url.as_str());
+            }
+            let body = request_body(request);
+            if carries_child_result(&body) {
+                sse_response(answer("processed", "processed child"))
+            } else if body["input"].to_string().contains(RESUME_PROMPT) {
+                // Fresh user input is sampled before pending mailbox input. An
+                // empty response lets the next sample drain the retained notice.
+                sse_response(sse(vec![
+                    ev_response_created("resume-before-result"),
+                    ev_completed("resume-before-result"),
+                ]))
+            } else if body["input"].to_string().contains("spawn-child") {
+                sse_response(answer("parent-finish", "parent finished"))
+            } else {
+                sse_response(spawn.clone())
+            }
+        })
+        .mount(&server)
+        .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "delegate and finish".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let child_id = timeout(Duration::from_secs(10), created.recv()).await??;
+    let child = test.thread_manager.get_thread(child_id).await?;
+    timeout(
+        Duration::from_secs(10),
+        child_server.wait_for_request_count(1),
+    )
+    .await?;
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+        Duration::from_secs(10),
+    )
+    .await;
+    assert_eq!(parent_requests(&server, &parent_id).await.len(), 2);
+
+    // Shutting down the still-running child reports a lifecycle notice, not a result.
+    child.submit(Op::Shutdown).await?;
+    wait_for_event_with_timeout(
+        &child,
+        |event| matches!(event, EventMsg::ShutdownComplete),
+        Duration::from_secs(10),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_no_turn_start(
+        &test.codex,
+        "a child shutdown notice must not resume a parent whose turn ended",
+    )
+    .await;
+    assert_eq!(parent_requests(&server, &parent_id).await.len(), 2);
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: RESUME_PROMPT.into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let mut turn_starts = 0;
+    timeout(Duration::from_secs(10), async {
+        loop {
+            match test.codex.next_event().await.unwrap().msg {
+                EventMsg::TurnStarted(_) => turn_starts += 1,
+                EventMsg::TurnComplete(event)
+                    if event.last_agent_message.as_deref() == Some("processed child") =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await?;
+    assert_eq!(turn_starts, 1);
+
+    let parent_requests = parent_requests(&server, &parent_id).await;
+    assert!((3..=4).contains(&parent_requests.len()));
+    let notice_requests: Vec<_> = parent_requests
+        .iter()
+        .filter(|body| carries_child_result(body))
+        .collect();
+    assert_eq!(notice_requests.len(), 1);
+    let continued = notice_requests[0];
+    assert!(continued["input"].to_string().contains(RESUME_PROMPT));
+    let messages: Vec<_> = continued["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["type"] == "agent_message")
+        .cloned()
+        .collect();
+    assert_eq!(
+        strip_response_item_ids_from_json(strip_metadata_from_json(json!(messages))),
+        json!([{
+            "type": "agent_message",
+            "author": "/root/worker",
+            "recipient": "/root",
+            "content": [{"type": "input_text", "text": "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\nAgent shut down."}],
+        }])
+    );
+    let _ = release_child.send(());
+    child_server.shutdown().await;
     Ok(())
 }
