@@ -5292,6 +5292,24 @@ class ThreadCompactStartResponse(BaseModel):
     )
 
 
+class ThreadContextUsageBreakdown(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    agent_messages: Annotated[int, Field(alias="agentMessages")]
+    agents_md: Annotated[int, Field(alias="agentsMd")]
+    base_instructions: Annotated[int, Field(alias="baseInstructions")]
+    compaction: int
+    developer_instructions: Annotated[int, Field(alias="developerInstructions")]
+    environment: int
+    other: int
+    reasoning: int
+    skills: int
+    tool_calls: Annotated[int, Field(alias="toolCalls")]
+    tools: int
+    user_messages: Annotated[int, Field(alias="userMessages")]
+
+
 class ThreadDeleteParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -6525,6 +6543,13 @@ class TurnStartedThreadTimelineEntry(BaseModel):
     type: Annotated[Literal["turnStarted"], Field(title="TurnStartedThreadTimelineEntryType")]
 
 
+class ThreadTokenUsageReadParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
 class ThreadUnarchiveParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -7424,6 +7449,17 @@ class ThreadItemsListRequest(BaseModel):
     id: RequestId
     method: Annotated[Literal["thread/items/list"], Field(title="Thread/items/listRequestMethod")]
     params: ThreadItemsListParams
+
+
+class ThreadTokenUsageReadRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["thread/tokenUsage/read"], Field(title="Thread/tokenUsage/readRequestMethod")
+    ]
+    params: ThreadTokenUsageReadParams
 
 
 class ThreadInjectItemsRequest(BaseModel):
@@ -10244,6 +10280,24 @@ class SubAgentSource(
     root: SubAgentSourceValue | ThreadSpawnSubAgentSource | OtherSubAgentSource
 
 
+class ThreadContextUsage(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    auto_compact_token_limit: Annotated[
+        int | None,
+        Field(
+            alias="autoCompactTokenLimit",
+            description="Active context tokens at which automatic compaction triggers, when it can trigger.",
+        ),
+    ] = None
+    breakdown: Annotated[
+        ThreadContextUsageBreakdown,
+        Field(description="Estimated composition of `tokens`; categories sum exactly to `tokens`."),
+    ]
+    tokens: int
+
+
 class ThreadForkParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -10907,6 +10961,13 @@ class ThreadTokenUsage(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    context_usage: Annotated[
+        ThreadContextUsage | None,
+        Field(
+            alias="contextUsage",
+            description="Active context usage; absent for snapshots recorded without it.",
+        ),
+    ] = None
     last: TokenUsageBreakdown
     model_context_window: Annotated[int | None, Field(alias="modelContextWindow")] = None
     total: TokenUsageBreakdown
@@ -11027,6 +11088,14 @@ class TurnSteerParams(BaseModel):
     ]
     input: list[UserInput]
     thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class TurnTokenUsage(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    token_usage: Annotated[ThreadTokenUsage, Field(alias="tokenUsage")]
+    turn_id: Annotated[str, Field(alias="turnId")]
 
 
 class WindowsSandboxSetupCompletedNotification(BaseModel):
@@ -12204,6 +12273,18 @@ class ThreadTimelineEntry(
     ]
 
 
+class ThreadTokenUsageReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    data: Annotated[
+        list[TurnTokenUsage],
+        Field(
+            description="The last token usage recorded in each turn of the thread's own history, in turn order."
+        ),
+    ]
+
+
 class Turn(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -13255,6 +13336,7 @@ class ClientRequest(
         | ThreadReadRequest
         | ThreadTurnsListRequest
         | ThreadItemsListRequest
+        | ThreadTokenUsageReadRequest
         | ThreadInjectItemsRequest
         | SkillsListRequest
         | SkillsExtraRootsSetRequest
@@ -13364,6 +13446,7 @@ class ClientRequest(
         | ThreadReadRequest
         | ThreadTurnsListRequest
         | ThreadItemsListRequest
+        | ThreadTokenUsageReadRequest
         | ThreadInjectItemsRequest
         | SkillsListRequest
         | SkillsExtraRootsSetRequest
