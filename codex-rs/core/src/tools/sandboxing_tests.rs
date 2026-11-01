@@ -21,8 +21,7 @@ use std::collections::HashMap;
 #[test]
 fn bash_permission_request_payload_omits_missing_description() {
     assert_eq!(
-        PermissionRequestPayload::bash(
-            "echo hi".to_string(),
+        ExecHookMetadata::shell("echo hi").permission_request(
             /*description*/ None,
             PathUri::parse("file:///repo-B").unwrap()
         ),
@@ -37,8 +36,7 @@ fn bash_permission_request_payload_omits_missing_description() {
 #[test]
 fn bash_permission_request_payload_includes_description_when_present() {
     assert_eq!(
-        PermissionRequestPayload::bash(
-            "echo hi".to_string(),
+        ExecHookMetadata::shell("echo hi").permission_request(
             Some("network-access example.com".to_string()),
             PathUri::parse("file:///repo-B").unwrap(),
         ),
@@ -47,6 +45,33 @@ fn bash_permission_request_payload_includes_description_when_present() {
             tool_cwd: Some(PathUri::parse("file:///repo-B").unwrap()),
             tool_input: json!({
                 "command": "echo hi",
+                "description": "network-access example.com",
+            }),
+        }
+    );
+}
+
+#[test]
+fn exec_argv_permission_request_payload_keeps_identity_and_authoritative_argv() {
+    let argv = vec![
+        "printf".to_string(),
+        "two words".to_string(),
+        "$HOME | *".to_string(),
+    ];
+    let metadata = ExecHookMetadata::argv(&argv);
+
+    assert_eq!(metadata.command(), "printf 'two words' '$HOME | *'");
+    assert_eq!(
+        metadata.permission_request(
+            Some("network-access example.com".to_string()),
+            PathUri::parse("file:///repo-B").unwrap(),
+        ),
+        PermissionRequestPayload {
+            tool_name: HookToolName::new("exec_argv"),
+            tool_cwd: Some(PathUri::parse("file:///repo-B").unwrap()),
+            tool_input: json!({
+                "command": "printf 'two words' '$HOME | *'",
+                "argv": argv,
                 "description": "network-access example.com",
             }),
         }

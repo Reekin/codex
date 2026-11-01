@@ -9,6 +9,7 @@ use crate::session::turn_context::TurnEnvironment;
 use crate::tools::approvals::ApprovalAction;
 use crate::tools::approvals::ApprovalContext;
 use crate::tools::events::truncate_rejection_message;
+use crate::tools::sandboxing::ExecHookMetadata;
 use crate::tools::sandboxing::ToolError;
 use codex_features::Feature;
 use codex_network_proxy::BlockedRequest;
@@ -62,7 +63,7 @@ pub(crate) struct NetworkApprovalSpec {
     pub trigger: GuardianNetworkAccessTrigger,
     /// Preserve the typed identity independently of Guardian's display-name payload.
     pub tool_name: ToolName,
-    pub command: String,
+    pub hook_metadata: ExecHookMetadata,
     pub environment_id: String,
     pub permission_profile: PermissionProfile,
     pub network_policy: Option<EnvironmentNetworkPolicy>,
@@ -244,7 +245,7 @@ struct ActiveNetworkApprovalCall {
     turn_id: String,
     trigger: GuardianNetworkAccessTrigger,
     tool_name: ToolName,
-    command: String,
+    hook_metadata: ExecHookMetadata,
     environment_id: String,
     permission_profile: PermissionProfile,
     environments: TurnEnvironmentSnapshot,
@@ -757,9 +758,10 @@ impl NetworkApprovalService {
             |call| format!("{guardian_approval_id}#{}", call.registration_id),
         );
         let prompt_command = vec!["network-access".to_string(), target.clone()];
-        let command = owner_call
-            .as_ref()
-            .map_or_else(|| prompt_command.join(" "), |call| call.command.clone());
+        let hook_metadata = owner_call.as_ref().map_or_else(
+            || ExecHookMetadata::shell(&prompt_command.join(" ")),
+            |call| call.hook_metadata.clone(),
+        );
         let cwd = if let Some(cwd) = owner_call
             .as_ref()
             .and_then(|owner_call| owner_call.trigger.cwd.to_abs_path().ok())
@@ -793,7 +795,7 @@ impl NetworkApprovalService {
             protocol,
             port: key.port,
             trigger: owner_call.as_ref().map(|call| call.trigger.clone()),
-            hook_command: command,
+            hook_metadata,
             hook_run_id: hook_run_id_suffix,
             command: prompt_command,
             cwd,
@@ -1107,7 +1109,7 @@ pub(crate) async fn begin_network_approval(
         network,
         trigger,
         tool_name,
-        command,
+        hook_metadata,
         environment_id,
         permission_profile,
         network_policy,
@@ -1152,7 +1154,7 @@ pub(crate) async fn begin_network_approval(
             turn_id: turn.sub_id.clone(),
             trigger,
             tool_name,
-            command,
+            hook_metadata,
             environment_id,
             permission_profile,
             environments: environments.clone(),

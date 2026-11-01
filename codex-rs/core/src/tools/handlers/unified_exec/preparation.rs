@@ -1,6 +1,9 @@
 //! Resolves exec arguments against the selected environment and effective turn permissions.
-//! The live handler emits its skill event between parsing and preparation.
+//! The live handlers emit their skill event between parsing and preparation. `exec_command`
+//! and `exec_argv` share cwd, argument, and permission resolution; only command construction
+//! differs between their launch modes.
 
+use super::CommandLaunch;
 use super::ExecCommandArgs;
 use super::ExecCommandWorkdirArgs;
 use super::ResolvedCommand;
@@ -25,6 +28,7 @@ use crate::tools::sandboxing::ApprovalAction;
 use crate::tools::sandboxing::ExecApprovalRequirement;
 use crate::windows_sandbox::windows_sandbox_level_for_legacy_checks;
 use codex_features::Feature;
+use codex_protocol::models::AdditionalPermissionProfile;
 use codex_sandboxing::SandboxManager;
 use codex_sandboxing::SandboxType;
 use codex_sandboxing::SandboxablePreference;
@@ -33,6 +37,7 @@ use codex_shell_command::shell_detect::detect_shell_type;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_path_uri::PathConvention;
 use codex_utils_path_uri::PathUri;
+use serde::de::DeserializeOwned;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -48,7 +53,6 @@ pub(crate) enum ExecCommandLifetime {
 pub(crate) struct PreparedExecCommand {
     pub(crate) turn_environment: TurnEnvironment,
     pub(crate) resolved: ResolvedCommand,
-    pub(crate) hook_command: String,
     pub(crate) cwd: PathUri,
     pub(crate) permissions: EffectiveAdditionalPermissions,
     pub(crate) justification: Option<String>,
@@ -66,8 +70,6 @@ impl PreparedExecCommand {
         step: &StepContext,
     ) -> ExecApprovalRequirement {
         let environment = &self.turn_environment;
-        let session_shell = session.user_shell();
-        let configured_shell = environment.shell.as_ref().unwrap_or(session_shell.as_ref());
         // Legacy executors omit the platform. Unknown reported platforms use the
         // more conservative Windows rules rather than silently weakening checks.
         let command_platform = match environment.executor_platform_os.as_deref() {
@@ -75,31 +77,47 @@ impl PreparedExecCommand {
             Some("windows") | Some(_) => DangerousCommandPlatform::Windows,
             None => DangerousCommandPlatform::host(),
         };
-        session
-            .services
-            .exec_policy
-            .create_exec_approval_requirement_for_shell(
-                ExecApprovalRequest {
-                    command: &self.resolved.command,
-                    approval_policy: step.settings.approval_policy(),
-                    permission_profile: environment.permission_profile().clone(),
-                    environment_policy: environment.config().exec_policy.as_ref(),
-                    windows_sandbox_level: windows_sandbox_level_for_legacy_checks(
-                        environment.config().windows_sandbox_type,
-                        environment.config().windows_sandbox_level,
-                    ),
-                    sandbox_permissions: if self.permissions.permissions_preapproved {
-                        SandboxPermissions::UseDefault
-                    } else {
-                        self.permissions.sandbox_permissions
-                    },
-                    prefix_rule: self.prefix_rule.clone(),
-                    allow_prefix_rules: step.turn.allow_prefix_rules(),
-                },
-                configured_shell,
-                command_platform,
-            )
-            .await
+        let request = ExecApprovalRequest {
+            command: &self.resolved.command,
+            approval_policy: step.settings.approval_policy(),
+            permission_profile: environment.permission_profile().clone(),
+            environment_policy: environment.config().exec_policy.as_ref(),
+            windows_sandbox_level: windows_sandbox_level_for_legacy_checks(
+                environment.config().windows_sandbox_type,
+                environment.config().windows_sandbox_level,
+            ),
+            sandbox_permissions: if self.permissions.permissions_preapproved {
+                SandboxPermissions::UseDefault
+            } else {
+                self.permissions.sandbox_permissions
+            },
+            prefix_rule: self.prefix_rule.clone(),
+            allow_prefix_rules: step.turn.allow_prefix_rules(),
+        };
+        let exec_policy = &session.services.exec_policy;
+        match self.resolved.launch {
+            CommandLaunch::Shell { .. } => {
+                let session_shell = session.user_shell();
+                let configured_shell = environment.shell.as_ref().unwrap_or(session_shell.as_ref());
+                exec_policy
+                    .create_exec_approval_requirement_for_shell(
+                        request,
+                        configured_shell,
+                        command_platform,
+                    )
+                    .await
+            }
+            // Argv names its program directly, so there is no Codex-chosen shell
+            // executable to separate from the command being evaluated.
+            CommandLaunch::Argv => {
+                exec_policy
+                    .create_exec_approval_requirement_for_command_platform(
+                        request,
+                        command_platform,
+                    )
+                    .await
+            }
+        }
     }
 
     pub(crate) fn approval_action(
@@ -111,7 +129,7 @@ impl PreparedExecCommand {
             id: call_id.to_owned(),
             environment_id: self.turn_environment.selection.environment_id.clone(),
             command: self.resolved.command.clone(),
-            hook_command: self.hook_command.clone(),
+            hook_metadata: self.resolved.hook_metadata(),
             cwd: self.cwd.clone(),
             sandbox_permissions: self.permissions.sandbox_permissions,
             additional_permissions: self.permissions.additional_permissions.clone(),
@@ -132,6 +150,134 @@ pub(crate) struct ParsedExecCommand<'a> {
     sandbox_permissions: SandboxPermissions,
 }
 
+/// Exec arguments parsed against the selected executor's working directory.
+pub(crate) struct ExecArgumentsForEnvironment<T> {
+    pub(crate) args: T,
+    pub(crate) cwd: PathUri,
+    pub(crate) native_cwd: Option<AbsolutePathBuf>,
+}
+
+/// Resolve a call's workdir and arguments using the executor selected by the caller.
+pub(crate) fn parse_exec_arguments<T: DeserializeOwned>(
+    arguments: &str,
+    step: &StepContext,
+    turn_environment: &TurnEnvironment,
+) -> Result<ExecArgumentsForEnvironment<T>, FunctionCallError> {
+    let workdir: ExecCommandWorkdirArgs = parse_arguments(arguments)?;
+    let cwd = workdir.resolve_cwd(turn_environment)?;
+    let environment = &turn_environment.environment;
+
+    // Remote executors enforce URI-native sandbox policy themselves. Only a host-local
+    // sandbox needs a native cwd for resolving paths nested in the permissions config.
+    let requires_host_native_cwd = !environment.is_remote()
+        && SandboxManager::new().select_initial(
+            turn_environment.permission_profile(),
+            SandboxablePreference::Auto,
+            codex_protocol::sandbox::effective_windows_sandbox_type(
+                turn_environment.config().windows_sandbox_type,
+                turn_environment.config().windows_sandbox_level,
+            ),
+            step.turn.network.is_some(),
+        ) != SandboxType::None;
+    // `to_abs_path()` alone cannot identify foreign drive paths: `file:///C:/repo` is
+    // representable as `/C:/repo` on POSIX. Require the inferred convention to match too.
+    let cwd_uses_native_convention = cwd.infer_path_convention() == Some(PathConvention::native());
+    let native_cwd = match cwd.to_abs_path() {
+        Ok(cwd) if cwd_uses_native_convention => Some(cwd),
+        _ if !requires_host_native_cwd => None,
+        Err(err) => return Err(FunctionCallError::RespondToModel(err.to_string())),
+        Ok(_) => {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "path URI `{cwd}` does not use the host's native {} path convention",
+                PathConvention::native()
+            )));
+        }
+    };
+    let args = match native_cwd.as_ref() {
+        Some(native_cwd) => {
+            // The base path only resolves paths nested in the permissions config types.
+            parse_arguments_with_base_path(arguments, native_cwd)?
+        }
+        None => {
+            // Foreign executor cwd values cannot seed this host's AbsolutePathBufGuard.
+            // Sandbox intent and URI-native roots are still sent to the executor.
+            parse_arguments(arguments)?
+        }
+    };
+    Ok(ExecArgumentsForEnvironment {
+        args,
+        cwd,
+        native_cwd,
+    })
+}
+
+pub(crate) fn reject_disabled_tty(session: &Session, tty: bool) -> Result<(), FunctionCallError> {
+    if tty && !session.features().enabled(Feature::UnifiedExecTty) {
+        return Err(FunctionCallError::RespondToModel(
+            "TTY execution is disabled by config; omit `tty` or set it to false.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Apply sticky turn grants and validate the call's sandbox override request.
+pub(crate) fn resolve_exec_permissions(
+    session: &Session,
+    step: &StepContext,
+    turn_environment: &TurnEnvironment,
+    cwd: &PathUri,
+    sandbox_permissions: SandboxPermissions,
+    requested_additional_permissions: Option<AdditionalPermissionProfile>,
+) -> Result<EffectiveAdditionalPermissions, FunctionCallError> {
+    let exec_permission_approvals_enabled =
+        session.features().enabled(Feature::ExecPermissionApprovals);
+    let sandbox_context = turn_environment.sandbox_context(/*additional_permissions*/ None);
+    let permission_context = file_system_sandbox_policy_context_for_cwd(&sandbox_context, cwd);
+    let mut permissions = apply_granted_turn_permissions(
+        step,
+        turn_environment,
+        cwd,
+        sandbox_permissions,
+        requested_additional_permissions.clone(),
+    );
+    let additional_permissions_allowed = exec_permission_approvals_enabled
+        || (session.features().enabled(Feature::RequestPermissionsTool)
+            && permissions.permissions_preapproved);
+
+    // Sticky turn permissions have already been approved, so they should
+    // continue through the normal exec approval flow for the command.
+    let approval_policy = step.settings.approval_policy();
+    if permissions.sandbox_permissions.requests_sandbox_override()
+        && !permissions.permissions_preapproved
+        && prompt_is_rejected_by_policy(approval_policy, /*prompt_is_rule*/ false).is_some()
+    {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
+        )));
+    }
+
+    permissions.additional_permissions = implicit_granted_permissions(
+        sandbox_permissions,
+        requested_additional_permissions.as_ref(),
+        &permissions,
+    )
+    .map_or_else(
+        || {
+            normalize_and_validate_additional_permissions(
+                additional_permissions_allowed,
+                approval_policy,
+                permissions.sandbox_permissions,
+                permissions.additional_permissions,
+                permissions.permissions_preapproved,
+                &permission_context,
+            )
+        },
+        |permissions| Ok(Some(permissions)),
+    )
+    .map_err(FunctionCallError::RespondToModel)?;
+    Ok(permissions)
+}
+
 impl<'a> ParsedExecCommand<'a> {
     /// Resolve this call's workdir and arguments using the executor selected by the caller.
     pub(crate) fn parse(
@@ -140,53 +286,12 @@ impl<'a> ParsedExecCommand<'a> {
         step: &'a StepContext,
         turn_environment: &'a TurnEnvironment,
     ) -> Result<Self, FunctionCallError> {
-        let workdir: ExecCommandWorkdirArgs = parse_arguments(arguments)?;
-        let cwd = workdir.resolve_cwd(turn_environment)?;
-        let environment = &turn_environment.environment;
-
-        // Remote executors enforce URI-native sandbox policy themselves. Only a host-local
-        // sandbox needs a native cwd for resolving paths nested in the permissions config.
-        let requires_host_native_cwd = !environment.is_remote()
-            && SandboxManager::new().select_initial(
-                turn_environment.permission_profile(),
-                SandboxablePreference::Auto,
-                codex_protocol::sandbox::effective_windows_sandbox_type(
-                    turn_environment.config().windows_sandbox_type,
-                    turn_environment.config().windows_sandbox_level,
-                ),
-                step.turn.network.is_some(),
-            ) != SandboxType::None;
-        // `to_abs_path()` alone cannot identify foreign drive paths: `file:///C:/repo` is
-        // representable as `/C:/repo` on POSIX. Require the inferred convention to match too.
-        let cwd_uses_native_convention =
-            cwd.infer_path_convention() == Some(PathConvention::native());
-        let native_cwd = match cwd.to_abs_path() {
-            Ok(cwd) if cwd_uses_native_convention => Some(cwd),
-            _ if !requires_host_native_cwd => None,
-            Err(err) => return Err(FunctionCallError::RespondToModel(err.to_string())),
-            Ok(_) => {
-                return Err(FunctionCallError::RespondToModel(format!(
-                    "path URI `{cwd}` does not use the host's native {} path convention",
-                    PathConvention::native()
-                )));
-            }
-        };
-        let args: ExecCommandArgs = match native_cwd.as_ref() {
-            Some(native_cwd) => {
-                // The base path only resolves paths nested in the permissions config types.
-                parse_arguments_with_base_path(arguments, native_cwd)?
-            }
-            None => {
-                // Foreign executor cwd values cannot seed this host's AbsolutePathBufGuard.
-                // Sandbox intent and URI-native roots are still sent to the executor.
-                parse_arguments(arguments)?
-            }
-        };
-        if args.tty && !session.features().enabled(Feature::UnifiedExecTty) {
-            return Err(FunctionCallError::RespondToModel(
-                "TTY execution is disabled by config; omit `tty` or set it to false.".to_string(),
-            ));
-        }
+        let ExecArgumentsForEnvironment {
+            args,
+            cwd,
+            native_cwd,
+        } = parse_exec_arguments::<ExecCommandArgs>(arguments, step, turn_environment)?;
+        reject_disabled_tty(session, args.tty)?;
         let sandbox_permissions =
             resolve_sandbox_permissions(args.sandbox_permissions, args.justification.as_deref())?;
         Ok(Self {
@@ -252,59 +357,18 @@ impl<'a> ParsedExecCommand<'a> {
             }
         };
 
-        let exec_permission_approvals_enabled =
-            session.features().enabled(Feature::ExecPermissionApprovals);
-        let requested_additional_permissions = args.additional_permissions.take();
-        let sandbox_context =
-            turn_environment.sandbox_context(/*additional_permissions*/ None);
-        let permission_context = file_system_sandbox_policy_context_for_cwd(&sandbox_context, &cwd);
-        let mut permissions = apply_granted_turn_permissions(
+        let permissions = resolve_exec_permissions(
+            session,
             step,
             turn_environment,
             &cwd,
             sandbox_permissions,
-            requested_additional_permissions.clone(),
-        );
-        let additional_permissions_allowed = exec_permission_approvals_enabled
-            || (session.features().enabled(Feature::RequestPermissionsTool)
-                && permissions.permissions_preapproved);
-
-        // Sticky turn permissions have already been approved, so they should
-        // continue through the normal exec approval flow for the command.
-        let approval_policy = step.settings.approval_policy();
-        if permissions.sandbox_permissions.requests_sandbox_override()
-            && !permissions.permissions_preapproved
-            && prompt_is_rejected_by_policy(approval_policy, /*prompt_is_rule*/ false).is_some()
-        {
-            return Err(FunctionCallError::RespondToModel(format!(
-                "approval policy is {approval_policy:?}; reject command — you cannot ask for escalated permissions if the approval policy is {approval_policy:?}"
-            )));
-        }
-
-        permissions.additional_permissions = implicit_granted_permissions(
-            sandbox_permissions,
-            requested_additional_permissions.as_ref(),
-            &permissions,
-        )
-        .map_or_else(
-            || {
-                normalize_and_validate_additional_permissions(
-                    additional_permissions_allowed,
-                    approval_policy,
-                    permissions.sandbox_permissions,
-                    permissions.additional_permissions,
-                    permissions.permissions_preapproved,
-                    &permission_context,
-                )
-            },
-            |permissions| Ok(Some(permissions)),
-        )
-        .map_err(FunctionCallError::RespondToModel)?;
+            args.additional_permissions.take(),
+        )?;
 
         Ok(PreparedExecCommand {
             turn_environment: turn_environment.clone(),
             resolved: resolved_command,
-            hook_command: args.cmd,
             yield_time_ms: args.yield_time_ms,
             max_output_tokens: args.max_output_tokens,
             completion_timeout,

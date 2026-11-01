@@ -424,7 +424,7 @@ fn exec_command_tool_output_formats_truncated_response() {
         process_id: None,
         exit_code: Some(0),
         original_token_count: Some(10),
-        hook_command: None,
+        hook_metadata: None,
         tool_cwd: None,
     };
     assert_eq!(
@@ -480,7 +480,7 @@ fn exec_command_tool_output_reserves_metadata_budget_and_preserves_policy_units(
             process_id: None,
             exit_code: Some(0),
             original_token_count: Some(123),
-            hook_command: None,
+            hook_metadata: None,
             tool_cwd: None,
         }
         .to_response_item("call-42", &payload);
@@ -526,7 +526,7 @@ fn exec_command_tool_output_preserves_omission_metadata_when_truncated() {
         process_id: None,
         exit_code: Some(0),
         original_token_count: Some(42_000),
-        hook_command: None,
+        hook_metadata: None,
         tool_cwd: None,
     };
     let expected_header = "Chunk ID: abc123\nWall time: 1.2500 seconds\nProcess exited with code 0\nOriginal token count: 42000\nOutput:\n";

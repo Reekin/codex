@@ -616,6 +616,38 @@ async fn reviewer_tool_policy_exclude_optional_core_tools() {
 }
 
 #[tokio::test]
+async fn reviewer_tool_policy_admits_exec_argv_when_enabled() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    session.tool_policy = Arc::new(codex_guardian_reviewer::reviewer_tool_policy());
+    set_feature(&mut turn, Feature::ExecArgv, /*enabled*/ true);
+    set_feature(&mut turn, Feature::ViewImage, /*enabled*/ true);
+    let turn = Arc::new(turn);
+    let step_context = StepContext::for_test(Arc::clone(&turn));
+
+    let router = super::build_tool_router(
+        &session,
+        step_context.turn.as_ref(),
+        &step_context.settings.model_info,
+        &step_context.environments,
+        &step_context.mcp,
+        /*apps_enabled*/ false,
+        &turn.extension_data,
+        /*tool_suggest_candidates*/ None,
+        session.dynamic_tools().await.as_ref(),
+    )
+    .expect("build internal Guardian tool router");
+
+    assert_eq!(
+        router
+            .model_visible_specs()
+            .iter()
+            .map(codex_tools::ToolSpec::name)
+            .collect::<Vec<_>>(),
+        vec!["exec_argv", "exec_command", "write_stdin", "view_image"]
+    );
+}
+
+#[tokio::test]
 async fn reviewer_tool_policy_respect_managed_shell_restrictions() {
     for (disabled_feature, shell_type) in [
         (Some(Feature::ShellTool), ConfigShellToolType::UnifiedExec),
@@ -974,6 +1006,28 @@ async fn shell_family_registers_only_unified_exec_tools() {
     plan.assert_registered_contains(&["exec_command", "write_stdin"]);
     assert!(plan.has_terminal_controls);
     assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
+}
+
+#[tokio::test]
+async fn exec_argv_flag_adds_argv_tool_to_the_unified_exec_family() {
+    let configure = |turn: &mut TurnContext, shell_tool_enabled: bool| {
+        set_feature(turn, Feature::ShellTool, shell_tool_enabled);
+        set_feature(turn, Feature::ExecArgv, /*enabled*/ true);
+        update_turn_settings_for_test(turn, |settings| {
+            Arc::make_mut(&mut settings.model_info).shell_type = ConfigShellToolType::UnifiedExec;
+        });
+        duplicate_primary_environment(turn);
+    };
+
+    let enabled = probe(|turn| configure(turn, /*shell_tool_enabled*/ true)).await;
+    enabled.assert_visible_contains(&["exec_argv", "exec_command", "write_stdin"]);
+    let exec_argv = enabled.visible_spec("exec_argv");
+    assert!(has_parameter(exec_argv, "argv"));
+    assert!(has_parameter(exec_argv, "environment_id"));
+    assert!(!has_parameter(exec_argv, "shell"));
+
+    let shell_disabled = probe(|turn| configure(turn, /*shell_tool_enabled*/ false)).await;
+    shell_disabled.assert_registered_lacks(&["exec_argv", "exec_command", "write_stdin"]);
 }
 
 #[tokio::test]

@@ -18,6 +18,7 @@ use crate::shell::ShellType;
 use crate::shell_snapshot::ShellSnapshotSandbox;
 use crate::shell_snapshot::snapshot_read_permissions;
 use crate::tools::flat_tool_name;
+use crate::tools::handlers::unified_exec::CommandLaunch;
 use crate::tools::handlers::unified_exec::preparation::PreparedExecCommand;
 use crate::tools::network_approval::NetworkApprovalSpec;
 use crate::tools::network_approval::remote_network_proxy_launch;
@@ -231,7 +232,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
                 justification: prepared.justification.clone(),
                 tty: Some(prepared.tty),
             },
-            command: prepared.hook_command.clone(),
+            hook_metadata: prepared.resolved.hook_metadata(),
             environment_id: prepared.turn_environment.selection.environment_id.clone(),
             permission_profile: prepared.turn_environment.permission_profile().clone(),
             network_policy: prepared.turn_environment.config().network_policy.clone(),
@@ -246,7 +247,9 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
     ) -> Result<UnifiedExecAttempt, ToolError> {
         let prepared = req.prepared;
         let base_command = &prepared.resolved.command;
-        let requested_shell = &prepared.resolved.shell.shell;
+        // Argv launches have no Codex-chosen shell, so every shell-derived transform
+        // below is skipped and `base_command` reaches process creation unchanged.
+        let shell_launch = prepared.resolved.shell();
         let windows_sandbox_proxy_settings_mode = ctx.session.windows_sandbox_proxy_settings_mode;
         let session_shell = ctx.session.user_shell();
         let environment_shell = prepared
@@ -274,14 +277,14 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
                 .network
                 .as_ref()
                 .is_some_and(crate::config::NetworkProxySpec::credential_broker_enabled);
-        let shell = if credential_broker_available {
-            requested_shell
-        } else {
-            environment_shell
+        let shell = match shell_launch {
+            Some(invocation) if credential_broker_available => &invocation.shell,
+            _ => environment_shell,
         };
         let snapshot_metrics =
             snapshot_metrics::SnapshotMetrics::start(req, &ctx.step_context.turn.config);
         let shell_snapshot = if environment_is_remote
+            || shell_launch.is_none()
             || credential_broker_available
                 && launch_sandbox_permissions.requires_escalated_permissions()
         {
@@ -314,7 +317,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
         let shell_snapshot_location = shell_snapshot.as_ref().map(|snapshot| snapshot.path());
         let mut env = exec_env_for_sandbox_permissions(&req.env, launch_sandbox_permissions);
         let snapshot_credential_context = if let Some(snapshot) = shell_snapshot.as_ref()
-            && (managed_network.is_some() || prepared.resolved.shell.is_posix_login())
+            && (managed_network.is_some() || prepared.resolved.is_posix_login_shell())
         {
             Some(snapshot.restore_credentials(
                 &mut env,
@@ -468,22 +471,20 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
         // Restore the executor's PATH directories inside the shell so nested commands can
         // still find bundled tools even if login startup clears the inherited PATH.
         // `base_command` already carries the requested login mode; keep it if setup is unavailable.
-        // `hook_command` is the raw script the helper needs to prepend setup inside that same shell.
+        // The shell launch's raw script is what the helper needs to prepend setup inside that same shell.
         let mut command = base_command.to_vec();
         if ctx.session.enabled(Feature::LoginShellPackagePath)
-            && prepared.resolved.shell.is_posix_login()
+            && let CommandLaunch::Shell { invocation, script } = &prepared.resolved.launch
+            && invocation.is_posix_login()
             && !explicit_env_overrides.contains_key("PATH")
             && let Ok(info) = prepared.turn_environment.environment.info().await
             && let Some(command_with_path_prepends) =
-                prepared.resolved.shell.derive_exec_args_with_path_prepends(
-                    &prepared.hook_command,
-                    &info.prepend_path_dirs,
-                )
+                invocation.derive_exec_args_with_path_prepends(script, &info.prepend_path_dirs)
         {
             command = command_with_path_prepends;
         }
         let mut snapshot_used = false;
-        if !environment_is_remote {
+        if !environment_is_remote && shell_launch.is_some() {
             let wrapped = maybe_wrap_shell_lc_with_snapshot(
                 &command,
                 shell,
@@ -496,6 +497,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
             command = wrapped;
         }
         let brokered_shell_snapshot_missing = !environment_is_remote
+            && shell_launch.is_some()
             && managed_network.is_some()
             && env
                 .get(codex_network_proxy::CREDENTIAL_BROKER_ACTIVE_ENV_KEY)
@@ -535,6 +537,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
             }
         }
         if !environment_is_remote
+            && shell_launch.is_some()
             && matches!(shell.shell_type, ShellType::PowerShell | ShellType::Cmd)
             && env
                 .get(CREDENTIAL_BROKER_ACTIVE_ENV_KEY)
@@ -547,7 +550,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
         // preparation is a no-op for PowerShell on other platforms.
         let command = prepare_powershell_command_for_windows_sandbox(
             &command,
-            Some(&requested_shell.shell_type),
+            shell_launch.map(|invocation| &invocation.shell.shell_type),
             attempt.sandbox_requested,
             executor_windows_sandbox_selection(
                 attempt.windows_sandbox_type,
@@ -556,7 +559,9 @@ impl<'a> ToolRuntime<UnifiedExecRequest<'_>, UnifiedExecAttempt> for UnifiedExec
             ),
             environment_is_remote,
         );
-        let command = if matches!(requested_shell.shell_type, ShellType::PowerShell) {
+        let command = if shell_launch
+            .is_some_and(|invocation| invocation.shell.shell_type == ShellType::PowerShell)
+        {
             prefix_powershell_script_with_utf8(&command)
         } else {
             command
@@ -673,6 +678,8 @@ async fn warn_if_remote_credential_masking_unavailable(
 
     let prepared = req.prepared;
     let environment_id = &prepared.turn_environment.selection.environment_id;
+    // Argv launches run no shell startup that could restore real credentials.
+    let shell_launch = prepared.resolved.shell();
     let message = if credential_masking == RemoteCredentialMasking::Disabled {
         format!(
             "Credential masking is unavailable on environment `{environment_id}` because its exec-server does not support it. This command will run with unmasked credentials."
@@ -681,19 +688,23 @@ async fn warn_if_remote_credential_masking_unavailable(
         format!(
             "Credential masking is unavailable for this network proxy configuration on environment `{environment_id}`. This command will run with unmasked credentials."
         )
-    } else if !matches!(
-        prepared.resolved.shell.shell.shell_type,
-        ShellType::Bash | ShellType::Zsh
-    ) {
+    } else if let Some(invocation) = shell_launch
+        && !matches!(
+            invocation.shell.shell_type,
+            ShellType::Bash | ShellType::Zsh
+        )
+    {
         format!(
             "Credential masking is unavailable for shell `{}` on environment `{environment_id}`. This command will run with unmasked credentials.",
-            prepared.resolved.shell.shell.name(),
+            invocation.shell.name(),
         )
-    } else if match prepared.resolved.shell.shell.shell_type {
-        ShellType::Bash => prepared.resolved.shell.use_login_shell || req.shell_snapshot.is_some(),
-        ShellType::Zsh => !prepared.resolved.shell.use_login_shell || req.shell_snapshot.is_none(),
-        ShellType::Sh | ShellType::PowerShell | ShellType::Cmd => true,
-    } {
+    } else if let Some(invocation) = shell_launch
+        && match invocation.shell.shell_type {
+            ShellType::Bash => invocation.use_login_shell || req.shell_snapshot.is_some(),
+            ShellType::Zsh => !invocation.use_login_shell || req.shell_snapshot.is_none(),
+            ShellType::Sh | ShellType::PowerShell | ShellType::Cmd => true,
+        }
+    {
         format!(
             "Credential masking is unavailable for this shell startup on environment `{environment_id}`. This command will run with unmasked credentials."
         )
@@ -719,6 +730,7 @@ mod tests {
     use crate::shell::ShellInvocation;
     use crate::tools::handlers::EffectiveAdditionalPermissions;
     use crate::tools::handlers::unified_exec::ResolvedCommand;
+    use crate::tools::sandboxing::ExecHookMetadata;
     use crate::tools::sandboxing::ToolRuntime;
     use codex_exec_server::Environment;
     use codex_exec_server::LOCAL_ENVIRONMENT_ID;
@@ -806,6 +818,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_argv_approval_action_uses_exec_argv_metadata() {
+        let manager = UnifiedExecProcessManager::default();
+        let runtime = UnifiedExecRuntime::new(&manager);
+        let argv = vec![
+            "printf".to_string(),
+            "two words".to_string(),
+            "$HOME | *".to_string(),
+        ];
+        let mut prepared = test_argv_prepared_command(argv.clone());
+        prepared.justification = Some("print literal arguments".to_string());
+
+        assert_eq!(
+            runtime
+                .approval_action(&test_request(&prepared), "call-argv")
+                .expect("build approval action")
+                .permission_request_payload(),
+            ExecHookMetadata::argv(&argv).permission_request(
+                Some("print literal arguments".to_string()),
+                prepared.cwd.clone(),
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_argv_network_spec_uses_exec_argv_metadata() {
+        let (session, turn) = crate::session::tests::make_session_and_context().await;
+        let manager = UnifiedExecProcessManager::default();
+        let runtime = UnifiedExecRuntime::new(&manager);
+        let argv = vec!["curl".to_string(), "https://example.com".to_string()];
+        let mut prepared = test_argv_prepared_command(argv.clone());
+        prepared.turn_environment.config_mut().network_policy =
+            Some(codex_network_proxy::EnvironmentNetworkPolicy::from_config(
+                &codex_network_proxy::NetworkProxyConfig::default(),
+                /*managed_allowed_domains_only*/ false,
+            ));
+        let ctx = ToolCtx {
+            session: Arc::new(session),
+            step_context: crate::session::step_context::StepContext::for_test(Arc::new(turn)),
+            cancellation_token: CancellationToken::new(),
+            call_id: "call-argv-network".to_string(),
+            tool_name: prepared.resolved.tool_name(),
+        };
+
+        let spec = runtime
+            .network_approval_spec(&test_request(&prepared), &ctx)
+            .expect("network approval spec");
+        assert_eq!(spec.tool_name, codex_tools::ToolName::plain("exec_argv"));
+        assert_eq!(spec.hook_metadata, ExecHookMetadata::argv(&argv));
+    }
+
+    #[tokio::test]
     async fn unified_exec_uses_the_trusted_sandbox_cwd() {
         let cwd_dir = tempdir().expect("create process temp dir");
         let sandbox_dir = tempdir().expect("create sandbox temp dir");
@@ -832,15 +895,17 @@ mod tests {
         PreparedExecCommand {
             resolved: ResolvedCommand {
                 command: vec!["zsh".to_string(), "-c".to_string(), "echo hi".to_string()],
-                shell: ShellInvocation {
-                    shell: Shell {
-                        shell_type: ShellType::Zsh,
-                        shell_path: "zsh".into(),
+                launch: CommandLaunch::Shell {
+                    invocation: ShellInvocation {
+                        shell: Shell {
+                            shell_type: ShellType::Zsh,
+                            shell_path: "zsh".into(),
+                        },
+                        use_login_shell: false,
                     },
-                    use_login_shell: false,
+                    script: "echo hi".to_string(),
                 },
             },
-            hook_command: "echo hi".to_string(),
             turn_environment: test_turn_environment(cwd.clone().into()),
             cwd: cwd.into(),
             permissions: EffectiveAdditionalPermissions {
@@ -855,6 +920,15 @@ mod tests {
             max_output_tokens: None,
             completion_timeout: None,
         }
+    }
+
+    fn test_argv_prepared_command(argv: Vec<String>) -> PreparedExecCommand {
+        let mut prepared = test_prepared_command();
+        prepared.resolved = ResolvedCommand {
+            command: argv,
+            launch: CommandLaunch::Argv,
+        };
+        prepared
     }
 
     fn test_request(prepared: &PreparedExecCommand) -> UnifiedExecRequest<'_> {

@@ -639,7 +639,9 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
                 process_id,
                 cwd: cwd.clone(),
                 initial_exec_command_active: Arc::new(AtomicBool::new(false)),
-                hook_command: format!("command-{process_id}"),
+                hook_metadata: crate::tools::sandboxing::ExecHookMetadata::shell(&format!(
+                    "command-{process_id}"
+                )),
                 tty: false,
                 environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
                 permissions: super::super::TerminalPermissions::for_launch(

@@ -91,6 +91,40 @@ fn exec_command_tool_matches_expected_spec() {
 }
 
 #[test]
+fn exec_argv_tool_is_argv_first() {
+    let tool = create_exec_argv_tool_with_environment_id(
+        CommandToolOptions {
+            exec_permission_approvals_enabled: false,
+        },
+        /*include_environment_id*/ true,
+    );
+    let value = serde_json::to_value(tool).expect("serialize tool");
+
+    assert_eq!(value["name"], "exec_argv");
+    assert_eq!(value["parameters"]["required"], serde_json::json!(["argv"]));
+    assert_eq!(
+        value["parameters"]["properties"]["argv"]["type"],
+        serde_json::json!("array")
+    );
+    for shell_only in ["cmd", "shell", "login"] {
+        assert!(
+            value["parameters"]["properties"].get(shell_only).is_none(),
+            "exec_argv must not expose `{shell_only}`"
+        );
+    }
+    assert!(
+        value["parameters"]["properties"]
+            .get("environment_id")
+            .is_some()
+    );
+    let description = value["description"].as_str().expect("description");
+    assert!(description.contains("node script.js"));
+    assert!(description.contains("Use exec_command with the appropriate shell"));
+    assert!(description.contains("a full script path does not remove its shell semantics"));
+    assert!(description.contains("still interprets its command or code arguments"));
+}
+
+#[test]
 fn write_stdin_tool_matches_expected_spec() {
     let tool = create_write_stdin_tool();
 
