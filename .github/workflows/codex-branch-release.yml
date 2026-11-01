@@ -1,0 +1,228 @@
+name: codex-branch-release
+
+on:
+  push:
+    branches:
+      - "integration-*"
+  workflow_dispatch:
+
+concurrency:
+  group: codex-branch-release-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test-compile:
+    if: github.repository == 'Reekin/codex' && startsWith(github.ref_name, 'integration-')
+    # Release builds skip test code, so a test that no longer compiles would otherwise ship unseen.
+    name: Compile tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        with:
+          path: |
+            ${{ env.CARGO_TARGET_DIR }}
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: test-compile-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: test-compile-${{ runner.os }}-${{ hashFiles('codex-rs/Cargo.lock') }}-
+      - name: Install native dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - name: Compile every workspace test target
+        # The voice host needs GStreamer 1.28, newer than this runner ships.
+        run: cargo check --profile dev-small --workspace --exclude codex-voice-host --tests
+
+  build:
+    if: github.repository == 'Reekin/codex' && startsWith(github.ref_name, 'integration-')
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            package: codex-windows-x64.zip
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            package: codex-macos-arm64.tar.gz
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      CARGO_PROFILE_RELEASE_LTO: thin
+      TARGET: ${{ matrix.target }}
+      PACKAGE: ${{ matrix.package }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Configure LLVM linker
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Show runner resources
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "Logical CPUs: $(sysctl -n hw.logicalcpu)"
+          echo "RAM: $(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 )) GiB"
+          df -h .
+
+      - name: Build portable package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          fi
+          workspace="${GITHUB_WORKSPACE}"
+          if command -v cygpath >/dev/null 2>&1; then
+            workspace="$(cygpath -u "$workspace")"
+          fi
+          mkdir -p "${workspace}/dist"
+
+          python3 "${workspace}/scripts/build_codex_package.py" \
+            --target "$TARGET" \
+            --variant codex \
+            --cargo-profile release \
+            --package-dir "${RUNNER_TEMP}/codex-package-${TARGET}" \
+            --archive-output "${workspace}/dist/${PACKAGE}" \
+            --force
+          ls -lh "${workspace}/dist"
+
+      - name: Smoke-test extracted package
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          mkdir -p package-verify
+          case "$PACKAGE" in
+            *.zip) python3 -m zipfile -e "dist/${PACKAGE}" package-verify ;;
+            *.tar.gz) tar -xzf "dist/${PACKAGE}" -C package-verify ;;
+          esac
+          cd package-verify
+          cat codex-package.json
+
+          exe=""
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            exe=".exe"
+          fi
+          "bin/codex${exe}" --version
+          "bin/codex-code-mode-host${exe}" --help >/dev/null
+          "bin/codex-exec-server${exe}" --help >/dev/null
+          "codex-path/rg${exe}" --version
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            file bin/* codex-path/*
+          fi
+
+      - name: Upload package
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-package-${{ matrix.target }}
+          path: dist/${{ matrix.package }}
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    needs: [build, test-compile]
+    name: Publish latest release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: codex-package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#integration-}"
+          short_sha="${GITHUB_SHA::12}"
+          # GitHub lists releases by tag date, then by tag name. An annotated tag dated now, named
+          # with the publish time, keeps the list in publish order.
+          published="$(date -u +%Y%m%dT%H%M%SZ)"
+          release_tag="codex-${version}-${published}-${short_sha}"
+          # The integration acceptance tag on this commit, pushed together with it, names the build.
+          revision="$(git ls-remote --tags "https://x-access-token:${GH_TOKEN}@github.com/${GH_REPO}.git" \
+            "refs/tags/personal/integration/${version}*" \
+            | awk -v sha="$GITHUB_SHA" '$1 == sha { sub(/^refs\/tags\/personal\/integration\//, "", $2); sub(/\^\{\}$/, "", $2); print $2 }' \
+            | sort -V | tail -n 1)"
+          title="Codex ${revision:-$version} (${short_sha})"
+          notes_path="${RUNNER_TEMP}/codex-release-notes.md"
+
+          (cd dist && sha256sum -- * > SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+
+          {
+            echo "Automated dev build of branch \`${GITHUB_REF_NAME}\`."
+            echo
+            if [[ -n "$revision" ]]; then
+              echo "- Integration revision: \`personal/integration/${revision}\`"
+            fi
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Workflow run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > "$notes_path"
+          cat >> "$notes_path" <<'EOF'
+
+          Packages:
+
+          - `codex-windows-x64.zip`: Windows x64. Extract it and run `bin\codex.exe`.
+          - `codex-macos-arm64.tar.gz`: macOS on Apple Silicon. The archive has no top-level folder, so extract it into a new directory: `mkdir codex && tar -xzf codex-macos-arm64.tar.gz -C codex`, then run `codex/bin/codex`.
+
+          Keep each extracted package directory intact: `codex` loads the code-mode host and bundled tools from it.
+
+          The macOS binaries are ad-hoc signed and not notarized. Archives fetched with `gh release download` or `curl` run as is. After a browser download, run `xattr -dr com.apple.quarantine <extracted-dir>` once before the first launch.
+          EOF
+
+          tag_object="$(gh api "repos/${GH_REPO}/git/tags" \
+            -f tag="$release_tag" -f message="$title" -f object="$GITHUB_SHA" -f type=commit \
+            --jq .sha)"
+          gh api "repos/${GH_REPO}/git/refs" -f ref="refs/tags/${release_tag}" -f sha="$tag_object" >/dev/null
+          gh release create "$release_tag" \
+            --verify-tag \
+            --title "$title" \
+            --notes-file "$notes_path" \
+            --latest \
+            dist/*
