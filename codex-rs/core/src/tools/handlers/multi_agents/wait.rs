@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::AgentIdentity;
 use crate::agent::control::StatusSubscription;
 use crate::agent::status::is_final;
 use crate::session::session::Session;
@@ -67,6 +68,13 @@ impl Handler {
         let arguments = function_arguments(payload)?;
         let args: WaitArgs = parse_arguments(&arguments)?;
         let receiver_thread_ids = parse_agent_id_targets(args.targets)?;
+        if receiver_thread_ids.contains(&session.thread_id) {
+            let current_agent_name = AgentIdentity::from_session_source(&turn.session_source)
+                .current_agent_name(session.thread_id);
+            return Err(FunctionCallError::RespondToModel(format!(
+                "wait_agent cannot wait for the current agent `{current_agent_name}`. Return your result if your task is complete, or wait only for another agent id."
+            )));
+        }
         let local_agent_control = session
             .services
             .local_agent_runtime

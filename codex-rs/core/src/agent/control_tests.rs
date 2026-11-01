@@ -393,6 +393,25 @@ fn history_contains_text<'a>(
     })
 }
 
+fn history_text_index(history_items: &[ResponseItem], needle: &str) -> Option<usize> {
+    history_items
+        .iter()
+        .position(|item| history_contains_text(std::iter::once(item), needle))
+}
+
+fn assert_fork_history_boundaries(history_items: &[ResponseItem], inherited_text: &str) {
+    let start = history_text_index(history_items, "forked parent conversation history begins")
+        .expect("full fork should include a start boundary");
+    let inherited = history_text_index(history_items, inherited_text)
+        .expect("inherited parent history should remain visible");
+    let end = history_text_index(history_items, "forked parent conversation history ends")
+        .expect("full fork should include an end boundary");
+    assert!(
+        start < inherited && inherited < end,
+        "inherited history should sit between fork boundaries: start={start}, inherited={inherited}, end={end}"
+    );
+}
+
 async fn wait_for_recorded_user_message(thread: &CodexThread, needle: &str) {
     timeout(Duration::from_secs(5), async {
         loop {
@@ -2460,13 +2479,18 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix(
         .get_thread(child_thread_id)
         .await
         .expect("child thread should be registered");
+    let child_history = child_thread
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .cloned()
+        .collect::<Vec<_>>();
     assert!(
-        history_contains_text(
-            child_thread.session.clone_history().await.raw_items(),
-            "paginated parent context",
-        ),
+        history_contains_text(&child_history, "paginated parent context"),
         "bounded parent context should remain model-visible to the child"
     );
+    assert_fork_history_boundaries(&child_history, "paginated parent context");
     child_thread.ensure_rollout_materialized().await;
     child_thread
         .flush_rollout()
@@ -3127,8 +3151,17 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         ),
     };
     expected_developer_message.set_turn_id_if_missing(&turn_context.sub_id);
+    let inherited_developer_message = history_items
+        .iter()
+        .find(|item| {
+            history_contains_text(
+                std::iter::once(*item),
+                "Developer context before.\nChild developer instructions.",
+            )
+        })
+        .expect("forked developer message should be present");
     expected_developer_message.set_create_time_if_missing(
-        history_items[1]
+        inherited_developer_message
             .executed_tool_call_metadata()
             .and_then(|metadata| metadata.create_time.clone())
             .expect("recorded developer message should have a creation timestamp"),
@@ -3144,11 +3177,19 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             "Child subagent guidance.".to_string(),
         )),
     ];
+    let history_without_boundaries = history_items
+        .iter()
+        .filter(|item| {
+            !history_contains_text(std::iter::once(*item), "forked parent conversation history")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     assert_eq!(
-        strip_response_item_ids(&history_items),
+        strip_response_item_ids(&history_without_boundaries),
         strip_response_item_ids(&expected_history),
         "full-history forked child history should replace parent usage hints with the child subagent hint while filtering non-final assistant/tool chatter"
     );
+    assert_fork_history_boundaries(&history_items, "parent seed context");
     assert_eq!(
         serde_json::to_value(child_thread.session.reference_context_item().await)
             .expect("serialize child reference context item"),
@@ -3488,6 +3529,10 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(marke
     assert!(
         history_contains_text(history.raw_items(), "compacted parent summary"),
         "forked child history should retain compacted non-hint content"
+    );
+    assert_fork_history_boundaries(
+        &history.raw_items().cloned().collect::<Vec<_>>(),
+        "compacted parent summary",
     );
     assert!(
         !history_contains_text(history.raw_items(), "Catalog parent root guidance."),
@@ -4007,6 +4052,10 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                 vec!["Current model instructions."],
             ),
             "{case}: canonical context reconstruction must keep only the current child, managed, and model instructions"
+        );
+        assert_fork_history_boundaries(
+            &history.raw_items().cloned().collect::<Vec<_>>(),
+            "parent task before legacy compaction",
         );
 
         let _ = harness

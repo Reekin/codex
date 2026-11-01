@@ -17,6 +17,8 @@ pub struct AgentPath(String);
 impl AgentPath {
     pub const ROOT: &str = "/root";
     pub const MORPHEUS: &str = "/morpheus";
+    pub const MAX_AGENT_NAME_BYTES: usize = 128;
+    pub const MAX_PATH_BYTES: usize = 4_096;
     const ROOT_SEGMENT: &str = "root";
 
     pub fn root() -> Self {
@@ -126,6 +128,12 @@ fn validate_agent_name(agent_name: &str) -> Result<(), String> {
     if agent_name.is_empty() {
         return Err("agent_name must not be empty".to_string());
     }
+    if agent_name.len() > AgentPath::MAX_AGENT_NAME_BYTES {
+        return Err(format!(
+            "agent_name must not exceed {} UTF-8 bytes",
+            AgentPath::MAX_AGENT_NAME_BYTES
+        ));
+    }
     if agent_name == AgentPath::ROOT_SEGMENT {
         return Err("agent_name `root` is reserved".to_string());
     }
@@ -147,6 +155,12 @@ fn validate_agent_name(agent_name: &str) -> Result<(), String> {
 }
 
 fn validate_absolute_path(path: &str) -> Result<(), String> {
+    if path.len() > AgentPath::MAX_PATH_BYTES {
+        return Err(format!(
+            "agent path must not exceed {} UTF-8 bytes",
+            AgentPath::MAX_PATH_BYTES
+        ));
+    }
     if path == AgentPath::MORPHEUS {
         return Ok(());
     }
@@ -235,6 +249,39 @@ mod tests {
         assert_eq!(
             AgentPath::root().resolve("../sibling"),
             Err("agent_name `..` is reserved".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_name_and_total_path_byte_limits_are_enforced() {
+        let max_name = "a".repeat(AgentPath::MAX_AGENT_NAME_BYTES);
+        assert!(AgentPath::root().join(&max_name).is_ok());
+        assert_eq!(
+            AgentPath::root().join(&format!("{max_name}a")),
+            Err(format!(
+                "agent_name must not exceed {} UTF-8 bytes",
+                AgentPath::MAX_AGENT_NAME_BYTES
+            ))
+        );
+
+        let mut path = AgentPath::root();
+        loop {
+            let candidate = format!("{path}/{max_name}");
+            match path.join(&max_name) {
+                Ok(next) => path = next,
+                Err(err) => {
+                    let expected = format!(
+                        "agent path must not exceed {} UTF-8 bytes",
+                        AgentPath::MAX_PATH_BYTES
+                    );
+                    assert_eq!(err, expected);
+                    assert_eq!(AgentPath::try_from(candidate), Err(expected));
+                    break;
+                }
+            }
+        }
+        assert!(
+            path.as_str().len() > AgentPath::MAX_PATH_BYTES - AgentPath::MAX_AGENT_NAME_BYTES - 1
         );
     }
 }

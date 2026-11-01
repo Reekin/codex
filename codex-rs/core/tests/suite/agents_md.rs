@@ -2550,17 +2550,57 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
         vec![PathUri::from_abs_path(&new_source)],
         "subagent reports the parent's applied global source"
     );
+    assert!(
+        child_request.body_contains_text("You do not have a canonical agent path in this session"),
+        "v1 child startup should state that its canonical path is absent"
+    );
+    assert!(
+        child_request.body_contains_text("you are still not the `/root` main agent"),
+        "pathless child startup should not identify itself as root"
+    );
     if fork_context {
         let seed_input = seed_request.input();
         let mut child_input = child_request.input();
         // The request prefix has a thread-scoped ID; retained history IDs stay unchanged.
         child_input[0]["id"] = seed_input[0]["id"].clone();
+        let input_text_index = |input: &[serde_json::Value], needle: &str| {
+            input.iter().position(|item| {
+                item["content"][0]["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains(needle))
+            })
+        };
+        // Prompt-only request prefix items precede the inherited history boundary.
+        let history_start = input_text_index(
+            child_input.as_slice(),
+            "forked parent conversation history begins",
+        )
+        .expect("forked child input should include the opening history boundary");
         assert_eq!(
-            child_input.get(..seed_input.len()),
-            Some(seed_input.as_slice()),
+            child_input.get(..history_start),
+            seed_input.get(..history_start),
+            "forked subagent should keep the parent's request prefix"
+        );
+        assert_eq!(
+            child_input.get(history_start + 1..seed_input.len() + 1),
+            seed_input.get(history_start..),
             "forked subagent should replay the parent's original structured input prefix"
         );
+        let history_end = input_text_index(
+            child_input.as_slice(),
+            "forked parent conversation history ends",
+        )
+        .expect("forked child input should include the closing history boundary");
+        let direct_task = child_input
+            .iter()
+            .position(|item| item["content"][0]["text"].as_str() == Some(SPAWN_CHILD_PROMPT))
+            .expect("forked child input should include its direct task");
+        assert!(history_start < history_end && history_end < direct_task);
     } else {
+        assert!(
+            !child_request.body_contains_text("forked parent conversation history"),
+            "ordinary child startup must not use fork-history boundary wording"
+        );
         let child_user_texts = child_request.message_input_texts("user");
         assert_eq!(
             child_user_texts
