@@ -127,7 +127,8 @@ fn test_get_command_keeps_path_prepends_after_login_startup() -> anyhow::Result<
     );
 
     let execution_command = resolved
-        .shell
+        .shell()
+        .expect("shell launch")
         .derive_exec_args_with_path_prepends(&args.cmd, &path_dirs)
         .expect("login shell should restore PATH");
     let path_dir = path_dirs[0].inferred_native_path_string();
@@ -183,7 +184,8 @@ fn test_get_command_runs_login_shell_when_path_is_readonly() -> anyhow::Result<(
     let resolved =
         get_command(&args, shell, /*allow_login_shell*/ true).map_err(anyhow::Error::msg)?;
     let command = resolved
-        .shell
+        .shell()
+        .expect("shell launch")
         .derive_exec_args_with_path_prepends(&args.cmd, &[path_dir])
         .expect("the reported directory can be put on PATH");
     let output = std::process::Command::new(&command[0])
@@ -239,13 +241,12 @@ fn test_get_command_does_not_change_nested_login_or_powershell() -> anyhow::Resu
         });
         let resolved = get_command(&args, Arc::clone(&shell), /*allow_login_shell*/ true)
             .map_err(anyhow::Error::msg)?;
+        let restored_path = resolved
+            .shell()
+            .expect("shell launch")
+            .derive_exec_args_with_path_prepends(&args.cmd, &[path_dir]);
         assert_eq!(
-            (
-                resolved.command,
-                resolved
-                    .shell
-                    .derive_exec_args_with_path_prepends(&args.cmd, &[path_dir])
-            ),
+            (resolved.command, restored_path),
             (shell.derive_exec_args(&args.cmd, use_login_shell), None)
         );
     }
