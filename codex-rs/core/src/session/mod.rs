@@ -260,6 +260,7 @@ mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
 pub(crate) use submission::Submission;
 mod input_queue;
+mod local_compaction;
 mod mcp;
 mod mcp_prewarm;
 mod mcp_refresh;
@@ -295,6 +296,7 @@ pub(crate) use self::input_queue::InputQueueActivity;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
 pub(crate) use self::input_queue::UserInputMetadata;
+pub(crate) use self::local_compaction::LocalInstall;
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;
@@ -4796,12 +4798,14 @@ impl Session {
             }
         }
         // This is full-context metadata. Steady-state context diffs should not re-emit it.
-        if turn_context.config.features.enabled(Feature::TokenBudget)
-            && step_context
-                .settings
-                .model_info
-                .resolved_context_window()
-                .is_some()
+        if crate::local_compaction::token_budget_route(
+            turn_context,
+            &step_context.settings.model_info,
+        ) && step_context
+            .settings
+            .model_info
+            .resolved_context_window()
+            .is_some()
         {
             // Keep the legacy bridge hint when native Notes is disabled. A failed
             // native request must not fall back to the bridge.

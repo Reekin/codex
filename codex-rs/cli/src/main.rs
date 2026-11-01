@@ -72,6 +72,7 @@ mod migrate_nfs_db;
 mod migrate_rollouts;
 mod plugin_cmd;
 mod queue_cmd;
+mod recall_cmd;
 mod remote_control_cmd;
 #[cfg(target_os = "windows")]
 mod sandbox_setup;
@@ -146,6 +147,9 @@ struct MultitoolCli {
 enum Subcommand {
     /// Browse all agent sessions on the shared local app-server daemon.
     Agents(AgentsCommand),
+
+    /// Query original local conversation history in bounded pages.
+    Recall(recall_cmd::RecallCommand),
 
     /// Internal: forward a local TCP socket through an HTTP/3 CONNECT proxy.
     #[clap(hide = true)]
@@ -1603,6 +1607,14 @@ async fn cli_main(
             )?;
             migrate_rollouts::run(command, root_config_overrides).await?;
         }
+        Some(Subcommand::Recall(command)) => {
+            reject_remote_mode_for_subcommand(
+                root_remote.as_deref(),
+                root_remote_auth_token_env.as_deref(),
+                "recall",
+            )?;
+            command.run().await?;
+        }
         Some(Subcommand::MigrateNfsDb(command)) => {
             reject_remote_mode_for_subcommand(
                 root_remote.as_deref(),
@@ -2374,6 +2386,7 @@ fn unsupported_subcommand_name_for_strict_config(
         Some(Subcommand::Mcp(_)) => Some("mcp"),
         Some(Subcommand::Plugin(_)) => Some("plugin"),
         Some(Subcommand::MigrateRollouts(_)) => Some("migrate-rollouts"),
+        Some(Subcommand::Recall(_)) => Some("recall"),
         Some(Subcommand::MigrateNfsDb(_)) => Some("migrate-nfs-db"),
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         Some(Subcommand::App(_)) => Some("app"),

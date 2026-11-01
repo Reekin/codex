@@ -6550,6 +6550,43 @@ class ThreadTokenUsageReadParams(BaseModel):
     thread_id: Annotated[str, Field(alias="threadId")]
 
 
+class ThreadToolCleanupApplyParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class ThreadToolCleanupReadParams(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    thread_id: Annotated[str, Field(alias="threadId")]
+
+
+class ThreadToolCleanupStatus(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    marking: Annotated[
+        bool, Field(description="Whether a background marking request is in flight.")
+    ]
+    pending_savings_tokens: Annotated[
+        int,
+        Field(
+            alias="pendingSavingsTokens",
+            description="Estimated context tokens released by applying every current validated mark.",
+        ),
+    ]
+    required_savings_tokens: Annotated[
+        int,
+        Field(
+            alias="requiredSavingsTokens",
+            description="Release required before automatic cleanup applies the marks.",
+        ),
+    ]
+
+
 class ThreadUnarchiveParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -7460,6 +7497,28 @@ class ThreadTokenUsageReadRequest(BaseModel):
         Literal["thread/tokenUsage/read"], Field(title="Thread/tokenUsage/readRequestMethod")
     ]
     params: ThreadTokenUsageReadParams
+
+
+class ThreadToolCleanupReadRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["thread/toolCleanup/read"], Field(title="Thread/toolCleanup/readRequestMethod")
+    ]
+    params: ThreadToolCleanupReadParams
+
+
+class ThreadToolCleanupApplyRequest(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    id: RequestId
+    method: Annotated[
+        Literal["thread/toolCleanup/apply"], Field(title="Thread/toolCleanup/applyRequestMethod")
+    ]
+    params: ThreadToolCleanupApplyParams
 
 
 class ThreadInjectItemsRequest(BaseModel):
@@ -10982,6 +11041,27 @@ class ThreadTokenUsageUpdatedNotification(BaseModel):
     turn_id: Annotated[str, Field(alias="turnId")]
 
 
+class ThreadToolCleanupApplyResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    released_tokens: Annotated[
+        int,
+        Field(
+            alias="releasedTokens",
+            description="Estimated context tokens released; zero when no mark could shorten the history.",
+        ),
+    ]
+    status: ThreadToolCleanupStatus
+
+
+class ThreadToolCleanupReadResponse(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    status: ThreadToolCleanupStatus
+
+
 class ThreadTurnsListParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -13337,6 +13417,8 @@ class ClientRequest(
         | ThreadTurnsListRequest
         | ThreadItemsListRequest
         | ThreadTokenUsageReadRequest
+        | ThreadToolCleanupReadRequest
+        | ThreadToolCleanupApplyRequest
         | ThreadInjectItemsRequest
         | SkillsListRequest
         | SkillsExtraRootsSetRequest
@@ -13447,6 +13529,8 @@ class ClientRequest(
         | ThreadTurnsListRequest
         | ThreadItemsListRequest
         | ThreadTokenUsageReadRequest
+        | ThreadToolCleanupReadRequest
+        | ThreadToolCleanupApplyRequest
         | ThreadInjectItemsRequest
         | SkillsListRequest
         | SkillsExtraRootsSetRequest

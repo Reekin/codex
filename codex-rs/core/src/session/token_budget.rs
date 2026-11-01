@@ -164,7 +164,7 @@ pub(super) async fn maybe_record(
     base_window_tokens_remaining: Option<i64>,
     allow_auto_compact_fallback: bool,
 ) {
-    if !turn_context.config.features.enabled(Feature::TokenBudget) {
+    if !crate::local_compaction::token_budget_route(turn_context, turn_context.model_info()) {
         return;
     }
     let Some(base_window_tokens_remaining) = base_window_tokens_remaining else {

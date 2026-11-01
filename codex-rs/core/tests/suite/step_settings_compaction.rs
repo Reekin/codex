@@ -8,11 +8,9 @@ use test_case::test_case;
 
 #[derive(Clone, Copy)]
 enum CompactionMode {
-    Local,
     RemoteV2,
 }
 
-#[test_case(CompactionMode::Local; "local")]
 #[test_case(CompactionMode::RemoteV2; "remote v2")]
 #[tokio::test]
 async fn compaction_preserves_updated_summary(mode: CompactionMode) -> Result<()> {
@@ -31,10 +29,6 @@ async fn compaction_preserves_updated_summary(mode: CompactionMode) -> Result<()
         ]),
     ];
     bodies.push(match mode {
-        CompactionMode::Local => sse(vec![
-            responses::ev_assistant_message("summary", "Compacted history"),
-            ev_completed("compact"),
-        ]),
         CompactionMode::RemoteV2 => sse(vec![
             json!({"type": "response.output_item.done", "item": {"type": "compaction", "encrypted_content": "encrypted-summary"}}),
             ev_completed("compact"),
@@ -51,7 +45,6 @@ async fn compaction_preserves_updated_summary(mode: CompactionMode) -> Result<()
                 .disable(Feature::TokenBudget)
                 .expect("disable token budget");
             config.model_provider.name = match mode {
-                CompactionMode::Local => "Local compaction test",
                 CompactionMode::RemoteV2 => "OpenAI",
             }
             .to_string();

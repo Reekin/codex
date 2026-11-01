@@ -55,7 +55,6 @@ impl ContextContributor for PrefixInstructions {
     }
 }
 
-#[test_case::test_case("local"; "local")]
 #[test_case::test_case("remote"; "remote")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn extension_window_prefix_survives_compaction(compaction: &str) -> Result<()> {

@@ -78,10 +78,13 @@ pub(crate) struct SessionState {
     /// Persisted origin of the session base instructions, when known.
     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
     pub(crate) history: ContextManager,
+    pub(crate) local_compaction: crate::local_compaction::LocalCompactionState,
     /// Cancels work bound to discarded history or a superseded Guardian evidence policy.
     pub(crate) history_reset: CancellationToken,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
+    /// Usage of the turn a background marking request started in, which it may outlive.
+    pub(crate) background_compaction_usage: Option<(String, TokenUsage)>,
     /// Base-instruction and tool-definition size of the latest sampling request.
     pub(crate) request_overhead: RequestOverhead,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
@@ -135,9 +138,11 @@ impl SessionState {
             session_configuration,
             base_instructions_provenance: None,
             history,
+            local_compaction: crate::local_compaction::LocalCompactionState::default(),
             history_reset: CancellationToken::new(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
+            background_compaction_usage: None,
             request_overhead: RequestOverhead::default(),
             mcp_dependency_prompted: HashSet::new(),
             additional_context: AdditionalContextStore::default(),
@@ -208,6 +213,9 @@ impl SessionState {
         reference_context_item: Option<TurnContextItem>,
         replacement: HistoryReplacement,
     ) {
+        // A new full window: marking for the replaced history is cancelled.
+        self.local_compaction.reset_window();
+        self.background_compaction_usage = None;
         let invalidate_reviews = match replacement {
             HistoryReplacement::Compaction {
                 reviewer_compaction_hash,
@@ -228,6 +236,22 @@ impl SessionState {
         self.auto_compact_window.clear_prefill();
     }
 
+    /// Installs a locally compacted view; unlike a replacement, marking for the window goes on.
+    pub(crate) fn install_local_compacted_history(
+        &mut self,
+        history: ContextManager,
+        invalidate_reviews: bool,
+        window_number: u64,
+        window_ids: AutoCompactWindowIds,
+    ) {
+        if invalidate_reviews {
+            std::mem::take(&mut self.history_reset).cancel();
+        }
+        self.history = history;
+        self.auto_compact_window.restore(window_number, window_ids);
+        self.auto_compact_window.clear_prefill();
+    }
+
     pub(crate) fn set_token_info(&mut self, info: Option<TokenUsageInfo>) {
         self.history.set_token_info(info);
     }
@@ -245,10 +269,20 @@ impl SessionState {
             .latest_token_usage_record
             .as_ref()
             .filter(|record| record.turn_id == turn_id)
-            .map_or_else(TokenUsage::default, |record| {
-                record.turn_token_usage.clone()
-            });
+            .map(|record| record.turn_token_usage.clone())
+            .or_else(|| {
+                self.background_compaction_usage
+                    .as_ref()
+                    .filter(|(id, _)| id == turn_id)
+                    .map(|(_, usage)| usage.clone())
+            })
+            .unwrap_or_default();
         turn_token_usage.add_assign(usage);
+        if let Some((id, accumulated)) = &mut self.background_compaction_usage
+            && id.as_str() == turn_id
+        {
+            *accumulated = turn_token_usage.clone();
+        }
         let mut thread_token_usage = self
             .latest_token_usage_record
             .as_ref()

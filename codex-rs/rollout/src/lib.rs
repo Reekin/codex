@@ -15,6 +15,7 @@ mod model_context;
 mod ordinal;
 mod persistence_metrics;
 pub(crate) mod policy;
+pub mod recall;
 pub(crate) mod recorder;
 mod reverse_jsonl_scanner;
 mod rollout_file_name;
