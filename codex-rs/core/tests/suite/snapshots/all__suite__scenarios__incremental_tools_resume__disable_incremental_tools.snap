@@ -16,8 +16,9 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (turn) --
-00:additional_tools/developer (2; hash=44f4cad2ce4ab17d):
-        - namespace/functions; hash=101d32aa59ea258b
+00:additional_tools/developer (2; hash=81539f0ce59a6133):
+        - namespace/functions; hash=f046290c707161b5
+          - function/exec_argv
           - function/exec_command
           - function/write_stdin
           - function/request_user_input
@@ -40,6 +41,7 @@ Settings:
           - function/update_plan
 07:message/developer:
     The following tools are no longer available. Do not call them:
+    - functions.exec_argv
     - functions.exec_command
     - functions.write_stdin
 08:message/user:
