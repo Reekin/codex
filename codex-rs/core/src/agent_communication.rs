@@ -6,6 +6,7 @@ use codex_extension_api::MessageLifecycleContributor;
 use codex_extension_api::MessageLifecycleInput;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::InterAgentCommunication;
 use serde::Deserialize;
 use serde::Serialize;
@@ -44,6 +45,7 @@ impl AgentCommunicationKind {
 pub(crate) struct AgentCommunicationContext {
     kind: AgentCommunicationKind,
     pub(crate) sender_thread_id: ThreadId,
+    resumes_recipient: bool,
 }
 
 impl AgentCommunicationContext {
@@ -51,12 +53,28 @@ impl AgentCommunicationContext {
         Self {
             kind,
             sender_thread_id,
+            resumes_recipient: false,
         }
     }
 
-    pub(crate) fn is_result(&self) -> bool {
-        self.kind == AgentCommunicationKind::Result
+    /// A child's completion or error result, which may resume a parent whose turn has ended.
+    pub(crate) fn subagent_result(sender_thread_id: ThreadId, status: &AgentStatus) -> Self {
+        Self {
+            kind: AgentCommunicationKind::Result,
+            sender_thread_id,
+            resumes_recipient: status_resumes_parent(status),
+        }
     }
+
+    pub(crate) fn resumes_recipient(&self) -> bool {
+        self.resumes_recipient
+    }
+}
+
+/// Only a child's completion or error continues its parent; lifecycle notices such as
+/// shutdown or a missing agent are delivered without starting a parent turn.
+pub(crate) fn status_resumes_parent(status: &AgentStatus) -> bool {
+    matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_))
 }
 
 pub(crate) fn send_log_content(

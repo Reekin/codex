@@ -7,7 +7,6 @@ use super::LocalAgentControl;
 use crate::TurnStartOptions;
 use crate::agent::api::AgentTurnOutcome;
 use crate::agent_communication::AgentCommunicationContext;
-use crate::agent_communication::AgentCommunicationKind;
 use crate::session_prefix::format_guardian_interruption_message;
 use crate::session_prefix::format_inter_agent_completion_message;
 use codex_protocol::AgentPath;
@@ -124,8 +123,7 @@ impl LocalAgentControl {
             message,
             /*trigger_turn*/ false,
         );
-        let context =
-            AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id);
+        let context = AgentCommunicationContext::subagent_result(outcome.thread_id, &status);
         let delivery = self
             .send_inter_agent_communication(
                 parent_thread_id,
@@ -182,11 +180,19 @@ impl LocalAgentControl {
             .as_ref()
             .map(ToString::to_string)
             .unwrap_or_else(|| outcome.thread_id.to_string());
+        let resumes_parent = crate::agent_communication::status_resumes_parent(&outcome.status);
         let notification =
             super::legacy_subagent_notification(&parent_thread, &child_reference, outcome.status)
                 .await;
-        parent_thread
-            .deliver_subagent_notification(notification)
-            .await;
+        if resumes_parent {
+            parent_thread
+                .deliver_subagent_notification(notification)
+                .await;
+        } else {
+            parent_thread
+                .session
+                .inject_no_new_turn(vec![notification], /*current_turn_context*/ None)
+                .await;
+        }
     }
 }
