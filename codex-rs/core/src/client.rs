@@ -226,6 +226,8 @@ struct ModelClientState {
     cached_websocket_session: StdMutex<WebsocketSession>,
     /// Last full tool list used for sampling, retained across turns and connection resets.
     last_inference_tools: StdMutex<Option<Arc<[ToolSpec]>>>,
+    /// Images omitted to fit the model's byte budget, kept omitted for a stable prefix.
+    omitted_images: crate::request_input_preparation::OmittedImages,
 }
 
 enum ClientRouting {
@@ -643,6 +645,7 @@ impl ModelClient {
                 agent_identity_session_fallback: AgentIdentitySessionFallback::default(),
                 cached_websocket_session: StdMutex::new(WebsocketSession::default()),
                 last_inference_tools: StdMutex::new(None),
+                omitted_images: crate::request_input_preparation::OmittedImages::default(),
             }),
             agent_identity_policy,
             prompt_cache_key_policy: PromptCacheKey::default(),
@@ -2064,6 +2067,12 @@ impl ResponsesHttpExecutor<'_> {
                 codex_extension_api::ModelRequestKind::Generation,
                 &mut request.client_metadata,
             );
+            crate::request_input_preparation::prepare(
+                &mut request,
+                model_info.input_limits,
+                &self.client.state.omitted_images,
+                crate::utils::json::serialized_json_bytes,
+            )?;
             let inference_trace_attempt = inference_trace.start_attempt();
             inference_trace_attempt.add_request_headers(&mut options.extra_headers);
             if let Some(input) = tool_metadata::bounded_input(&request, &request.input) {
@@ -2276,6 +2285,43 @@ impl ModelClientSession {
             if let Some(turn_state) = self.turn_state.get() {
                 client_metadata.insert(X_CODEX_TURN_STATE_HEADER.to_string(), turn_state.clone());
             }
+            let mut client_metadata =
+                response_create_client_metadata(Some(client_metadata), request_trace.as_ref());
+            self.client.set_guardian_metadata(
+                &mut client_metadata,
+                responses_metadata.parent_response_id.as_deref(),
+                client_setup.auth.as_ref(),
+                &responses_headers,
+            );
+            let interceptors = crate::model_request::prepare(
+                &self.client.request_contributors,
+                &self.client.state.thread_id.to_string(),
+                &model_info.slug,
+                if warmup {
+                    codex_extension_api::ModelRequestKind::Warmup
+                } else {
+                    codex_extension_api::ModelRequestKind::Generation
+                },
+                &mut client_metadata,
+            );
+            // The byte budget covers a full request; continuations only send a suffix of it.
+            crate::request_input_preparation::prepare(
+                &mut request,
+                model_info.input_limits,
+                &self.client.state.omitted_images,
+                |request| {
+                    let mut wire_request = request.clone();
+                    self.client
+                        .prepare_response_items_for_request(&mut wire_request.input);
+                    let mut message = ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest {
+                        generate: if warmup { Some(false) } else { None },
+                        client_metadata: client_metadata.clone(),
+                        ..ResponseCreateWsRequest::from(&wire_request)
+                    });
+                    stamp_ws_stream_request_start_ms(&mut message);
+                    crate::utils::json::serialized_json_bytes(&message)
+                },
+            )?;
             let (continuation, mode, reason, previous_item_type, current_item_type) =
                 match self.prepare_websocket_request(&request) {
                     Ok(continuation) => (
@@ -2340,33 +2386,13 @@ impl ModelClientSession {
                     .prepare_response_items_for_request(&mut request.input);
                 Some(original_item_ids)
             };
-            let mut ws_payload = ResponseCreateWsRequest {
+            let ws_payload = ResponseCreateWsRequest {
                 previous_response_id,
                 input: incremental_items.as_deref().unwrap_or(&request.input),
                 generate: if warmup { Some(false) } else { None },
-                client_metadata: response_create_client_metadata(
-                    Some(client_metadata),
-                    request_trace.as_ref(),
-                ),
+                client_metadata,
                 ..ResponseCreateWsRequest::from(&request)
             };
-            self.client.set_guardian_metadata(
-                &mut ws_payload.client_metadata,
-                responses_metadata.parent_response_id.as_deref(),
-                client_setup.auth.as_ref(),
-                &responses_headers,
-            );
-            let interceptors = crate::model_request::prepare(
-                &self.client.request_contributors,
-                &self.client.state.thread_id.to_string(),
-                &model_info.slug,
-                if warmup {
-                    codex_extension_api::ModelRequestKind::Warmup
-                } else {
-                    codex_extension_api::ModelRequestKind::Generation
-                },
-                &mut ws_payload.client_metadata,
-            );
             let mut ws_request = ResponsesWsRequest::ResponseCreate(ws_payload);
             stamp_ws_stream_request_start_ms(&mut ws_request);
             let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;

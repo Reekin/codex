@@ -57,6 +57,7 @@ fn test_model(model_messages: Option<ModelMessages>) -> ModelInfo {
         model_specialty: None,
         tool_mode: None,
         multi_agent_version: None,
+        input_limits: None,
         multi_agent_reasoning_effort: None,
     }
 }
