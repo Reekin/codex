@@ -19,7 +19,7 @@ async fn stalled_large_upload_retries_on_a_fresh_connection() {
         .local_addr()
         .expect("listener should have an address");
     let server = std::thread::spawn(move || {
-        let first_content_length = stall_connection(&listener);
+        let (_stalled, first_content_length) = stall_connection(&listener);
 
         let mut second = accept_with_deadline(&listener);
         let second_content_length = read_content_length(&mut second);
@@ -47,10 +47,11 @@ async fn stalled_retries_are_monitored_until_the_budget_is_exhausted() {
         .local_addr()
         .expect("listener should have an address");
     let server = std::thread::spawn(move || {
-        // Each dropped connection fails the request unless the client already
-        // canceled that attempt, so success proves every retry was monitored.
-        let stalled_content_lengths: Vec<usize> =
-            (0..3).map(|_| stall_connection(&listener)).collect();
+        // Stalled connections are never read, so an unmonitored attempt on one
+        // of them would hang until the request timeout; success proves every
+        // retry within the budget was monitored.
+        let (_stalled, stalled_content_lengths): (Vec<TcpStream>, Vec<usize>) =
+            (0..3).map(|_| stall_connection(&listener)).unzip();
 
         let mut last = accept_with_deadline(&listener);
         let last_content_length = read_content_length(&mut last);
@@ -309,14 +310,14 @@ fn read_body(stream: &mut TcpStream, content_length: usize) -> usize {
     content_length
 }
 
-/// Accepts a connection, stops reading its body long enough for the client
-/// to detect a stall, then drops it. Returns the announced content length.
-fn stall_connection(listener: &TcpListener) -> usize {
+/// Accepts a connection and reads only its headers. The caller keeps the
+/// returned stream open without reading the body, so the upload stalls until
+/// the client abandons it, while the server is free to accept the retry
+/// connection immediately. Also returns the announced content length.
+fn stall_connection(listener: &TcpListener) -> (TcpStream, usize) {
     let mut stream = accept_with_deadline(listener);
     let content_length = read_content_length(&mut stream);
-    std::thread::sleep(Duration::from_millis(250));
-    drop(stream);
-    content_length
+    (stream, content_length)
 }
 
 fn write_ok(stream: &mut TcpStream) {
