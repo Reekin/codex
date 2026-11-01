@@ -301,6 +301,89 @@ async fn model_switch_uses_active_capability_and_preserves_selected_reasoning() 
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn automatic_compaction_follows_the_active_model_across_a_switch() -> Result<()> {
+    use core_test_support::responses::ev_assistant_message;
+
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let responder = LocalModel::mount(&server).await;
+    let test = test_codex()
+        .with_auth(CodexAuth::from_api_key("test-key"))
+        .with_model("remote-model")
+        .with_config(|config| {
+            configure_budgets(config);
+            config.model_catalog = Some(ModelsResponse {
+                models: vec![
+                    model("remote-model", true, "remote-hash"),
+                    model("local-model", false, "local-hash"),
+                ],
+            });
+            let _ = config.features.enable(Feature::RemoteCompactionV2);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    // Each reply reports usage past the configured automatic limit, so the next turn compacts
+    // before sampling; its size leaves the local route an earlier turn to summarize.
+    let over_limit_reply = |id: &str| {
+        sse(vec![
+            ev_assistant_message(id, &"Earlier evidence needs verification. ".repeat(5000)),
+            ev_completed_with_tokens(id, /*total_tokens*/ 96_000),
+        ])
+    };
+    responder.reply(over_limit_reply("before-remote"));
+    test.submit_text_turn("Keep the offline-only constraint.")
+        .await?;
+    responder.reply(remote_response());
+    responder.reply(over_limit_reply("after-remote"));
+    test.submit_text_turn("Continue after remote compaction.")
+        .await?;
+    submit_thread_settings(
+        &test.codex,
+        ThreadSettingsOverrides {
+            model: Some("local-model".to_string()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    responder.text("After local compaction.");
+    test.submit_text_turn("Continue on the local model.")
+        .await?;
+
+    let bodies = responder.bodies();
+    let trigger = json!({"type":"compaction_trigger"});
+    assert_eq!(bodies.len(), 5);
+    assert_eq!(bodies[0]["model"], "remote-model");
+    assert_eq!(bodies[1]["model"], "remote-model");
+    assert_eq!(
+        bodies[1]["input"].as_array().unwrap().last(),
+        Some(&trigger)
+    );
+    assert!(analysis_payload(&bodies[1], SUMMARIZE).is_none());
+    assert_eq!(bodies[2]["model"], "remote-model");
+    assert!(bodies[2].to_string().contains("remote-original-protocol"));
+    assert_eq!(bodies[3]["model"], "local-model");
+    assert!(analysis_payload(&bodies[3], SUMMARIZE).is_some());
+    assert_ne!(
+        bodies[3]["input"].as_array().unwrap().last(),
+        Some(&trigger)
+    );
+    assert_eq!(bodies[4]["model"], "local-model");
+    assert!(bodies[4].to_string().contains(LEDGER));
+    assert!(
+        bodies[4]
+            .to_string()
+            .contains("Continue on the local model.")
+    );
+    assert!(
+        responder
+            .requests()
+            .iter()
+            .all(|request| request.url.path() == "/v1/responses")
+    );
+    Ok(())
+}
+
 #[test_case::test_case(false; "missing previous hash")]
 #[test_case::test_case(true; "same hash")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
