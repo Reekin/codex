@@ -47,6 +47,7 @@ pub(crate) async fn context_window_token_status_for_model(
     config.token_budget = super::token_budget::resolve_token_budget(
         turn_context.configured_token_budget.as_ref(),
         turn_context.use_model_token_budget_defaults,
+        turn_context.provider.capabilities().remote_compaction,
         model_info,
     );
     context_window_token_status_with_config(sess, &config, model_info).await

@@ -6,9 +6,29 @@ use crate::config::resolve_token_budget_config;
 use crate::context::ContextualUserFragment;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::account::PlanType;
 use codex_protocol::auth::AuthMode;
 use codex_protocol::openai_models::ModelInfo;
+
+/// Local full compaction owns the context window of a local-route model, so no token-budget
+/// window reset, tool, reminder or fallback buffer stands in for it or moves its trigger.
+/// Clears token-budget activation and settings for such a model and reports whether it did;
+/// every later token-budget check then sees the feature off.
+pub(super) fn disable_for_local_route(
+    config: &mut Config,
+    provider_support: RemoteCompactionSupport,
+    model_info: &ModelInfo,
+) -> bool {
+    if !crate::local_compaction::is_local_route(provider_support, model_info) {
+        return false;
+    }
+    if let Err(error) = config.features.disable(Feature::TokenBudget) {
+        tracing::warn!(%error, "token budget is pinned on for a local compaction route");
+    }
+    config.token_budget = None;
+    true
+}
 
 fn experimental_context_is_eligible(auth_mode: AuthMode, plan_type: Option<PlanType>) -> bool {
     auth_mode == AuthMode::Chatgpt
@@ -78,11 +98,16 @@ pub(super) fn has_explicit_settings(config: &Config) -> bool {
 }
 
 /// Resolves user-configured token-budget preferences against the current model's defaults.
+/// A local-route model resolves none (see [`disable_for_local_route`]).
 pub(super) fn resolve_token_budget(
     configured_token_budget: Option<&TokenBudgetConfig>,
     use_model_defaults: bool,
+    provider_support: RemoteCompactionSupport,
     model_info: &ModelInfo,
 ) -> Option<TokenBudgetConfig> {
+    if crate::local_compaction::is_local_route(provider_support, model_info) {
+        return None;
+    }
     if !use_model_defaults {
         return configured_token_budget.cloned();
     }
@@ -164,7 +189,7 @@ pub(super) async fn maybe_record(
     base_window_tokens_remaining: Option<i64>,
     allow_auto_compact_fallback: bool,
 ) {
-    if !crate::local_compaction::token_budget_route(turn_context, turn_context.model_info()) {
+    if !turn_context.config.features.enabled(Feature::TokenBudget) {
         return;
     }
     let Some(base_window_tokens_remaining) = base_window_tokens_remaining else {
@@ -226,8 +251,92 @@ pub(super) async fn maybe_record(
 #[cfg(test)]
 mod tests {
     use super::experimental_context_is_eligible;
+    use crate::config::TokenBudgetConfig;
+    use crate::session::context_window::context_window_token_status;
+    use codex_features::Feature;
+    use codex_login::CodexAuth;
     use codex_protocol::account::PlanType;
     use codex_protocol::auth::AuthMode;
+    use codex_protocol::protocol::TokenUsage;
+    use pretty_assertions::assert_eq;
+
+    const FALLBACK_BUFFER_TOKENS: i64 = 2_000;
+
+    /// Context status at 91K tokens with a configured token-budget fallback buffer.
+    async fn status_with_fallback(
+        local_route: bool,
+    ) -> (
+        crate::session::context_window::ContextWindowTokenStatus,
+        bool,
+        usize,
+    ) {
+        let mut provider =
+            codex_model_provider_info::built_in_model_providers(/*openai_base_url*/ None)["openai"]
+                .clone();
+        if local_route {
+            provider.name = "Local compaction test provider".to_string();
+        }
+        let (sess, turn, _events) =
+            crate::session::tests::make_session_and_context_with_auth_and_config_and_rx(
+                CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+                Vec::new(),
+                move |config| {
+                    config.model = Some("gpt-5.2".to_string());
+                    config.model_context_window = Some(100_000);
+                    config.model_auto_compact_token_limit = Some(90_000);
+                    config.model_provider = provider;
+                    config.features.enable(Feature::TokenBudget).unwrap();
+                    config.token_budget = Some(TokenBudgetConfig {
+                        auto_compact_fallback_prompt: Some("Save state.".to_string()),
+                        auto_compact_fallback_buffer_tokens: Some(FALLBACK_BUFFER_TOKENS),
+                        ..TokenBudgetConfig::default()
+                    });
+                },
+            )
+            .await;
+        sess.update_token_usage_info(
+            &turn,
+            Some(&TokenUsage {
+                input_tokens: 91_000,
+                total_tokens: 91_000,
+                ..Default::default()
+            }),
+        )
+        .await
+        .expect("record usage");
+        let hard_limit = sess
+            .local_compaction_hard_limit(&turn, turn.model_info())
+            .await;
+        (
+            context_window_token_status(&sess, &turn).await,
+            turn.config.features.enabled(Feature::TokenBudget),
+            hard_limit,
+        )
+    }
+
+    #[tokio::test]
+    async fn local_route_keeps_automatic_compaction_trigger_without_fallback_buffer() {
+        let (remote, remote_token_budget, _) = status_with_fallback(/*local_route*/ false).await;
+        let (local, local_token_budget, local_hard_limit) =
+            status_with_fallback(/*local_route*/ true).await;
+
+        // The native route reserves the fallback buffer past the configured trigger.
+        assert!(remote_token_budget);
+        assert!(!remote.token_limit_reached);
+        // The local route resolves no token budget, so the original trigger fires.
+        assert!(!local_token_budget);
+        assert!(local.token_limit_reached);
+        assert_eq!(
+            remote.auto_compact_token_limit,
+            local
+                .auto_compact_token_limit
+                .map(|limit| limit + FALLBACK_BUFFER_TOKENS)
+        );
+        assert_eq!(
+            local.auto_compact_token_limit,
+            i64::try_from(local_hard_limit).ok()
+        );
+    }
 
     #[test]
     fn experimental_context_requires_eligible_chatgpt_subscription() {

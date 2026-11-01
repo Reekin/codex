@@ -187,8 +187,8 @@ pub(crate) async fn run_turn(
         .thread_extension_data
         .get::<AutoCompactionDisabled>()
         .is_none();
-    let auto_summarization_enabled = auto_compaction_enabled
-        && !crate::local_compaction::token_budget_route(&turn_context, turn_context.model_info());
+    let auto_summarization_enabled =
+        auto_compaction_enabled && !turn_context.config.features.enabled(Feature::TokenBudget);
     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         crate::guardian::check_pending_guardian_input(&sess, &turn_context).await?;
     }
@@ -711,10 +711,7 @@ pub(crate) async fn run_turn(
                 };
                 let should_roll_over = auto_compaction_enabled
                     && needs_follow_up
-                    && ((crate::local_compaction::token_budget_route(
-                        &turn_context,
-                        &step_context.settings.model_info,
-                    ) && sess.take_new_context_window_request().await)
+                    && (sess.take_new_context_window_request().await
                         || token_limit_reached
                         || candidate.is_some());
                 if auto_compaction_enabled {
@@ -1646,8 +1643,7 @@ async fn run_auto_compact(
     if !crate::local_compaction::uses_local_route(turn_context, &step_context.settings.model_info) {
         crate::local_compaction::cancel(sess).await;
     }
-    if crate::local_compaction::token_budget_route(turn_context, &step_context.settings.model_info)
-    {
+    if turn_context.config.features.enabled(Feature::TokenBudget) {
         // Compaction is the reset request, so force a new context window
         // instead of consuming a pending `new_context` tool request.
         crate::compact_token_budget::run_inline_auto_compact_task(

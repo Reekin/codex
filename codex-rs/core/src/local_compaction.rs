@@ -27,8 +27,6 @@ use codex_context_compaction::cleaned;
 use codex_context_compaction::marks_path;
 use codex_context_compaction::restore_marks;
 use codex_context_compaction::visible_tokens;
-use codex_extension_api::ConversationHistorySnapshot as _;
-use codex_features::Feature;
 use codex_history::ResponseItemEnvelope;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErr;
@@ -140,16 +138,16 @@ enum CleanupTrigger {
 /// Whether full compaction uses the local pipeline: the provider or the model lacks native
 /// compaction. Tool cleanup runs on every route.
 pub(crate) fn uses_local_route(turn: &TurnContext, model_info: &ModelInfo) -> bool {
-    crate::compaction_policy::remote_compaction_support(
-        turn.provider.capabilities().remote_compaction,
-        model_info,
-    ) == RemoteCompactionSupport::Unsupported
+    is_local_route(turn.provider.capabilities().remote_compaction, model_info)
 }
 
-/// Whether a token-budget window reset stands in for full compaction. It never replaces the
-/// local route, which no configuration overrides.
-pub(crate) fn token_budget_route(turn: &TurnContext, model_info: &ModelInfo) -> bool {
-    turn.config.features.enabled(Feature::TokenBudget) && !uses_local_route(turn, model_info)
+/// [`uses_local_route`] for a provider's compaction support, where no turn exists yet.
+pub(crate) fn is_local_route(
+    provider_support: RemoteCompactionSupport,
+    model_info: &ModelInfo,
+) -> bool {
+    crate::compaction_policy::remote_compaction_support(provider_support, model_info)
+        == RemoteCompactionSupport::Unsupported
 }
 
 /// Whether history holds locally compacted records whose originals recall can read.
