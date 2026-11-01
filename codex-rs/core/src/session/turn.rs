@@ -1843,7 +1843,17 @@ async fn run_sampling_request(
     let mut initial_input = Some(input);
     let mut notify_messages = Vec::new();
     let mut executed_tool_calls_by_output = HashMap::new();
+    let stream_retry_timeout = turn_context
+        .config
+        .features
+        .enabled(Feature::StreamRetryTimeout);
     loop {
+        if stream_retry_timeout {
+            client_session.set_stream_retry_options(
+                retry_state.stream_idle_timeout(turn_context.provider.info().stream_idle_timeout()),
+                retry_state.remaining_retries(max_retries),
+            );
+        }
         // Running code-mode cells can request review while this response is in flight.
         // Keep the latest received ID until response.created replaces it.
         let first_attempt = initial_input.is_some();

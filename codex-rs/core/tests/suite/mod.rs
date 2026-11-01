@@ -273,6 +273,7 @@ mod step_settings;
 mod step_settings_snapshots;
 mod stream_error_allows_next_turn;
 mod stream_no_completed;
+mod stream_retry_timeout;
 mod subagent_dynamic_tools;
 mod subagent_notifications;
 mod subagent_service_tier;

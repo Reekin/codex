@@ -245,6 +245,11 @@ impl ResponsesWebsocketConnection {
             .is_none_or(|stream| stream.pump_task.is_finished())
     }
 
+    /// Set the idle timeout for subsequent requests without discarding a reusable connection.
+    pub fn set_idle_timeout(&mut self, idle_timeout: Duration) {
+        self.idle_timeout = idle_timeout;
+    }
+
     #[instrument(
         name = "responses_websocket.stream_request",
         level = "info",

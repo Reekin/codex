@@ -10,6 +10,7 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_tools::ToolSpec;
 use futures::Stream;
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
@@ -116,6 +117,8 @@ fn normalize_image_detail(detail: &mut Option<ImageDetail>, model_info: &ModelIn
 }
 
 pub struct ResponseStream {
+    /// Events already received while selecting this stream; delivered before `rx_event`.
+    pub(crate) buffered: VecDeque<ResponseEvent>,
     pub(crate) routing_affinity: Option<codex_http_client::ChatGptRoutingAffinity>,
     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
     pub(crate) interrupt: Option<oneshot::Sender<codex_api::ResponseInterrupt>>,
@@ -128,6 +131,9 @@ impl Stream for ResponseStream {
     type Item = Result<ResponseEvent>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(event) = self.buffered.pop_front() {
+            return Poll::Ready(Some(Ok(event)));
+        }
         self.rx_event.poll_recv(cx)
     }
 }
