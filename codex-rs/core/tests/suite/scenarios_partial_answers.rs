@@ -298,9 +298,11 @@ async fn partial_answers_survive_forked_child_requests(
             ),
         );
         let parent_input = requests[1].input();
+        // Fork-history boundaries wrap the inherited prefix without changing it.
         assert_eq!(
             responses::strip_response_item_ids_from_json(json!(
-                &child_requests[0].input()[..parent_input.len()]
+                &responses::strip_fork_history_boundaries(child_requests[0].input())
+                    [..parent_input.len()]
             )),
             responses::strip_response_item_ids_from_json(json!(parent_input))
         );
