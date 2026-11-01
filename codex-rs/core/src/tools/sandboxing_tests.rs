@@ -19,7 +19,7 @@ use serde_json::json;
 use std::collections::HashMap;
 
 #[test]
-fn shell_permission_request_payload_omits_missing_description() {
+fn bash_permission_request_payload_omits_missing_description() {
     assert_eq!(
         ExecHookMetadata::shell("echo hi").permission_request(
             /*description*/ None,
@@ -34,7 +34,7 @@ fn shell_permission_request_payload_omits_missing_description() {
 }
 
 #[test]
-fn shell_permission_request_payload_includes_description_when_present() {
+fn bash_permission_request_payload_includes_description_when_present() {
     assert_eq!(
         ExecHookMetadata::shell("echo hi").permission_request(
             Some("network-access example.com".to_string()),

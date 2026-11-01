@@ -666,10 +666,7 @@ async fn active_call_preserves_triggering_command_context() {
             turn_id: "turn-1".to_string(),
             trigger: expected.clone(),
             tool_name: tool_name.clone(),
-            hook_metadata: ExecHookMetadata::argv(&[
-                "curl".to_string(),
-                "https://example.com".to_string(),
-            ]),
+            hook_metadata: ExecHookMetadata::shell("curl https://example.com"),
             environment_id: "remote".to_string(),
             permission_profile: PermissionProfile::workspace_write(),
             environments: TurnEnvironmentSnapshot::default(),
@@ -684,10 +681,7 @@ async fn active_call_preserves_triggering_command_context() {
 
     assert_eq!(&call.trigger, &expected);
     assert_eq!(call.tool_name, tool_name);
-    assert_eq!(
-        call.hook_metadata,
-        ExecHookMetadata::argv(&["curl".to_string(), "https://example.com".to_string()])
-    );
+    assert_eq!(call.hook_metadata.command(), "curl https://example.com");
     assert_eq!(call.environment_id, "remote");
 }
 

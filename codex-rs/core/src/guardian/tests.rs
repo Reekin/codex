@@ -2363,7 +2363,7 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
     guardian_nested_tool_names.sort_unstable();
     assert_eq!(
         guardian_nested_tool_names,
-        vec!["exec_argv", "exec_command", "view_image", "write_stdin"]
+        vec!["exec_command", "view_image", "write_stdin"]
     );
     // Check exact separators before the snapshot normalizes trailing whitespace.
     let guardian_user_text = request.message_input_texts("user").concat();
