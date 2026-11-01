@@ -1,6 +1,6 @@
 # CLI reference (`scripts/image_gen.py`)
 
-This file is for the fallback CLI mode only. Read it when the user explicitly asks to use `scripts/image_gen.py` / CLI / API / model controls, or after the user explicitly confirms that a transparent-output request should use the `gpt-image-1.5` true-transparency fallback path.
+This file is for the fallback CLI mode only. Read it when the user explicitly chooses `scripts/image_gen.py` or the separate CLI/API path. Model, size, and quality requests alone use the built-in tool.
 
 `generate-batch` is a CLI subcommand in this fallback path. It is not a top-level mode of the skill.
 The word `batch` in a user request is not CLI opt-in by itself.
@@ -8,7 +8,7 @@ The word `batch` in a user request is not CLI opt-in by itself.
 ## What this CLI does
 - `generate`: generate a new image from a prompt
 - `edit`: edit one or more existing images
-- `generate-batch`: run many generation jobs from a JSONL file after the user explicitly chooses CLI/API/model controls
+- `generate-batch`: run many generation jobs from a JSONL file after the user explicitly chooses the separate CLI/API path
 
 Real API calls require **network access** + `OPENAI_API_KEY`. `--dry-run` does not.
 
@@ -141,10 +141,10 @@ python "$IMAGE_GEN" generate \
   --out output/imagegen/product-cutout.png
 ```
 
-Explain that CLI `gpt-image-2` does not support `background=transparent`, so transparent CLI output requires the confirmed `gpt-image-1.5` fallback.
+Explain that the bundled script rejects `background=transparent` with `gpt-image-2`, so this script's transparent-output path requires the confirmed `gpt-image-1.5` choice. Do not generalize the script's restriction to the current API or built-in tool.
 
 ## Quality, input fidelity, and masks (CLI fallback only)
-These are explicit CLI controls. They are not built-in `image_gen` tool arguments.
+These are CLI flags. The built-in tool also accepts `quality`; use its tool schema for built-in calls. Input fidelity and masks remain CLI-only controls.
 
 - `--quality` works for `generate`, `edit`, and `generate-batch`: `low|medium|high|auto`
 - `--input-fidelity` is **edit-only** and validated as `low|high`; it is not supported for `gpt-image-2`
@@ -231,7 +231,7 @@ Notes:
 
 ## CLI notes
 - Supported sizes depend on the model. `gpt-image-2` supports flexible constrained sizes; older GPT Image models support `1024x1024`, `1536x1024`, `1024x1536`, or `auto`.
-- True transparent CLI outputs require `output_format` to be `png` or `webp` and are not supported by `gpt-image-2`.
+- True transparent CLI outputs require `output_format` to be `png` or `webp`; the bundled script rejects this request with `gpt-image-2`.
 - `--prompt-file`, `--output-compression`, `--moderation`, `--max-attempts`, `--fail-fast`, `--force`, and `--no-augment` are supported.
 - This CLI is intended for GPT Image models. Do not assume older non-GPT image-model behavior applies here.
 

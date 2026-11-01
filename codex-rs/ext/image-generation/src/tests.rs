@@ -87,6 +87,9 @@ async fn referenced_files_record_the_exact_bytes_read_for_each_request() {
         ToolEnvironment::new("test".to_string(), PathUri::from_abs_path(&root), &access);
     let args = ImagegenArgs {
         prompt: "combine the references".to_string(),
+        model: None,
+        size: None,
+        quality: None,
         transparent_background: false,
         referenced_image_paths: Some(vec![second.clone(), first.clone()]),
         num_last_images_to_include: None,
@@ -155,6 +158,9 @@ async fn unreadable_or_invalid_reference_does_not_build_an_edit_request() {
     for path in [root.join("missing.png"), invalid] {
         let args = ImagegenArgs {
             prompt: "edit the reference".to_string(),
+            model: None,
+            size: None,
+            quality: None,
             transparent_background: false,
             referenced_image_paths: Some(vec![path]),
             num_last_images_to_include: None,
@@ -236,6 +242,9 @@ async fn omitted_references_generate_with_fixed_defaults() {
         request_for_call_args(
             &ImagegenArgs {
                 prompt: "paint a moonlit lake".to_string(),
+                model: None,
+                size: None,
+                quality: None,
                 transparent_background: false,
                 referenced_image_paths: None,
                 num_last_images_to_include: None,
@@ -257,6 +266,80 @@ async fn omitted_references_generate_with_fixed_defaults() {
             input_images: Vec::new(),
         }
     );
+}
+
+#[tokio::test]
+async fn null_options_match_omitted_options_for_generation_and_editing() {
+    for selector in [None, Some(1)] {
+        let omitted = serde_json::json!({
+            "prompt": "paint a moonlit lake",
+            "num_last_images_to_include": selector,
+        });
+        let mut explicit_null = omitted.clone();
+        for key in ["model", "size", "quality"] {
+            explicit_null[key] = serde_json::Value::Null;
+        }
+        let history = vec![ResponseItem::ImageGenerationCall {
+            encrypted_content: None,
+            id: None,
+            status: "completed".to_string(),
+            revised_prompt: None,
+            result: RESULT.to_string(),
+            internal_chat_message_metadata_passthrough: None,
+        }];
+        let omitted: ImagegenArgs = serde_json::from_value(omitted).expect("omitted options");
+        let explicit_null: ImagegenArgs =
+            serde_json::from_value(explicit_null).expect("null options");
+        assert_eq!(
+            request_for_call_args(&explicit_null, &history, &[])
+                .await
+                .expect("null request"),
+            request_for_call_args(&omitted, &history, &[])
+                .await
+                .expect("omitted request"),
+        );
+    }
+}
+
+#[tokio::test]
+async fn explicit_options_apply_to_generation_and_editing() {
+    let history = vec![ResponseItem::ImageGenerationCall {
+        encrypted_content: None,
+        id: None,
+        status: "completed".to_string(),
+        revised_prompt: None,
+        result: RESULT.to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    }];
+    for selector in [None, Some(1)] {
+        let args: ImagegenArgs = serde_json::from_value(serde_json::json!({
+            "prompt": "paint a moonlit lake",
+            "model": "gpt-image-2.5-sunburst",
+            "size": "1536x864",
+            "quality": "xhigh",
+            "num_last_images_to_include": selector,
+        }))
+        .expect("explicit options");
+        let request = request_for_call_args(&args, &history, &[])
+            .await
+            .expect("request should build");
+        let (model, quality, size) = match &request.request {
+            ImageRequest::Generate(request) => (&request.model, request.quality, &request.size),
+            ImageRequest::Edit(request) => (&request.model, request.quality, &request.size),
+        };
+        assert_eq!(
+            (model.as_str(), quality, size.as_deref()),
+            (
+                "gpt-image-2.5-sunburst",
+                Some(ImageQuality::Xhigh),
+                Some("1536x864")
+            )
+        );
+        assert_eq!(
+            matches!(request.request, ImageRequest::Edit(_)),
+            selector.is_some()
+        );
+    }
 }
 
 #[tokio::test]
@@ -335,6 +418,9 @@ async fn recent_image_fallback_selects_newest_images_in_chronological_order() {
         request_for_call_args(
             &ImagegenArgs {
                 prompt: "change the lighting".to_string(),
+                model: None,
+                size: None,
+                quality: None,
                 transparent_background: false,
                 referenced_image_paths: None,
                 num_last_images_to_include: Some(5),
@@ -359,6 +445,9 @@ async fn recent_image_fallback_passes_file_backed_image_to_edit_request() {
     let request = request_for_call_args(
         &ImagegenArgs {
             prompt: "change the lighting".to_string(),
+            model: None,
+            size: None,
+            quality: None,
             transparent_background: false,
             referenced_image_paths: None,
             num_last_images_to_include: Some(1),
@@ -410,6 +499,9 @@ async fn recent_image_fallback_passes_file_backed_tool_output_to_edit_request() 
     let request = request_for_call_args(
         &ImagegenArgs {
             prompt: "change the lighting".to_string(),
+            model: None,
+            size: None,
+            quality: None,
             transparent_background: false,
             referenced_image_paths: None,
             num_last_images_to_include: Some(1),
@@ -467,6 +559,9 @@ async fn conflicting_image_selectors_return_tool_error() {
     let error = request_for_call_args(
         &ImagegenArgs {
             prompt: "change the lighting".to_string(),
+            model: None,
+            size: None,
+            quality: None,
             transparent_background: false,
             referenced_image_paths: Some(vec![
                 "/tmp/image.png"
@@ -492,6 +587,9 @@ async fn too_many_referenced_image_paths_return_tool_error() {
     let error = request_for_call_args(
         &ImagegenArgs {
             prompt: "change the lighting".to_string(),
+            model: None,
+            size: None,
+            quality: None,
             transparent_background: false,
             referenced_image_paths: Some(
                 (0..6)
@@ -521,6 +619,9 @@ async fn recent_image_fallback_requires_requested_count() {
     let error = request_for_call_args(
         &ImagegenArgs {
             prompt: "change the lighting".to_string(),
+            model: None,
+            size: None,
+            quality: None,
             transparent_background: false,
             referenced_image_paths: None,
             num_last_images_to_include: Some(2),
