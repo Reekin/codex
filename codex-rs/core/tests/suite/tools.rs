@@ -276,7 +276,13 @@ async fn empty_turn_environments_keeps_environment_backed_tools() -> Result<()> 
         tools.contains(&"update_plan".to_string()),
         "non-environment tool should remain available; got {tools:?}"
     );
-    for environment_tool in ["exec_command", "write_stdin", "apply_patch", "view_image"] {
+    for environment_tool in [
+        "exec_argv",
+        "exec_command",
+        "write_stdin",
+        "apply_patch",
+        "view_image",
+    ] {
         assert!(
             tools.contains(&environment_tool.to_string()),
             "{environment_tool} should remain available for explicit empty turn environments; got {tools:?}"
@@ -927,7 +933,7 @@ async fn unified_exec_spec_toggle_end_to_end() -> Result<()> {
         CommandToolAvailability::ModelDisabled,
     ] {
         let tools = collect_tools(availability).await?;
-        for command_tool in ["exec_command", "write_stdin"] {
+        for command_tool in ["exec_argv", "exec_command", "write_stdin"] {
             assert!(
                 !tools.iter().any(|name| name == command_tool),
                 "tools list should not include {command_tool} for {availability:?}: {tools:?}"
@@ -937,7 +943,7 @@ async fn unified_exec_spec_toggle_end_to_end() -> Result<()> {
 
     for availability in [CommandToolAvailability::Default] {
         let tools = collect_tools(availability).await?;
-        for command_tool in ["exec_command", "write_stdin"] {
+        for command_tool in ["exec_argv", "exec_command", "write_stdin"] {
             assert!(
                 tools.iter().any(|name| name == command_tool),
                 "tools list should include {command_tool} for {availability:?}: {tools:?}"
@@ -950,10 +956,12 @@ async fn unified_exec_spec_toggle_end_to_end() -> Result<()> {
         tools.iter().any(|name| name == "exec_command"),
         "managed unified-exec disable should keep one-shot command execution: {tools:?}"
     );
-    assert!(
-        !tools.iter().any(|name| name == "write_stdin"),
-        "managed unified-exec disable must not expose retained process authority: {tools:?}"
-    );
+    for unified_exec_tool in ["exec_argv", "write_stdin"] {
+        assert!(
+            !tools.iter().any(|name| name == unified_exec_tool),
+            "managed unified-exec disable must not expose {unified_exec_tool}: {tools:?}"
+        );
+    }
 
     Ok(())
 }
