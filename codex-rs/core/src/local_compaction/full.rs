@@ -13,7 +13,6 @@ use codex_context_compaction::remove_parts;
 use codex_context_compaction::same_beyond_rendered;
 use codex_context_compaction::summary_record;
 use codex_context_compaction::summary_request;
-use codex_extension_api::ConversationHistorySnapshot as _;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
