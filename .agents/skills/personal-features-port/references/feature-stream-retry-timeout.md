@@ -7,6 +7,10 @@ return a usable result sooner.
 
 ## Stable Contract
 
+- **REQ-0**: The behavior below is enabled by `[features] stream_retry_timeout = true` in the
+  user's `config.toml`; the flag defaults to off. With it off, Codex keeps upstream behavior: each
+  retry waits the provider's fixed stream idle timeout, the interval does not grow, no concurrent
+  replacement starts, and retry accounting and routing state are upstream's.
 - **REQ-1**: The default initial waiting interval is five minutes. An explicit provider stream
   timeout supplies the initial interval instead. Each subsequent attempt adds five minutes.
 - **REQ-2**: If no complete tool call or answer arrives within that interval and retry budget
@@ -45,6 +49,8 @@ fields is outside this feature. Canceling a request does not undo work already d
 
 ## Adapter Seams
 
+- `stream_retry_timeout` feature check before applying retry options in the sampling and streaming
+  remote-compaction retry loops.
 - Provider default timeout resolution.
 - Sampling and streaming remote-compaction retry loops.
 - HTTP SSE setup and reused WebSocket request setup.
@@ -58,6 +64,8 @@ fields is outside this feature. Canceling a request does not undo work already d
    cancellation closes both candidates. Exercise deterministic stream selection (REQ-2 to REQ-4).
 3. Verify cumulative increases, retry-budget consumption, and transport-counter reset; inspect
    reused WebSocket ownership and remote-compaction wiring (REQ-1, REQ-2 and REQ-5).
+4. With the flag off, a stalled stream retries one request at a time with the fixed interval and
+   upstream tests run unmodified (REQ-0).
 
 ## Integration Contract
 
