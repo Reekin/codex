@@ -142,6 +142,12 @@ impl Normalizer {
         } else {
             text
         };
+        // Spawned agents draw their nickname from a randomized pool; identity context names it.
+        static AGENT_NICKNAME: OnceLock<Regex> = OnceLock::new();
+        let text = AGENT_NICKNAME
+            .get_or_init(|| Regex::new(r"Your nickname is `[^`]*`\.").expect("nickname regex"))
+            .replace_all(&text, "Your nickname is `<AGENT_NICKNAME>`.")
+            .into_owned();
         normalize_skill_references(&self.normalize_uuids(&text))
     }
 
