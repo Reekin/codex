@@ -17,6 +17,11 @@ sessions, and outputs.
 
 ## Stable Contract
 
+The feature is enabled by `[features] exec_argv = true` (stage Stable, default off). With the flag
+off, Codex keeps upstream behavior: `exec_argv` is not registered in any tool set, every tool list
+and tool description equals upstream's, and `exec_command` and `write_stdin` behave exactly as
+upstream. The requirements below apply with the flag on.
+
 - **REQ-1 Input**: `argv` is a non-empty array of strings and `argv[0]` is a non-empty program
   name. Reject values that cannot be passed safely to process creation.
 - **REQ-2 Execution**: Pass argv directly to one process without adding shell interpretation.
@@ -67,6 +72,7 @@ match the preferred shape.
 
 Rediscover these semantics on every upstream base:
 
+- feature-flag routing between the upstream path and the `exec_argv` path;
 - tool schema, family visibility, and registration;
 - argument parsing, validation, and hook rewrite;
 - unified-exec request and launch-mode construction;
@@ -86,8 +92,9 @@ arguments and no shell syntax executes.
 
 ### Tool And Rewrite Contract
 
-Prove the schema is argv-first, the tool is exposed only with unified exec, every pre/post hook sees
-`exec_argv` plus argv, `updatedInput.argv` changes execution, and command-only rewrite fails.
+Prove the schema is argv-first, the tool is exposed only with the flag on and unified exec, every
+pre/post hook sees `exec_argv` plus argv, `updatedInput.argv` changes execution, and command-only
+rewrite fails. With the flag off, upstream tool inventories and snapshots pass unmodified.
 
 ### Approval Paths
 
