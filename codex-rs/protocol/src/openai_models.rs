@@ -411,6 +411,9 @@ const fn is_true(value: &bool) -> bool {
 /// Model metadata returned by the Codex backend `/models` endpoint.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, TS, JsonSchema)]
 pub struct ModelInfo {
+    /// Optional backend limits for the outbound request projection, independent of token budgets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_limits: Option<ModelInputLimits>,
     /// Model-owned approval coverage. Absent preserves legacy settings; an empty map disables
     /// ordinary Guardian review. Keys are computer_use, shell, file_changes, mcp, network,
     /// and permissions. This does not override mandatory safety or administrator requirements.
@@ -524,6 +527,20 @@ pub struct ModelInfo {
     /// Reasoning effort used for multi-agent work when the user selects Ultra.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub multi_agent_reasoning_effort: Option<ReasoningEffort>,
+}
+
+/// Explicit limits applied to model requests without changing durable conversation history.
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, TS, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelInputLimits {
+    /// Maximum width or height in pixels. Images are never enlarged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub max_image_dimension: Option<std::num::NonZeroU32>,
+    /// Maximum uncompressed outbound JSON bytes, including instructions and tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "number | null")]
+    pub max_request_bytes: Option<std::num::NonZeroU64>,
 }
 
 impl ModelInfo {
@@ -1194,6 +1211,7 @@ mod tests {
             model_specialty: None,
             tool_mode: None,
             multi_agent_version: None,
+            input_limits: None,
             multi_agent_reasoning_effort: None,
         }
     }

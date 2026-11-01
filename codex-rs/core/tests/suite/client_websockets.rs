@@ -80,6 +80,9 @@ use tracing_test::traced_test;
 #[path = "client_websockets_runtime_auth.rs"]
 mod runtime_auth_tests;
 
+#[path = "request_input_preparation.rs"]
+mod request_input_preparation;
+
 const MODEL: &str = "gpt-5.4";
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
 const USER_AGENT_HEADER: &str = "user-agent";
