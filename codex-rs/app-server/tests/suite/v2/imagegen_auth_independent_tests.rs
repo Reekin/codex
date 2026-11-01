@@ -55,10 +55,7 @@ async fn installed_image_generation_exposure_preserves_entitlement_across_provid
     let env_key = if auth == "custom-api" { api_key } else { None };
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
-        .with_env_overrides(&[
-            ("OPENAI_API_KEY", None),
-            ("IMAGEGEN_TEST_API_KEY", env_key),
-        ])
+        .with_env_overrides(&[("OPENAI_API_KEY", None), ("IMAGEGEN_TEST_API_KEY", env_key)])
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
     start_image_generation_turn(&mut mcp, ThreadStartParams::default()).await?;
