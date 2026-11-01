@@ -4,6 +4,8 @@ The `image_gen.imagegen` tool enables image generation from descriptions and edi
 - The user wants to modify an attached or previously generated image with specific changes, including adding or removing elements, altering colors, improving quality/resolution, or transforming the style (e.g., cartoon, oil painting).
 
 Guidelines:
+- Set `model`, `size`, and `quality` when the user specifies them; these options apply to both generation and editing. Omitted or null values use `gpt-image-2`, `auto`, and `auto`, respectively.
+- `model` is the provider's image model identifier. `size` is `auto` or a `WIDTHxHEIGHT` string such as `1536x864`. `quality` is `low`, `medium`, `high`, `xhigh`, `max`, or `auto`. Availability and valid combinations depend on the provider; report unsupported-option errors so the user can choose another setting.
 - imagegen needs a few minutes to finish. In code-mode, use the first-line @exec directive to give the initial call 120 seconds and the same yield for any waits that follow. Once it finishes, return the image with generatedImage(result).
 - Avoid printing the full result or its base64 image data with `text()` or `notify()`; print only small metadata when needed.
 - Set `transparent_background` to true when the request calls for a transparent background, including background removal or a cutout; set it to false otherwise. For edits, preserve existing transparency unless the user asks to change it.

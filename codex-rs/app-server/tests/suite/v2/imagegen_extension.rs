@@ -48,6 +48,9 @@ use super::analytics::wait_for_analytics_event;
 #[path = "imagegen_auth_independent_tests.rs"]
 mod auth_independent_tests;
 
+#[path = "imagegen_options_tests.rs"]
+mod options_tests;
+
 const RESULT: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 const TINY_PNG_BYTES: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0,
@@ -963,9 +966,15 @@ async fn standalone_image_generation_is_exposed_in_code_mode_only() -> Result<()
 
     assert!(response_mock.single_request().body_contains_text(
         r#"declare const tools: { image_gen__imagegen(args: {
+  // Image model identifier; defaults to gpt-image-2. Forwarded unchanged to the provider.
+  model?: string | null;
   num_last_images_to_include?: number | null;
   prompt: string;
+  // Image quality; defaults to auto. Supported quality levels depend on the image model.
+  quality?: "low" | "medium" | "high" | "xhigh" | "max" | "auto";
   referenced_image_paths?: Array<string> | null;
+  // Output size as WIDTHxHEIGHT or auto (default). Supported sizes depend on the provider.
+  size?: string | null;
   // Whether the output should have a transparent background. Defaults to false.
   transparent_background?: boolean;
 }): Promise<{ image_url: string; output_hint?: string; }>; };"#
@@ -986,7 +995,10 @@ async fn standalone_image_generation_is_callable_from_code_mode_only(
     let call_id = "code-mode-image-run-1";
     let server = responses::start_mock_server().await;
     mount_image_response_with_background(&server, "opaque").await;
-    let arguments = imagegen_arguments("paint a blue whale", requested_transparent_background);
+    let mut arguments = imagegen_arguments("paint a blue whale", requested_transparent_background);
+    arguments["model"] = json!("provider-image-model");
+    arguments["size"] = json!("1536x864");
+    arguments["quality"] = json!("xhigh");
 
     let response_mock = responses::mount_sse_sequence(
         &server,
@@ -1067,9 +1079,9 @@ generatedImage(result);
         json!({
             "prompt": "paint a blue whale",
             "background": expected_background,
-            "model": "gpt-image-2",
-            "quality": "auto",
-            "size": "auto",
+            "model": "provider-image-model",
+            "quality": "xhigh",
+            "size": "1536x864",
         })
     );
 
