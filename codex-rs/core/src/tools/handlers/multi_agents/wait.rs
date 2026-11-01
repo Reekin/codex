@@ -22,11 +22,16 @@ use tokio::time::timeout_at;
 #[derive(Default)]
 pub(crate) struct Handler {
     options: WaitAgentTimeoutOptions,
+    /// Releases the wait on user steering when `subagent_continuation` is enabled.
+    subagent_continuation: bool,
 }
 
 impl Handler {
-    pub(crate) fn new(options: WaitAgentTimeoutOptions) -> Self {
-        Self { options }
+    pub(crate) fn new(options: WaitAgentTimeoutOptions, subagent_continuation: bool) -> Self {
+        Self {
+            options,
+            subagent_continuation,
+        }
     }
 }
 
@@ -36,7 +41,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
     }
 
     fn spec(&self) -> ToolSpec {
-        create_wait_agent_tool_v1(self.options)
+        create_wait_agent_tool_v1(self.options, self.subagent_continuation)
     }
 
     fn search_info(&self) -> Option<ToolSearchInfo> {
@@ -182,32 +187,14 @@ impl Handler {
         let statuses = if !initial_final_statuses.is_empty() {
             initial_final_statuses
         } else {
-            let turn_state = session
-                .input_queue
-                .turn_state_for_sub_id(&session.active_turn, &turn.sub_id)
-                .await;
-            let wait_for_steer = async {
-                loop {
-                    // Subscribe before checking pending input so steering during setup is
-                    // observed. Recheck after mailbox activity: watch can coalesce a steer
-                    // followed by mail into a single mailbox notification.
-                    let (mut activity_rx, pending_activity) = session
-                        .input_queue
-                        .subscribe_activity(turn_state.as_deref())
-                        .await;
-                    if pending_activity == Some(InputQueueActivity::Steer) {
-                        break;
-                    }
-                    if activity_rx.changed().await.is_err() {
-                        // The session owns the sender; without it only status or timeout ends.
-                        std::future::pending::<()>().await;
-                    }
-                    if *activity_rx.borrow_and_update() == InputQueueActivity::Steer {
-                        break;
-                    }
+            let release_on_steer = async {
+                if self.subagent_continuation {
+                    wait_for_steer(&session, &turn.sub_id).await;
+                } else {
+                    std::future::pending::<()>().await;
                 }
             };
-            tokio::pin!(wait_for_steer);
+            tokio::pin!(release_on_steer);
             let mut futures = FuturesUnordered::new();
             for (id, rx) in status_rxs.into_iter() {
                 let session = session.clone();
@@ -217,7 +204,7 @@ impl Handler {
             let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
             loop {
                 let next_status = tokio::select! {
-                    _ = &mut wait_for_steer => {
+                    () = &mut release_on_steer => {
                         steered = true;
                         break;
                     }
@@ -381,4 +368,31 @@ async fn wait_for_final_status(
         .get_status(thread_id)
         .await;
     Ok(is_final(&latest).then_some((thread_id, latest)))
+}
+
+/// Resolves once user steering reaches the waiting turn, without touching the awaited agents.
+async fn wait_for_steer(session: &Session, sub_id: &str) {
+    let turn_state = session
+        .input_queue
+        .turn_state_for_sub_id(&session.active_turn, sub_id)
+        .await;
+    loop {
+        // Subscribe before checking pending input so steering during setup is observed.
+        // Recheck after mailbox activity: watch can coalesce a steer followed by mail into a
+        // single mailbox notification.
+        let (mut activity_rx, pending_activity) = session
+            .input_queue
+            .subscribe_activity(turn_state.as_deref())
+            .await;
+        if pending_activity == Some(InputQueueActivity::Steer) {
+            return;
+        }
+        if activity_rx.changed().await.is_err() {
+            // The session owns the sender; without it only status or timeout ends the wait.
+            std::future::pending::<()>().await;
+        }
+        if *activity_rx.borrow_and_update() == InputQueueActivity::Steer {
+            return;
+        }
+    }
 }

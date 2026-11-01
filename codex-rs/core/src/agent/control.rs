@@ -20,6 +20,7 @@ use crate::thread_manager::ThreadIdGenerator;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_manager::default_thread_id_generator;
 use crate::turn_timing::now_unix_timestamp_ms;
+use codex_features::Feature;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_protocol::AgentPath;
@@ -507,9 +508,14 @@ impl LocalAgentControl {
                 }
                 None => true,
             };
-            // Loaded MAv1 children report every terminal turn through their session, including
-            // follow-ups. This watcher still reports children that stop without a terminal turn.
-            if !child_uses_multi_agent_v2
+            let subagent_continuation = child_thread
+                .as_ref()
+                .is_some_and(|child_thread| child_thread.enabled(Feature::SubagentContinuation));
+            // With subagent continuation, loaded MAv1 children report every terminal turn through
+            // their session, including follow-ups. This watcher still reports children that stop
+            // without a terminal turn.
+            if subagent_continuation
+                && !child_uses_multi_agent_v2
                 && matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_))
             {
                 return;
@@ -539,7 +545,11 @@ impl LocalAgentControl {
                     message,
                     /*trigger_turn*/ false,
                 );
-                let context = AgentCommunicationContext::subagent_result(child_thread_id, &status);
+                let context = AgentCommunicationContext::subagent_result(
+                    child_thread_id,
+                    &status,
+                    subagent_continuation,
+                );
                 let _ = control
                     .send_inter_agent_communication(
                         parent_thread_id,

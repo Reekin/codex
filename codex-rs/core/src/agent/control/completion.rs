@@ -123,7 +123,11 @@ impl LocalAgentControl {
             message,
             /*trigger_turn*/ false,
         );
-        let context = AgentCommunicationContext::subagent_result(outcome.thread_id, &status);
+        let context = AgentCommunicationContext::subagent_result(
+            outcome.thread_id,
+            &status,
+            outcome.subagent_continuation,
+        );
         let delivery = self
             .send_inter_agent_communication(
                 parent_thread_id,
@@ -160,6 +164,7 @@ impl LocalAgentControl {
     }
 
     /// Queues a MAv1 child's terminal status for its loaded parent, including follow-up turns.
+    /// Sessions report MAv1 turns here only with subagent continuation enabled.
     async fn notify_legacy_parent_of_terminal_turn(&self, outcome: AgentTurnOutcome) {
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,

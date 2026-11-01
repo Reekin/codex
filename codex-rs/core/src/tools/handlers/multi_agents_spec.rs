@@ -33,6 +33,8 @@ pub struct SpawnAgentToolOptions {
     pub multi_agent_version: MultiAgentVersion,
     pub model_catalog_in_context: bool,
     pub usage_hint_text: Option<String>,
+    /// Describes automatic parent continuation when `subagent_continuation` is enabled.
+    pub subagent_continuation: bool,
 }
 
 impl Default for SpawnAgentToolOptions {
@@ -46,6 +48,7 @@ impl Default for SpawnAgentToolOptions {
             multi_agent_version: MultiAgentVersion::Disabled,
             model_catalog_in_context: false,
             usage_hint_text: None,
+            subagent_continuation: false,
         }
     }
 }
@@ -96,6 +99,7 @@ pub fn create_spawn_agent_tool_v1(options: SpawnAgentToolOptions) -> ToolSpec {
                 inherited_model_guidance,
                 return_value_description,
                 options.usage_hint_text,
+                options.subagent_continuation,
             ),
             strict: false,
             defer_loading: None,
@@ -149,6 +153,7 @@ pub fn create_spawn_agent_tool_v2(
             inherited_model_guidance,
             options.usage_hint_text,
             description_override,
+            options.subagent_continuation,
         ),
         strict: false,
         defer_loading: None,
@@ -284,14 +289,21 @@ pub fn create_resume_agent_tool() -> ToolSpec {
     })
 }
 
-pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
+pub fn create_wait_agent_tool_v1(
+    options: WaitAgentTimeoutOptions,
+    subagent_continuation: bool,
+) -> ToolSpec {
+    let description = if subagent_continuation {
+        WAIT_AGENT_V1_CONTINUATION_DESCRIPTION
+    } else {
+        "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+    };
     ToolSpec::Namespace(ResponsesApiNamespace {
         name: MULTI_AGENT_V1_NAMESPACE.to_string(),
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
             name: "wait_agent".to_string(),
-            description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status with timed_out=true when timed out. New user input ends the wait early with empty status and timed_out=false, without cancelling the agents. Once the agent reaches a final status, a notification message will be received containing the same completed status."
-                .to_string(),
+            description: description.to_string(),
             strict: false,
             defer_loading: None,
             parameters: wait_agent_tool_parameters_v1(options),
@@ -690,6 +702,7 @@ fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchem
 }
 
 const SUBAGENT_CONTINUATION_DESCRIPTION: &str = "A completed or failed sub-agent automatically resumes its parent after the parent's turn naturally ends. Explicitly stopping the parent suppresses this automatic resumption. Use wait_agent when you need a result before continuing; new user input releases that wait without stopping the sub-agent.";
+const WAIT_AGENT_V1_CONTINUATION_DESCRIPTION: &str = "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status with timed_out=true when timed out. New user input ends the wait early with empty status and timed_out=false, without cancelling the agents. Once the agent reaches a final status, a notification message will be received containing the same completed status.";
 
 fn spawn_agent_tool_description(
     available_models_description: Option<&str>,
@@ -697,17 +710,22 @@ fn spawn_agent_tool_description(
     inherited_model_guidance: Option<&str>,
     return_value_description: &str,
     usage_hint_text: Option<String>,
+    subagent_continuation: bool,
 ) -> String {
     let model_catalog_guidance = inherited_model_guidance
         .map(|_| SPAWN_AGENT_MODEL_CATALOG_GUIDANCE)
         .unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
+    let continuation_description = if subagent_continuation {
+        format!("\n        {SUBAGENT_CONTINUATION_DESCRIPTION}")
+    } else {
+        String::new()
+    };
 
     let tool_description = if model_catalog_in_context {
         format!(
             r#"
-        Spawn a sub-agent for a well-scoped task. {return_value_description} {inherited_model_guidance}
-        {SUBAGENT_CONTINUATION_DESCRIPTION}
+        Spawn a sub-agent for a well-scoped task. {return_value_description} {inherited_model_guidance}{continuation_description}
 {model_catalog_guidance}"#
         )
     } else {
@@ -715,8 +733,7 @@ fn spawn_agent_tool_description(
         format!(
             r#"
         {available_models_description}
-        Spawn a sub-agent for a well-scoped task. {return_value_description} {inherited_model_guidance}
-        {SUBAGENT_CONTINUATION_DESCRIPTION}"#
+        Spawn a sub-agent for a well-scoped task. {return_value_description} {inherited_model_guidance}{continuation_description}"#
         )
     };
 
@@ -780,9 +797,15 @@ fn spawn_agent_tool_description_v2(
     inherited_model_guidance: Option<&str>,
     usage_hint_text: Option<String>,
     description: Option<&str>,
+    subagent_continuation: bool,
 ) -> String {
     let model_catalog_guidance = model_catalog_guidance.unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
+    let continuation_description = if subagent_continuation {
+        format!("{SUBAGENT_CONTINUATION_DESCRIPTION}\n")
+    } else {
+        String::new()
+    };
 
     let (catalog_prefix, catalog_suffix) = if model_catalog_in_context {
         (String::new(), format!("\n{model_catalog_guidance}"))
@@ -807,8 +830,7 @@ You are then able to refer to this agent as `task_3` or `/root/task1/task_3` int
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
 {inherited_model_guidance}{catalog_suffix}
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
-{SUBAGENT_CONTINUATION_DESCRIPTION}
-The new agent's canonical task name will be provided to it along with the message.
+{continuation_description}The new agent's canonical task name will be provided to it along with the message.
 
 Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#
         )

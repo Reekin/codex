@@ -2596,13 +2596,20 @@ impl Session {
         }
     }
 
-    /// Forwards every terminal turn of a spawned child to its direct parent, including follow-ups.
+    /// Forwards terminal turn events from spawned MultiAgentV2 children to their direct parent.
+    /// With subagent continuation, MultiAgentV1 children report every terminal turn as well.
     async fn maybe_notify_parent_of_terminal_turn(
         &self,
         turn_context: &TurnContext,
         msg: &EventMsg,
     ) {
-        if turn_context.multi_agent_version == MultiAgentVersion::Disabled {
+        let subagent_continuation = self.enabled(Feature::SubagentContinuation);
+        let reports_terminal_turns = match turn_context.multi_agent_version {
+            MultiAgentVersion::V2 => true,
+            MultiAgentVersion::V1 => subagent_continuation,
+            MultiAgentVersion::Disabled => false,
+        };
+        if !reports_terminal_turns {
             return;
         }
 
@@ -2657,6 +2664,7 @@ impl Session {
                     turn_id: turn_context.sub_id.clone(),
                     source: turn_context.session_source.clone(),
                     multi_agent_version: turn_context.multi_agent_version,
+                    subagent_continuation,
                     parent_turn_id: turn_context.turn_metadata_state.parent_turn_id(),
                     initiating_agent_path: turn_context
                         .turn_metadata_state

@@ -237,6 +237,7 @@ class Rpc:
             "model_reasoning_effort": "low", "project_doc_max_bytes": 0,
             "thread_unload_delay_secs": 1,
             "features.multi_agent": True,
+            "features.subagent_continuation": True,
             "features.multi_agent_v2.enabled": model.version == "v2",
             "features.multi_agent_v2.wait_agent_enabled": True,
             "features.multi_agent_v2.tool_namespace": "collaboration",

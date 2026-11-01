@@ -1478,6 +1478,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                                 .multi_agent_v2
                                 .usage_hint_text
                                 .clone(),
+                            subagent_continuation: turn_context
+                                .config
+                                .features
+                                .enabled(Feature::SubagentContinuation),
                         },
                         spawn_agent_description.map(str::to_owned),
                     ),
@@ -1559,13 +1563,25 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                     hide_agent_type_model_reasoning: false,
                     expose_spawn_agent_model_overrides: true,
                     usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
+                    subagent_continuation: turn_context
+                        .config
+                        .features
+                        .enabled(Feature::SubagentContinuation),
                 }),
                 exposure,
             );
             registry.add_with_exposure(SendInputHandler, exposure);
             registry.add_with_exposure(ResumeAgentHandler, exposure);
-            registry
-                .add_with_exposure(WaitAgentHandler::new(context.wait_agent_timeouts), exposure);
+            registry.add_with_exposure(
+                WaitAgentHandler::new(
+                    context.wait_agent_timeouts,
+                    turn_context
+                        .config
+                        .features
+                        .enabled(Feature::SubagentContinuation),
+                ),
+                exposure,
+            );
             registry.add_with_exposure(CloseAgentHandler, exposure);
         }
     }

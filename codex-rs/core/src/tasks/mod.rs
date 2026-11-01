@@ -357,10 +357,13 @@ impl Session {
             turn_context.multi_agent_version,
             &turn_context.session_source,
         );
-        let completion_parent_guard = self
-            .services
-            .local_agent_runtime
-            .completion_parent_guard(&turn_context.session_source);
+        let completion_parent_guard = if self.enabled(Feature::SubagentContinuation) {
+            self.services
+                .local_agent_runtime
+                .completion_parent_guard(&turn_context.session_source)
+        } else {
+            None
+        };
         let done_clone = Arc::clone(&done);
         let session = Arc::clone(self);
         let ctx = Arc::clone(&turn_context);
@@ -472,8 +475,8 @@ impl Session {
     /// Starts a regular turn with the provided sub-id when pending work should wake an idle
     /// session.
     ///
-    /// Starts an idle turn for explicit follow-ups, durable sleep, child results after a natural
-    /// turn end, or enabled message wakes.
+    /// Starts an idle turn for explicit follow-ups, durable sleep, enabled child-result
+    /// continuations after a natural turn end, or enabled message wakes.
     pub(crate) async fn maybe_start_turn_for_pending_work_with_sub_id(
         self: &Arc<Self>,
         sub_id: String,
@@ -944,7 +947,8 @@ impl Session {
                 Some(turn) if turn.task.is_some() => true,
                 Some(turn) if turn.finishing.is_none() => {
                     self.enabled(Feature::WakeOnAgentMessages)
-                        || self.input_queue.has_pending_subagent_results().await
+                        || (self.enabled(Feature::SubagentContinuation)
+                            && self.input_queue.has_pending_subagent_results().await)
                 }
                 Some(_) | None => false,
             };

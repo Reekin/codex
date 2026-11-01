@@ -57,12 +57,17 @@ impl AgentCommunicationContext {
         }
     }
 
-    /// A child's completion or error result, which may resume a parent whose turn has ended.
-    pub(crate) fn subagent_result(sender_thread_id: ThreadId, status: &AgentStatus) -> Self {
+    /// A child's terminal result. With subagent continuation enabled, a completion or error
+    /// may resume a parent whose turn has ended.
+    pub(crate) fn subagent_result(
+        sender_thread_id: ThreadId,
+        status: &AgentStatus,
+        subagent_continuation: bool,
+    ) -> Self {
         Self {
             kind: AgentCommunicationKind::Result,
             sender_thread_id,
-            resumes_recipient: status_resumes_parent(status),
+            resumes_recipient: subagent_continuation && status_resumes_parent(status),
         }
     }
 

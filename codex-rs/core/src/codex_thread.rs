@@ -904,7 +904,11 @@ impl CodexThread {
     /// Whether child work or an unconsumed child result still needs this loaded runtime.
     ///
     /// This is independent of client subscriptions: a running child still reports here.
+    /// Without subagent continuation nothing is retained, so idle unloading stays unchanged.
     pub async fn has_pending_subagent_work(&self) -> bool {
+        if !self.enabled(Feature::SubagentContinuation) {
+            return false;
+        }
         self.session
             .services
             .local_agent_runtime

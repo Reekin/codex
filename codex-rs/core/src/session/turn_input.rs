@@ -793,7 +793,9 @@ impl Session {
     /// Child results continue a parent whose turn ended naturally. After an explicit
     /// interruption they wait for the next user turn instead.
     pub(crate) async fn should_continue_for_subagent_results(&self) -> bool {
-        !self.is_interrupted() && self.input_queue.has_pending_subagent_results().await
+        self.enabled(Feature::SubagentContinuation)
+            && !self.is_interrupted()
+            && self.input_queue.has_pending_subagent_results().await
     }
 
     pub(crate) async fn route_realtime_text_input(
