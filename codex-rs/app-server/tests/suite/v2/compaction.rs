@@ -27,11 +27,6 @@ use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
-use codex_app_server_protocol::ThreadToolCleanupApplyParams;
-use codex_app_server_protocol::ThreadToolCleanupApplyResponse;
-use codex_app_server_protocol::ThreadToolCleanupReadParams;
-use codex_app_server_protocol::ThreadToolCleanupReadResponse;
-use codex_app_server_protocol::ThreadToolCleanupStatus;
 use codex_app_server_protocol::TokenUsageBreakdown;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
@@ -83,17 +78,11 @@ async fn prediction_forks_do_not_auto_compact(
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = responses::start_mock_server().await;
-    // Local full compaction keeps a window that fits verbatim, so the parent's older turn is
-    // large enough that compaction must summarize it.
-    let seed_reply = format!(
-        "Remember the original context. {}",
-        "Earlier verbose detail. ".repeat(10_000)
-    );
     let mock = responses::mount_sse_sequence(
         &server,
         vec![
             responses::sse(vec![
-                responses::ev_assistant_message("seed", &seed_reply),
+                responses::ev_assistant_message("seed", "Remember the original context."),
                 responses::ev_completed_with_tokens("seed", /*total_tokens*/ 70_000),
             ]),
             responses::sse(vec![
@@ -129,7 +118,7 @@ async fn prediction_forks_do_not_auto_compact(
     let codex_home = TempDir::new()?;
     compaction_config(&server.uri(), /*auto_compact_limit*/ 200_000)
         .with_root_config(&format!(
-            "model_post_turn_compact_threshold_percent = {post_turn_percent}\nmodel_context_window = 100000"
+            "model_post_turn_compact_threshold_percent = {post_turn_percent}"
         ))
         .write(codex_home.path())?;
     let skill_dir = codex_home.path().join("skills/cache-test");
@@ -229,15 +218,10 @@ async fn prediction_context_failure_does_not_compact(reset_context: bool) -> Res
     }
     let mock = responses::mount_sse_sequence(&server, mock_responses).await;
     let codex_home = TempDir::new()?;
-    let mut config = compaction_config(&server.uri(), /*auto_compact_limit*/ 200_000)
+    compaction_config(&server.uri(), /*auto_compact_limit*/ 200_000)
         .with_root_config("model_post_turn_compact_threshold_percent = 0")
-        .with_features(&BTreeMap::from([(Feature::TokenBudget, reset_context)]));
-    if reset_context {
-        // Context resets belong to the native compaction route; local compaction owns the
-        // window of a local-route model and resolves no token budget.
-        config = config.with_provider_config("capabilities = { remote_compaction = \"v2\" }");
-    }
-    config.write(codex_home.path())?;
+        .with_features(&BTreeMap::from([(Feature::TokenBudget, reset_context)]))
+        .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
@@ -315,31 +299,21 @@ async fn compaction_error_window_reaches_analytics(
     if let Some(window) = window {
         error["limit_window_minutes"] = json!(window);
     }
-    // Local full compaction only asks the model when an older turn must leave the window.
-    let mut model_responses = match route {
-        CompactionRoute::Local => vec![
-            responses::sse_response(responses::sse(vec![
-                responses::ev_assistant_message("old", &"FIRST_REPLY ".repeat(20_000)),
-                responses::ev_completed_with_tokens("old", /*total_tokens*/ 120),
-            ])),
+    let _requests = responses::mount_response_sequence(
+        &server,
+        vec![
             responses::sse_response(seed),
+            ResponseTemplate::new(status).set_body_json(json!({ "error": error })),
         ],
-        CompactionRoute::Remote => vec![responses::sse_response(seed)],
-    };
-    model_responses.push(ResponseTemplate::new(status).set_body_json(json!({ "error": error })));
-    let _requests = responses::mount_response_sequence(&server, model_responses).await;
+    )
+    .await;
     let codex_home = TempDir::new()?;
     let mut config = compaction_config(&server.uri(), /*auto_compact_limit*/ 1_000_000)
         .with_root_config(&format!("chatgpt_base_url = \"{}\"", server.uri()));
-    match route {
-        CompactionRoute::Local => {
-            config = config.with_root_config("model_context_window = 100000");
-        }
-        CompactionRoute::Remote => {
-            config = config
-                .with_provider_name("OpenAI")
-                .with_provider_config("requires_openai_auth = true");
-        }
+    if let CompactionRoute::Remote = route {
+        config = config
+            .with_provider_name("OpenAI")
+            .with_provider_config("requires_openai_auth = true");
     }
     config.write(codex_home.path())?;
     mount_analytics_capture(&server, codex_home.path()).await?;
@@ -351,9 +325,6 @@ async fn compaction_error_window_reaches_analytics(
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
     let thread_id = start_thread(&mut mcp).await?;
-    if let CompactionRoute::Local = route {
-        send_turn_and_wait(&mut mcp, &thread_id, "older history").await?;
-    }
     send_turn_and_wait(&mut mcp, &thread_id, "seed history").await?;
     let compact_id = mcp
         .send_thread_compact_start_request(ThreadCompactStartParams {
@@ -400,13 +371,8 @@ async fn auto_compaction_emits_started_and_completed_items(route: CompactionRout
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
-    // Local full compaction keeps a window that fits verbatim; a large older turn needs a summary.
-    let first_reply = match route {
-        CompactionRoute::Local => "FIRST_REPLY ".repeat(20_000),
-        CompactionRoute::Remote => "FIRST_REPLY".to_string(),
-    };
     let sse1 = responses::sse(vec![
-        responses::ev_assistant_message("m1", &first_reply),
+        responses::ev_assistant_message("m1", "FIRST_REPLY"),
         responses::ev_completed_with_tokens("r1", /*total_tokens*/ 70_000),
     ]);
     let sse2 = responses::sse(vec![
@@ -431,31 +397,10 @@ async fn auto_compaction_emits_started_and_completed_items(route: CompactionRout
         responses::ev_assistant_message("m4", "FINAL_REPLY"),
         responses::ev_completed_with_tokens("r4", /*total_tokens*/ 120),
     ]);
-    let requests = match route {
-        // Private summary requests are answered from their structured question.
-        CompactionRoute::Local => {
-            responses::mount_local_compaction_sequence(
-                &server,
-                vec![sse1, sse2, sse4],
-                responses::ev_completed_with_tokens("r3", /*total_tokens*/ 200),
-            )
-            .await
-        }
-        CompactionRoute::Remote => {
-            responses::mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await
-        }
-    };
+    let requests = responses::mount_sse_sequence(&server, vec![sse1, sse2, sse3, sse4]).await;
 
     let codex_home = TempDir::new()?;
-    let mut config = match route {
-        CompactionRoute::Local => {
-            compaction_config(&server.uri(), /*auto_compact_limit*/ 90_000)
-                .with_root_config("model_context_window = 100000")
-        }
-        CompactionRoute::Remote => {
-            compaction_config(&server.uri(), /*auto_compact_limit*/ 200_000)
-        }
-    };
+    let mut config = compaction_config(&server.uri(), /*auto_compact_limit*/ 200_000);
     if let CompactionRoute::Remote = route {
         config = config
             .with_provider_name("OpenAI")
@@ -527,37 +472,29 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
 
     let server = responses::start_mock_server().await;
     let seed = responses::sse(vec![
-        responses::ev_assistant_message("seed", &"FIRST_REPLY ".repeat(20_000)),
+        responses::ev_assistant_message("seed", "FIRST_REPLY"),
         responses::ev_completed_with_tokens("seed", /*total_tokens*/ 120),
     ]);
     let mut completed = responses::ev_completed_with_tokens("r1", /*total_tokens*/ 200);
     completed["response"]["usage_metadata"] = serde_json::json!({ "amount": "0.125" });
     completed["response"]["usage"]["extra"] = serde_json::json!({ "label": "example" });
     let expected_metadata = completed["response"]["usage"].clone();
-    let second_seed = responses::sse(vec![
-        responses::ev_assistant_message("second-seed", "New task direction received."),
-        responses::ev_completed_with_tokens("second-seed", /*total_tokens*/ 120),
+    let sse = responses::sse(vec![
+        responses::ev_assistant_message("m1", "MANUAL_COMPACT_SUMMARY"),
+        completed,
     ]);
     let followup = responses::sse(vec![
         responses::ev_assistant_message("followup", "FINAL_REPLY"),
         responses::ev_completed_with_tokens("followup", /*total_tokens*/ 120),
     ]);
-    // The older verbose turn is summarized; the summary request answers with `completed`.
-    responses::mount_local_compaction_sequence(
-        &server,
-        vec![seed, second_seed, followup],
-        completed,
-    )
-    .await;
+    let _responses = responses::mount_sse_sequence(&server, vec![seed, sse, followup]).await;
 
     let codex_home = TempDir::new()?;
     let initial_cwd = TempDir::new()?;
     let updated_cwd = TempDir::new()?;
     let extra_root = TempDir::new()?;
     let updated_roots = vec![updated_cwd.path().abs(), extra_root.path().abs()];
-    compaction_config(&server.uri(), /*auto_compact_limit*/ 1_000_000)
-        .with_root_config("model_context_window = 100000")
-        .write(codex_home.path())?;
+    compaction_config(&server.uri(), /*auto_compact_limit*/ 1_000_000).write(codex_home.path())?;
 
     // Top-level cwd restoration uses host-native paths, not a foreign executor's paths.
     let mut mcp = TestAppServer::builder()
@@ -592,12 +529,6 @@ async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -
         }),
     )
     .await??;
-    send_turn_and_wait(
-        &mut mcp,
-        &thread_id,
-        "Keep the current task; archive earlier verbose details.",
-    )
-    .await?;
     mcp.clear_message_buffer();
 
     let compact_id = mcp
@@ -707,120 +638,6 @@ async fn thread_compact_start_rejects_invalid_thread_id() -> Result<()> {
     assert!(error.error.message.contains("invalid thread id"));
 
     Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn thread_tool_cleanup_reports_marks_and_applies_them_on_request() -> Result<()> {
-    skip_if_no_network!(Ok(()));
-
-    let server = responses::start_mock_server().await;
-    let tools = responses::sse(vec![
-        responses::ev_function_call("call-a", &format!("a_{}", "evidence_".repeat(1000)), "{}"),
-        responses::ev_function_call("call-b", &format!("b_{}", "evidence_".repeat(1000)), "{}"),
-        responses::ev_completed_with_tokens("tools", /*total_tokens*/ 120),
-    ]);
-    let mut ordinary = vec![tools];
-    ordinary.extend((0..10).map(|index| {
-        responses::sse(vec![
-            responses::ev_assistant_message(&format!("reply-{index}"), "Continuing."),
-            responses::ev_completed_with_tokens(
-                &format!("reply-{index}"),
-                /*total_tokens*/ 120,
-            ),
-        ])
-    }));
-    let model = responses::mount_local_compaction_sequence(
-        &server,
-        ordinary,
-        responses::ev_completed_with_tokens("local-analysis", /*total_tokens*/ 50),
-    )
-    .await;
-
-    let codex_home = TempDir::new()?;
-    compaction_config(&server.uri(), /*auto_compact_limit*/ 90_000)
-        .with_root_config(
-            "model_context_window = 100000\n\
-             local_compaction.reclaim_percent = 50\n\
-             local_compaction.mark_after_tokens_percent = 1",
-        )
-        .write(codex_home.path())?;
-    let mut mcp = TestAppServer::builder()
-        .with_codex_home(codex_home.path())
-        .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
-        .await?;
-    let thread_id = start_thread(&mut mcp).await?;
-    let initial = read_tool_cleanup(&mut mcp, &thread_id).await?;
-    assert_eq!(
-        initial,
-        ThreadToolCleanupStatus {
-            marking: false,
-            pending_savings_tokens: 0,
-            ..initial
-        }
-    );
-    assert!(initial.required_savings_tokens > 0);
-
-    send_turn_and_wait(&mut mcp, &thread_id, "Collect evidence.").await?;
-    let mut status = read_tool_cleanup(&mut mcp, &thread_id).await?;
-    for _ in 0..5 {
-        if status.pending_savings_tokens > 0 {
-            break;
-        }
-        send_turn_and_wait(&mut mcp, &thread_id, "Continue.").await?;
-        // A status read consumes a finished batch without waiting for the next request.
-        for _ in 0..50 {
-            status = read_tool_cleanup(&mut mcp, &thread_id).await?;
-            if !status.marking {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-    }
-    assert!(status.pending_savings_tokens > 0);
-    assert!(status.required_savings_tokens > status.pending_savings_tokens);
-
-    let apply_id = mcp
-        .send_request(
-            "thread/toolCleanup/apply",
-            Some(serde_json::to_value(ThreadToolCleanupApplyParams {
-                thread_id: thread_id.clone(),
-            })?),
-        )
-        .await?;
-    let applied: ThreadToolCleanupApplyResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(apply_id)).await??;
-    assert_eq!(
-        applied,
-        ThreadToolCleanupApplyResponse {
-            released_tokens: status.pending_savings_tokens,
-            status: ThreadToolCleanupStatus {
-                pending_savings_tokens: 0,
-                ..status
-            },
-        }
-    );
-
-    send_turn_and_wait(&mut mcp, &thread_id, "Inspect cleaned evidence.").await?;
-    let last = model.requests().pop().expect("final request").body_json();
-    assert!(last.to_string().contains("Output omitted; original item:"));
-    Ok(())
-}
-
-async fn read_tool_cleanup(
-    mcp: &mut TestAppServer,
-    thread_id: &str,
-) -> Result<ThreadToolCleanupStatus> {
-    let request_id = mcp
-        .send_request(
-            "thread/toolCleanup/read",
-            Some(serde_json::to_value(ThreadToolCleanupReadParams {
-                thread_id: thread_id.to_string(),
-            })?),
-        )
-        .await?;
-    let ThreadToolCleanupReadResponse { status } =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
-    Ok(status)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -934,3 +751,6 @@ fn compaction_config(server_uri: &str, auto_compact_limit: i64) -> MockResponses
         ))
         .with_provider_config("supports_websockets = false")
 }
+
+#[path = "compaction_tool_cleanup.rs"]
+mod tool_cleanup;

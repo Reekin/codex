@@ -2596,10 +2596,7 @@ async fn external_agent_config_import_compacts_huge_session_before_first_follow_
         &server,
         vec![
             responses::sse(vec![
-                serde_json::json!({
-                    "type": "response.output_item.done",
-                    "item": {"type": "compaction", "encrypted_content": "COMPACTION_SUMMARY"},
-                }),
+                responses::ev_assistant_message("m1", "LOCAL_SUMMARY"),
                 responses::ev_completed_with_tokens("r1", /*total_tokens*/ 120),
             ]),
             responses::sse(vec![
@@ -2611,12 +2608,11 @@ async fn external_agent_config_import_compacts_huge_session_before_first_follow_
     .await;
 
     let codex_home = TempDir::new()?;
-    // The imported turn is the latest one, which local compaction keeps verbatim, so its
-    // oversized input cannot fit the 200-token limit there; native compaction summarizes it.
     MockResponsesConfig::new(&server.uri())
-        .with_root_config("model_auto_compact_token_limit = 200")
+        .with_root_config(
+            "compact_prompt = \"Summarize the conversation.\"\nmodel_auto_compact_token_limit = 200",
+        )
         .with_provider_config("supports_websockets = false")
-        .with_provider_config("capabilities = { remote_compaction = \"v2\" }")
         .write(codex_home.path())?;
 
     let project_root = codex_home.path().join("repo");
@@ -2743,10 +2739,10 @@ async fn external_agent_config_import_compacts_huge_session_before_first_follow_
     assert_eq!(requests.len(), 2);
     let first = requests[0].body_json().to_string();
     let second = requests[1].body_json().to_string();
-    assert_eq!(requests[0].inputs_of_type("compaction_trigger").len(), 1);
+    assert!(first.contains("Summarize the conversation."));
     assert!(!first.contains("follow up"));
     assert!(second.contains("follow up"));
-    assert!(second.contains("COMPACTION_SUMMARY"));
+    assert!(second.contains("LOCAL_SUMMARY"));
     Ok(())
 }
 

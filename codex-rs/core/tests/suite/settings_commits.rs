@@ -332,19 +332,18 @@ async fn compaction_checkpoints_settings_changed_during_its_model_request() -> R
             gate: Some(compaction_gate),
             body: responses::sse(vec![
                 responses::ev_response_created("compact"),
-                serde_json::json!({
-                    "type": "response.output_item.done",
-                    "item": {"type": "compaction", "encrypted_content": "compacted history"},
-                }),
+                responses::ev_assistant_message("summary", "compacted history"),
                 responses::ev_completed("compact"),
             ]),
         }],
     ])
     .await;
-    // Native compaction sends a model request even for this short history, so the SSE gate
-    // holds it in flight.
     let test = test_codex()
         .with_model(INITIAL_MODEL)
+        .with_config(|config| {
+            // Local compaction lets the SSE gate hold its response in flight.
+            config.model_provider.name = "OpenAI (test)".to_string();
+        })
         .build_with_streaming_server(&server)
         .await?;
     test.submit_text_turn("before compaction").await?;

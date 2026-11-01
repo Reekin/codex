@@ -296,6 +296,7 @@ async fn compacted_full_history_fork_applies_child_developer_instructions(
     case: &str,
 ) -> Result<()> {
     const COMPACT_SETUP_PROMPT: &str = "prepare the parent for compaction";
+    const COMPACT_PROMPT: &str = "summarize the compacted parent";
     const COMPACTED_SUMMARY: &str = "preserved compacted parent summary";
     const SPAWN_PROMPT: &str = "spawn the compacted-history worker";
     const CHILD_PROMPT: &str = "inspect the compacted parent history";
@@ -316,10 +317,7 @@ async fn compacted_full_history_fork_applies_child_developer_instructions(
             ]),
             responses::sse(vec![
                 responses::ev_response_created("parent-compaction"),
-                json!({
-                    "type": "response.output_item.done",
-                    "item": {"type": "compaction", "encrypted_content": COMPACTED_SUMMARY},
-                }),
+                responses::ev_assistant_message("parent-summary", COMPACTED_SUMMARY),
                 responses::ev_completed_with_tokens("parent-compaction", /*total_tokens*/ 10),
             ]),
             responses::sse(vec![
@@ -386,14 +384,11 @@ async fn compacted_full_history_fork_applies_child_developer_instructions(
     if case == "filtered" {
         feature_config.push_str("\npreserve_fork_prefix = false");
     }
-    // Native compaction compacts this short history; local compaction would keep it verbatim
-    // without a summary for the child to inherit.
     MockResponsesConfig::new(&server.uri())
         .with_model("gpt-5.4")
         .with_root_config(&format!(
-            "developer_instructions = {PARENT_INSTRUCTIONS:?}\nmodel_context_window = 100000\nmodel_auto_compact_token_limit = 90000"
+            "developer_instructions = {PARENT_INSTRUCTIONS:?}\nmodel_context_window = 100000\nmodel_auto_compact_token_limit = 90000\ncompact_prompt = {COMPACT_PROMPT:?}"
         ))
-        .with_provider_config("capabilities = { remote_compaction = \"v2\" }")
         .with_extra_config(&feature_config)
         .write(codex_home.path())?;
     write_models_cache(codex_home.path()).await?;
@@ -423,11 +418,8 @@ async fn compacted_full_history_fork_applies_child_developer_instructions(
 
     let compaction_requests = compaction_requests.requests();
     assert_eq!(compaction_requests.len(), 3);
-    assert_eq!(
-        compaction_requests[1]
-            .inputs_of_type("compaction_trigger")
-            .len(),
-        1,
+    assert!(
+        compaction_requests[1].body_contains_text(COMPACT_PROMPT),
         "the setup turn should perform actual mid-turn compaction"
     );
     assert!(

@@ -8,8 +8,6 @@ use codex_core::config::TokenBudgetConfig;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_login::CodexAuth;
-use codex_model_provider_info::ModelProviderCapabilities;
-use codex_model_provider_info::RemoteCompactionSupport;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::items::TurnItem;
@@ -79,15 +77,6 @@ fn model_token_budget_config() -> ModelTokenBudgetConfig {
         auto_compact_fallback_prompt: AUTO_COMPACT_FALLBACK_PROMPT.to_string(),
         auto_compact_fallback_buffer_tokens: 16_384,
     }
-}
-
-/// A token-budget window reset stands in for full compaction only on the native compaction
-/// route, so renamed test providers declare native compaction support.
-fn native_compaction() -> Option<ModelProviderCapabilities> {
-    Some(ModelProviderCapabilities {
-        remote_compaction: Some(RemoteCompactionSupport::V2),
-        ..ModelProviderCapabilities::default()
-    })
 }
 
 fn token_budget_contexts(request: &ResponsesRequest) -> Vec<String> {
@@ -1404,7 +1393,6 @@ async fn token_budget_mid_turn_auto_compaction_resets_before_active_follow_up(
     .await;
     let mut model_provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
     model_provider.name = "OpenAI (test)".into();
-    model_provider.capabilities = native_compaction();
     model_provider.base_url = Some(format!("{}/v1", server.uri()));
     model_provider.supports_websockets = false;
     let test = test_codex()
@@ -1543,7 +1531,6 @@ async fn token_budget_auto_compact_fallback_uses_buffer_until_new_context() -> R
     let test = test_codex()
         .with_config(|config| {
             config.model_provider.name = "OpenAI (test)".into();
-            config.model_provider.capabilities = native_compaction();
             config.model_context_window = Some(50_000);
             config.model_auto_compact_token_limit = Some(9_000);
             config.token_budget = Some(TokenBudgetConfig {
@@ -1637,7 +1624,6 @@ async fn token_budget_auto_compact_fallback_rolls_over_after_buffer() -> Result<
     let test = test_codex()
         .with_config(|config| {
             config.model_provider.name = "OpenAI (test)".into();
-            config.model_provider.capabilities = native_compaction();
             config.model_context_window = Some(50_000);
             config.model_auto_compact_token_limit = Some(9_000);
             config.token_budget = Some(TokenBudgetConfig {

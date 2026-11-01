@@ -479,14 +479,6 @@ async fn managed_shutdown_records_interrupted_turn(outcome: &str) -> Result<()> 
     ])
     .await;
     create_config_toml(home.path(), mock.uri(), "never")?;
-    if outcome == "compacting" {
-        // Native compaction keeps a model request in flight; local compaction of this short
-        // history sends none. The provider table ends the generated config.
-        let config_path = home.path().join("config.toml");
-        let mut config = std::fs::read_to_string(&config_path)?;
-        config.push_str("capabilities = { remote_compaction = \"v2\" }\n");
-        std::fs::write(config_path, config)?;
-    }
     let socket = home.path().join("control/server.sock");
     let mut server = spawn_server(home.path(), &socket)?;
     let mut client = connect_daemon_client(

@@ -338,6 +338,7 @@ async fn message_budget_sheds_arguments_without_losing_inventory_completeness(
     Ok(())
 }
 
+#[test_case(RemoteCompactionSupport::Unsupported, true; "local")]
 #[test_case(RemoteCompactionSupport::V2, true; "remote_v2")]
 #[test_case(RemoteCompactionSupport::V2, false; "remote_v2_disabled_after_capture")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

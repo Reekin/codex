@@ -55,15 +55,21 @@ impl ContextContributor for PrefixInstructions {
     }
 }
 
+#[test_case::test_case("local"; "local")]
+#[test_case::test_case("remote"; "remote")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn extension_window_prefix_survives_compaction() -> Result<()> {
+async fn extension_window_prefix_survives_compaction(compaction: &str) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let compact_response = json!({
-        "type": "response.output_item.done",
-        "item": {"type": "compaction", "encrypted_content": "PREFIX_CHECKPOINT"},
-    });
+    let compact_response = match compaction {
+        "local" => ev_assistant_message("summary", "The user is planning a release."),
+        "remote" => json!({
+            "type": "response.output_item.done",
+            "item": {"type": "compaction", "encrypted_content": "PREFIX_CHECKPOINT"},
+        }),
+        _ => unreachable!(),
+    };
     let mock = mount_sse_sequence(
         &server,
         vec![
@@ -92,6 +98,7 @@ async fn extension_window_prefix_survives_compaction() -> Result<()> {
     });
     let mut extensions = ExtensionRegistryBuilder::new();
     extensions.prompt_contributor(instructions.clone());
+    let local_compaction = compaction == "local";
     let test = test_codex()
         .with_extensions(Arc::new(extensions.build()))
         .with_model("gpt-6-astra")
@@ -99,6 +106,9 @@ async fn extension_window_prefix_survives_compaction() -> Result<()> {
         .with_config(move |config| {
             configure_scenario_catalog(config);
             config.workspace_roots = vec![config.cwd.clone()];
+            if local_compaction {
+                config.model_provider.name = "Local compaction test".to_string();
+            }
         })
         .build_with_auto_env(&server)
         .await?;
@@ -180,7 +190,7 @@ async fn extension_window_prefix_survives_compaction() -> Result<()> {
     }
 
     insta::assert_snapshot!(
-        "extension_window_prefix_remote",
+        format!("extension_window_prefix_{compaction}"),
         context_snapshot::format_context_snapshot(
             "An extension supplies A, stays unchanged, appends B, then supplies C during compaction. Only C starts the new window. Non-developer prefix fragments are never rendered.",
             &[

@@ -92,6 +92,7 @@ pub(super) async fn resume(
         .thread)
 }
 
+#[test_case::test_case("local")]
 #[test_case::test_case("remote")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn independent_history_resume_filters_rolled_back_sources(compaction: &str) -> Result<()> {

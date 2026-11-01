@@ -291,7 +291,6 @@ impl StepContext {
             token_budget: token_budget::resolve_token_budget(
                 turn.configured_token_budget.as_ref(),
                 turn.use_model_token_budget_defaults,
-                turn.provider.capabilities().remote_compaction,
                 settings.model_info.as_ref(),
             ),
             settings: Arc::new(settings),

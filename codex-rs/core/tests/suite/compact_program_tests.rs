@@ -1,6 +1,4 @@
 //! Model-switch compaction must retain the historical model/program pair across replay.
-//! The cases run on the native route, whose compaction request carries that pair; a first
-//! local full compaction of a fitting window sends no model request.
 
 use super::*;
 use codex_core::CodexThread;
@@ -28,6 +26,8 @@ enum History {
 enum Compaction {
     RemoteHash,
     RemoteDownshift,
+    LocalHash,
+    LocalDownshift,
     Fallback,
 }
 
@@ -64,16 +64,20 @@ async fn submit_pair(
 
 #[test_case(Compaction::RemoteHash, History::Live, Some(CyberAccessProgram::DaybreakBlue); "remote hash")]
 #[test_case(Compaction::RemoteDownshift, History::Live, Some(CyberAccessProgram::DaybreakBlue); "remote downshift")]
+#[test_case(Compaction::LocalHash, History::Live, Some(CyberAccessProgram::DaybreakBlue); "local hash")]
+#[test_case(Compaction::LocalDownshift, History::Live, Some(CyberAccessProgram::DaybreakBlue); "local downshift")]
 #[test_case(Compaction::RemoteHash, History::Resume, Some(CyberAccessProgram::DaybreakBlue); "resume")]
 #[test_case(Compaction::RemoteHash, History::Fork, Some(CyberAccessProgram::DaybreakBlue); "fork")]
 #[test_case(Compaction::RemoteHash, History::Rollback, Some(CyberAccessProgram::DaybreakBlue); "rollback")]
 #[test_case(Compaction::RemoteHash, History::IncompleteRollback, Some(CyberAccessProgram::DaybreakBlue); "incomplete rollback")]
 #[test_case(Compaction::RemoteHash, History::Resume, None; "missing program")]
 #[test_case(Compaction::RemoteHash, History::Resume, Some(CyberAccessProgram::Standard); "standard")]
-#[test_case(Compaction::RemoteHash, History::Live, None; "live missing program")]
+#[test_case(Compaction::LocalHash, History::Live, None; "local missing program")]
 #[test_case(Compaction::Fallback, History::Live, Some(CyberAccessProgram::DaybreakBlue); "fallback")]
-#[test_case(Compaction::RemoteHash, History::ApiKeyResume, Some(CyberAccessProgram::DaybreakBlue); "api key requires rollout features")]
+#[test_case(Compaction::LocalHash, History::ApiKeyResume, Some(CyberAccessProgram::DaybreakBlue); "api key requires rollout features")]
+#[test_case(Compaction::LocalHash, History::ApiKeyEnabledResume, Some(CyberAccessProgram::DaybreakBlue); "api key local resume")]
 #[test_case(Compaction::RemoteHash, History::ApiKeyEnabledResume, Some(CyberAccessProgram::DaybreakBlue); "api key remote resume")]
+#[test_case(Compaction::LocalHash, History::ApiKeyCustomProviderResume, Some(CyberAccessProgram::DaybreakBlue); "api key custom provider local resume")]
 #[test_case(Compaction::RemoteHash, History::ApiKeyCustomProviderResume, Some(CyberAccessProgram::DaybreakBlue); "api key custom provider remote resume")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_switch_program_pair(
@@ -86,7 +90,14 @@ async fn model_switch_program_pair(
     let previous_model = "gpt-5.5";
     let next_model = "gpt-5.6-cyber";
     let discarded_model = "discarded-model";
-    let downshift = matches!(compaction, Compaction::RemoteDownshift);
+    let downshift = matches!(
+        compaction,
+        Compaction::RemoteDownshift | Compaction::LocalDownshift
+    );
+    let local = matches!(
+        compaction,
+        Compaction::LocalHash | Compaction::LocalDownshift
+    );
     let mut old = model_info_with_context_window(previous_model, /*context_window*/ 273_000);
     let mut new = model_info_with_context_window(next_model, /*context_window*/ 125_000);
     if !downshift {
@@ -98,7 +109,11 @@ async fn model_switch_program_pair(
     let models = ModelsResponse {
         models: vec![old, new, discarded],
     };
-    let provider = openai_model_provider(&server);
+    let provider = if local {
+        local_compaction_provider(&server)
+    } else {
+        openai_model_provider(&server)
+    };
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_model(previous_model)
@@ -271,9 +286,13 @@ async fn model_switch_program_pair(
         );
         return Ok(());
     }
-    let summary = json!({"type": "response.output_item.done", "item": {
-        "type": "compaction", "encrypted_content": "SWITCH_SUMMARY"
-    }});
+    let summary = if local {
+        ev_assistant_message("summary", "summary of surviving history")
+    } else {
+        json!({"type": "response.output_item.done", "item": {
+            "type": "compaction", "encrypted_content": "SWITCH_SUMMARY"
+        }})
+    };
     let mut replies = Vec::new();
     if matches!(compaction, Compaction::Fallback) {
         replies.push(invalid_request_response("previous model rejected"));
@@ -324,7 +343,9 @@ async fn model_switch_program_pair(
     following.push(json!([next_model, new_program]));
     assert_eq!(&actual[1..], following.as_slice());
     assert_eq!(actual[0], json!([previous_model, old_program]));
-    assert_eq!(requests[0].inputs_of_type("compaction_trigger").len(), 1);
+    if !local {
+        assert_eq!(requests[0].inputs_of_type("compaction_trigger").len(), 1);
+    }
 
     // Even when the previous model summarizes, the replacement belongs to the current model.
     let rollout = fs::read_to_string(thread.rollout_path().expect("rollout"))?

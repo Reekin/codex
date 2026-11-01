@@ -287,8 +287,13 @@ pub(crate) fn configure(config: &mut Config) {
     config.model_provider.name = "Local compaction fixture".to_string();
 }
 
-/// Local-compaction budgets that keep the provider's own compaction route.
+/// Enables local context compaction with its test budgets, keeping the provider's own
+/// compaction route.
 pub(crate) fn configure_budgets(config: &mut Config) {
+    config
+        .features
+        .enable(codex_features::Feature::LocalContextCompaction)
+        .expect("enable local context compaction");
     let _ = config
         .features
         .disable(codex_features::Feature::EnableRequestCompression);

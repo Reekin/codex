@@ -441,11 +441,12 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
         .with_config(move |config| {
             config.experimental_thread_store = ThreadStoreConfig::Local;
 
-            // Native compaction rebuilds retained user messages around its checkpoint.
+            // Exercise local compaction's rebuilt user messages, not an opaque checkpoint.
+            config.model_provider.name = "Local compaction test provider".to_owned();
             config
                 .features
                 .disable(Feature::TokenBudget)
-                .expect("use native compaction");
+                .expect("use local compaction");
             config
                 .features
                 .enable(Feature::DefaultModeRequestUserInput)
@@ -486,10 +487,7 @@ async fn retained_instructions_keep_identity_across_compaction_and_resume(
         .collect::<Vec<_>>();
     responses.push(sse(vec![ev_completed("done")]));
     responses.push(sse(vec![
-        json!({
-            "type": "response.output_item.done",
-            "item": {"type": "compaction", "encrypted_content": "INSPECTION_CHECKPOINT"},
-        }),
+        ev_assistant_message("summary-0", "Compacted inspection context."),
         ev_completed("compact-0"),
     ]));
     let response_mock = mount_sse_sequence(&server, responses).await;
@@ -680,7 +678,8 @@ async fn legacy_checkpoint_recovers_root_excerpt_before_discarding_backup(
             config
                 .features
                 .disable(Feature::TokenBudget)
-                .expect("use native compaction");
+                .expect("use local compaction");
+            config.model_provider.name = "Local compaction test provider".to_owned();
         })
         .build_with_auto_env(&server)
         .await?;
@@ -689,17 +688,11 @@ async fn legacy_checkpoint_recovers_root_excerpt_before_discarding_backup(
         vec![
             sse(vec![ev_completed("initial-turn")]),
             sse(vec![
-                json!({
-                    "type": "response.output_item.done",
-                    "item": {"type": "compaction", "encrypted_content": "CHECKPOINT"},
-                }),
+                ev_assistant_message("summary", "Compacted context."),
                 ev_completed("compact"),
             ]),
             sse(vec![
-                json!({
-                    "type": "response.output_item.done",
-                    "item": {"type": "compaction", "encrypted_content": "CHECKPOINT_AGAIN"},
-                }),
+                ev_assistant_message("summary-again", "Compacted context."),
                 ev_completed("compact-again"),
             ]),
         ],
@@ -807,7 +800,8 @@ async fn standalone_fork_retains_inherited_user_instructions(
             config
                 .features
                 .disable(Feature::TokenBudget)
-                .expect("use native compaction for worker checkpoint");
+                .expect("use local compaction for worker checkpoint");
+            config.model_provider.name = "Local compaction test provider".to_owned();
             for feature in [
                 Feature::GuardianApproval,
                 Feature::Collab,
@@ -863,8 +857,8 @@ async fn standalone_fork_retains_inherited_user_instructions(
     test.codex.shutdown_and_wait().await?;
     let local_instruction = if compacted {
         // Leave less than Guardian's 900-token budget for the inherited source
-        // within native compaction's 64K retained-message budget.
-        format!("Ask me before publishing. {}", "x".repeat(254_000))
+        // within local compaction's 20K user-message budget.
+        format!("Ask me before publishing. {}", "x".repeat(78_000))
     } else {
         "Ask me before publishing.".to_owned()
     };
@@ -877,14 +871,11 @@ async fn standalone_fork_retains_inherited_user_instructions(
         .await?;
     wait_for_event(&worker, |event| matches!(event, EventMsg::TurnComplete(_))).await;
     if compacted {
-        // Native compaction keeps the inherited source message in replacement history.
+        // Local compaction keeps the inherited source message in replacement history.
         mount_sse_sequence(
             &server,
             vec![sse(vec![
-                json!({
-                    "type": "response.output_item.done",
-                    "item": {"type": "compaction", "encrypted_content": "WORKER_CHECKPOINT"},
-                }),
+                ev_assistant_message("worker-summary", "Inspected the project."),
                 ev_completed("worker-compacted"),
             ])],
         )
