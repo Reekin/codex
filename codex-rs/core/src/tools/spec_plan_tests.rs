@@ -635,6 +635,7 @@ async fn reviewer_tool_policy_admits_exec_argv_when_enabled() {
         &turn.extension_data,
         /*tool_suggest_candidates*/ None,
         session.dynamic_tools().await.as_ref(),
+        /*recall_available*/ false,
     )
     .expect("build internal Guardian tool router");
 
