@@ -6,6 +6,7 @@ use codex_extension_api::MessageLifecycleContributor;
 use codex_extension_api::MessageLifecycleInput;
 use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::InterAgentCommunication;
 use serde::Deserialize;
 use serde::Serialize;
@@ -44,6 +45,7 @@ impl AgentCommunicationKind {
 pub(crate) struct AgentCommunicationContext {
     kind: AgentCommunicationKind,
     pub(crate) sender_thread_id: ThreadId,
+    resumes_recipient: bool,
 }
 
 impl AgentCommunicationContext {
@@ -51,8 +53,33 @@ impl AgentCommunicationContext {
         Self {
             kind,
             sender_thread_id,
+            resumes_recipient: false,
         }
     }
+
+    /// A child's terminal result. With subagent continuation enabled, a completion or error
+    /// may resume a parent whose turn has ended.
+    pub(crate) fn subagent_result(
+        sender_thread_id: ThreadId,
+        status: &AgentStatus,
+        subagent_continuation: bool,
+    ) -> Self {
+        Self {
+            kind: AgentCommunicationKind::Result,
+            sender_thread_id,
+            resumes_recipient: subagent_continuation && status_resumes_parent(status),
+        }
+    }
+
+    pub(crate) fn resumes_recipient(&self) -> bool {
+        self.resumes_recipient
+    }
+}
+
+/// Only a child's completion or error continues its parent; lifecycle notices such as
+/// shutdown or a missing agent are delivered without starting a parent turn.
+pub(crate) fn status_resumes_parent(status: &AgentStatus) -> bool {
+    matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_))
 }
 
 pub(crate) fn send_log_content(
@@ -110,6 +137,9 @@ pub struct PendingAgentMessage {
     communication: InterAgentCommunication,
     #[serde(skip)]
     pub(crate) delivery: Option<MessageDelivery>,
+    /// A child's terminal result, which may resume its parent after a natural turn end.
+    #[serde(skip)]
+    pub(crate) subagent_result: bool,
 }
 
 impl From<InterAgentCommunication> for PendingAgentMessage {
@@ -139,6 +169,7 @@ impl PendingAgentMessage {
         Self {
             communication,
             delivery,
+            subagent_result: false,
         }
     }
 }

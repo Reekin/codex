@@ -1362,6 +1362,9 @@
             "stream_retry_timeout": {
               "type": "boolean"
             },
+            "subagent_continuation": {
+              "type": "boolean"
+            },
             "subagent_default_context_limits": {
               "type": "boolean"
             },
@@ -8062,6 +8065,9 @@
           "type": "boolean"
         },
         "stream_retry_timeout": {
+          "type": "boolean"
+        },
+        "subagent_continuation": {
           "type": "boolean"
         },
         "subagent_default_context_limits": {

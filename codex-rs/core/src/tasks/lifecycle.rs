@@ -72,7 +72,10 @@ impl Session {
                 cause
             }
         };
-        if self.input_queue.has_trigger_turn_mailbox_items().await {
+        // Pending work that is about to start another turn keeps the thread busy.
+        if self.input_queue.has_trigger_turn_mailbox_items().await
+            || self.should_continue_for_subagent_results().await
+        {
             return;
         }
 

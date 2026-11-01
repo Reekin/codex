@@ -7,7 +7,6 @@ use super::LocalAgentControl;
 use crate::TurnStartOptions;
 use crate::agent::api::AgentTurnOutcome;
 use crate::agent_communication::AgentCommunicationContext;
-use crate::agent_communication::AgentCommunicationKind;
 use crate::session_prefix::format_guardian_interruption_message;
 use crate::session_prefix::format_inter_agent_completion_message;
 use codex_protocol::AgentPath;
@@ -15,6 +14,7 @@ use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::SubAgentSource;
@@ -29,6 +29,13 @@ impl LocalAgentControl {
         outcome: AgentTurnOutcome,
         trace: &ThreadTraceContext,
     ) {
+        match outcome.multi_agent_version {
+            MultiAgentVersion::V2 => {}
+            MultiAgentVersion::V1 => {
+                return self.notify_legacy_parent_of_terminal_turn(outcome).await;
+            }
+            MultiAgentVersion::Disabled => return,
+        }
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             agent_path: Some(child_agent_path),
@@ -116,8 +123,11 @@ impl LocalAgentControl {
             message,
             /*trigger_turn*/ false,
         );
-        let context =
-            AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id);
+        let context = AgentCommunicationContext::subagent_result(
+            outcome.thread_id,
+            &status,
+            outcome.subagent_continuation,
+        );
         let delivery = self
             .send_inter_agent_communication(
                 parent_thread_id,
@@ -150,6 +160,44 @@ impl LocalAgentControl {
                     status: &status,
                 },
             );
+        }
+    }
+
+    /// Queues a MAv1 child's terminal status for its loaded parent, including follow-up turns.
+    /// Sessions report MAv1 turns here only with subagent continuation enabled.
+    async fn notify_legacy_parent_of_terminal_turn(&self, outcome: AgentTurnOutcome) {
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            agent_path,
+            ..
+        }) = &outcome.source
+        else {
+            return;
+        };
+        let Ok(state) = self.runtime.upgrade() else {
+            return;
+        };
+        let Ok(parent_thread) = state.get_thread(*parent_thread_id).await else {
+            debug!("failed to notify unloaded parent thread {parent_thread_id}");
+            return;
+        };
+        let child_reference = agent_path
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| outcome.thread_id.to_string());
+        let resumes_parent = crate::agent_communication::status_resumes_parent(&outcome.status);
+        let notification =
+            super::legacy_subagent_notification(&parent_thread, &child_reference, outcome.status)
+                .await;
+        if resumes_parent {
+            parent_thread
+                .deliver_subagent_notification(notification)
+                .await;
+        } else {
+            parent_thread
+                .session
+                .inject_no_new_turn(vec![notification], /*current_turn_context*/ None)
+                .await;
         }
     }
 }

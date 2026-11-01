@@ -610,7 +610,10 @@ async fn start_listener(
                     if !unloading_state.should_unload_now() {
                         continue;
                     }
-                    if matches!(conversation.agent_status().await, AgentStatus::Running) {
+                    // A running child or unconsumed child result still needs its parent loaded.
+                    if matches!(conversation.agent_status().await, AgentStatus::Running)
+                        || conversation.has_pending_subagent_work().await
+                    {
                         unloading_state.note_thread_activity_observed();
                         continue;
                     }

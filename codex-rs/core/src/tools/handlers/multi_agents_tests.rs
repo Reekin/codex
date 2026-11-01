@@ -92,6 +92,9 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+#[path = "multi_agents_wait_tests.rs"]
+mod wait_steer_tests;
+
 fn set_agent_control(
     session: &mut crate::session::session::Session,
     control: crate::agent::LocalAgentControl,

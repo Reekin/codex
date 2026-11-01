@@ -2618,12 +2618,19 @@ impl Session {
     }
 
     /// Forwards terminal turn events from spawned MultiAgentV2 children to their direct parent.
+    /// With subagent continuation, MultiAgentV1 children report every terminal turn as well.
     async fn maybe_notify_parent_of_terminal_turn(
         &self,
         turn_context: &TurnContext,
         msg: &EventMsg,
     ) {
-        if turn_context.multi_agent_version != MultiAgentVersion::V2 {
+        let subagent_continuation = self.enabled(Feature::SubagentContinuation);
+        let reports_terminal_turns = match turn_context.multi_agent_version {
+            MultiAgentVersion::V2 => true,
+            MultiAgentVersion::V1 => subagent_continuation,
+            MultiAgentVersion::Disabled => false,
+        };
+        if !reports_terminal_turns {
             return;
         }
 
@@ -2631,13 +2638,15 @@ impl Session {
             return;
         }
 
-        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            agent_path: Some(_),
-            ..
-        }) = &turn_context.session_source
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_path, .. }) =
+            &turn_context.session_source
         else {
             return;
         };
+        // MAv2 results address the parent by agent path.
+        if turn_context.multi_agent_version == MultiAgentVersion::V2 && agent_path.is_none() {
+            return;
+        }
 
         let mut error_info = None;
         let status = match turn_context.terminal_error.lock().await.take() {
@@ -2675,6 +2684,8 @@ impl Session {
                     thread_id: self.thread_id,
                     turn_id: turn_context.sub_id.clone(),
                     source: turn_context.session_source.clone(),
+                    multi_agent_version: turn_context.multi_agent_version,
+                    subagent_continuation,
                     parent_turn_id: turn_context.turn_metadata_state.parent_turn_id(),
                     initiating_agent_path: turn_context
                         .turn_metadata_state
