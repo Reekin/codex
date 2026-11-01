@@ -576,9 +576,13 @@ pub(crate) async fn run_turn(
 
             // Validated tool marks are installed before the next ordinary request once they
             // release enough; prior tool results and accepted input are already recorded.
-            crate::local_compaction::maybe_clean_history(&sess, &step_context)
-                .or_cancel(&cancellation_token)
-                .await??;
+            // Local compaction futures are boxed to keep them out of the turn task's stack frame.
+            Box::pin(crate::local_compaction::maybe_clean_history(
+                &sess,
+                &step_context,
+            ))
+            .or_cancel(&cancellation_token)
+            .await??;
             // Cleanup installed here or by an out-of-turn request is announced before sampling.
             if run_pending_session_start_hooks(&sess, &turn_context).await {
                 return Err(CodexErr::TurnAborted);
@@ -646,7 +650,7 @@ pub(crate) async fn run_turn(
                 // batch extends that prefix. Compaction is about to replace the history instead.
                 if !token_limit_reached
                     && let Err(error) =
-                        crate::local_compaction::start_marking(&sess, &step_context).await
+                        Box::pin(crate::local_compaction::start_marking(&sess, &step_context)).await
                 {
                     warn!(%error, "cannot start background local marking");
                 }
