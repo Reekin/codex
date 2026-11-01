@@ -5,6 +5,7 @@ use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskResult;
 use futures::FutureExt;
+use pretty_assertions::assert_eq;
 use test_case::test_case;
 
 /// Keeps the parent turn active so steering lands in its turn-local input.
