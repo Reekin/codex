@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::AgentIdentity;
 use crate::session::InputQueueActivity;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
@@ -108,7 +109,14 @@ impl Handler {
                 },
             )],
         );
-        let result = WaitAgentResult::from_outcome(outcome, requested_timeout_ms, timeout_ms);
+        let current_agent_name = AgentIdentity::from_session_source(&turn.session_source)
+            .current_agent_name(session.thread_id);
+        let result = WaitAgentResult::from_outcome(
+            outcome,
+            &current_agent_name,
+            requested_timeout_ms,
+            timeout_ms,
+        );
 
         session
             .emit_turn_item_completed(
@@ -153,19 +161,26 @@ pub(crate) struct WaitAgentResult {
 impl WaitAgentResult {
     fn from_outcome(
         outcome: WaitOutcome,
+        current_agent_name: &str,
         requested_timeout_ms: Option<i64>,
         timeout_ms: i64,
     ) -> Self {
         let message = match outcome {
-            WaitOutcome::MailboxActivity => "Wait completed.",
-            WaitOutcome::Steered => "Wait interrupted by new input.",
-            WaitOutcome::TimedOut => "Wait timed out.",
+            WaitOutcome::MailboxActivity => format!(
+                "Wait completed for your mailbox as `{current_agent_name}`. This wait only observed an update delivered to your own mailbox; it did not wait for another agent's mailbox."
+            ),
+            WaitOutcome::Steered => format!(
+                "Wait for your mailbox as `{current_agent_name}` was interrupted by new input."
+            ),
+            WaitOutcome::TimedOut => format!(
+                "Wait timed out for your mailbox as `{current_agent_name}`. This wait only observes updates delivered to your own mailbox; it does not wait for `/root`'s child tasks unless you are `/root`."
+            ),
         };
         let message = match requested_timeout_ms {
             Some(requested_timeout_ms) if requested_timeout_ms < timeout_ms => format!(
                 "{message}\n\nRequested timeout of {requested_timeout_ms}ms was clamped to the minimum of {timeout_ms}ms."
             ),
-            Some(_) | None => message.to_string(),
+            Some(_) | None => message,
         };
         Self {
             message,

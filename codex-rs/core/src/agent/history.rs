@@ -1,5 +1,6 @@
 //! Loads stored agent context and prepares the history a child inherits when it forks.
 
+use crate::agent::AgentIdentity;
 use crate::agent::types::SpawnAgentOptions;
 use crate::config::Config;
 use crate::context::BaseInstructionsFragment;
@@ -7,6 +8,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::CurrentTimeReminder;
 use crate::context::CurrentTimeUnavailable;
 use crate::context::DeveloperInstructions;
+use crate::context::ForkedHistoryBoundary;
 use crate::context::GuardianApprovedAction;
 use crate::context::ManagedDeveloperInstructions;
 use crate::context::ModelInstructions;
@@ -126,6 +128,57 @@ fn retain_forked_developer_message(item: &mut ResponseItem, usage_hint_texts: &[
                 .any(|usage_hint_text| usage_hint_text == text))
     });
     !content.is_empty() && set_annotated_content(item, content).is_some()
+}
+
+/// Wraps inherited parent history so the child can tell it apart from its own assignment.
+///
+/// The opening boundary must survive the child's history reconstruction: a replacement-history
+/// checkpoint keeps only its replacement items, and a legacy checkpoint keeps the item recorded
+/// directly before it.
+fn insert_fork_history_boundaries(
+    forked_rollout_items: &mut Vec<RolloutItem>,
+    identity: &AgentIdentity,
+    preserve_context_baselines: bool,
+) {
+    let opening_boundary = || -> ResponseItemEnvelope {
+        ContextualUserFragment::into(ForkedHistoryBoundary::start(identity.clone())).into()
+    };
+    let mut opened = false;
+    if preserve_context_baselines {
+        if let Some(replacement_history) =
+            forked_rollout_items
+                .iter_mut()
+                .rev()
+                .find_map(|item| match item {
+                    RolloutItem::Compacted(compacted) => compacted.replacement_history.as_mut(),
+                    _ => None,
+                })
+        {
+            replacement_history.insert(0, opening_boundary());
+            opened = true;
+        }
+    } else if let Some(insertion_index) = forked_rollout_items.iter().rposition(|item| {
+        matches!(item, RolloutItem::Compacted(compacted) if compacted.replacement_history.is_none())
+    }) {
+        forked_rollout_items.insert(
+            insertion_index,
+            RolloutItem::ResponseItem(opening_boundary()),
+        );
+        opened = true;
+    }
+    if !opened {
+        let insertion_index = forked_rollout_items
+            .iter()
+            .position(|item| matches!(item, RolloutItem::ResponseItem(_)))
+            .unwrap_or(forked_rollout_items.len());
+        forked_rollout_items.insert(
+            insertion_index,
+            RolloutItem::ResponseItem(opening_boundary()),
+        );
+    }
+    forked_rollout_items.push(RolloutItem::ResponseItem(
+        ContextualUserFragment::into(ForkedHistoryBoundary::end(identity.clone())).into(),
+    ));
 }
 
 pub(super) async fn load_agent_model_context(
@@ -431,6 +484,11 @@ pub(super) async fn prepare_forked_history(
             | RolloutItem::SecurityRiskScore(_) => false,
         }
     });
+    insert_fork_history_boundaries(
+        &mut forked_rollout_items,
+        &AgentIdentity::from_session_source(session_source),
+        preserve_context_baselines,
+    );
     if preserve_fork_prefix {
         forked_rollout_items.push(RolloutItem::ResponseItem(
             ContextualUserFragment::into(MultiAgentUsageHint::new(

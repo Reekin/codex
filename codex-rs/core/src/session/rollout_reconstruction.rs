@@ -1,4 +1,5 @@
 use super::*;
+use crate::context::ForkedHistoryBoundary;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
 use codex_history::ResponseItemEnvelope;
@@ -536,8 +537,27 @@ impl ContextManager {
                         // we can get rid of this second loop entirely and just build `history` directly in the first loop.
                         let user_messages =
                             compact::collect_annotated_user_messages(history.annotated_items());
+                        // A forked child's opening boundary is recorded directly before the
+                        // legacy checkpoint; keep it ahead of the rebuilt inherited messages.
+                        let initial_context = history
+                            .annotated_items()
+                            .last()
+                            .filter(|item| {
+                                matches!(
+                                    &item.item,
+                                    ResponseItem::Message {
+                                        internal_chat_message_metadata_passthrough: Some(metadata),
+                                        ..
+                                    } if metadata.content_item_kinds.as_ref().is_some_and(|kinds| {
+                                        kinds.iter().any(ForkedHistoryBoundary::matches_content_kind)
+                                    })
+                                )
+                            })
+                            .cloned()
+                            .into_iter()
+                            .collect();
                         let rebuilt = compact::build_compacted_history(
-                            Vec::new(),
+                            initial_context,
                             &user_messages,
                             &compacted.message,
                         );
