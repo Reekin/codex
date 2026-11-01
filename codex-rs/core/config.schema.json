@@ -1350,6 +1350,9 @@
             "subagent_default_context_limits": {
               "type": "boolean"
             },
+            "subagent_identity": {
+              "type": "boolean"
+            },
             "subagent_thread_environments": {
               "type": "boolean"
             },
@@ -7997,6 +8000,9 @@
           "type": "boolean"
         },
         "subagent_default_context_limits": {
+          "type": "boolean"
+        },
+        "subagent_identity": {
           "type": "boolean"
         },
         "subagent_thread_environments": {
