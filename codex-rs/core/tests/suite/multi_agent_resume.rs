@@ -1,8 +1,6 @@
 use anyhow::Result;
 use codex_analytics::AnalyticsEventsClient;
-use codex_core::CodexThread;
 use codex_core::TurnInputRequest;
-use codex_core::TurnInputSubmission;
 use codex_core::config::AgentRoleConfig;
 use codex_features::Feature;
 use codex_login::CodexAuth;
@@ -19,6 +17,7 @@ use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
@@ -104,72 +103,6 @@ fn request_has_input_type(request: &wiremock::Request, input_type: &str) -> bool
                 .iter()
                 .any(|item| item.get("type").and_then(Value::as_str) == Some(input_type))
         })
-}
-
-/// Submits a root prompt, waits for that turn, then lets child-result continuations settle.
-async fn submit_durable_root_turn(thread: &CodexThread, prompt: &str) -> Result<String> {
-    let submission = thread
-        .start_or_steer_turn(
-            TurnInputRequest::user_input(vec![UserInput::Text {
-                text: prompt.to_string(),
-                text_elements: Vec::new(),
-            }])
-            .with_thread_settings(ThreadSettingsOverrides {
-                permission_profile: Some(PermissionProfile::Disabled),
-                ..Default::default()
-            }),
-        )
-        .await?;
-    let turn_id = match submission {
-        TurnInputSubmission::Started { turn_id, .. }
-        | TurnInputSubmission::Steered { turn_id, .. } => turn_id,
-        TurnInputSubmission::NotSubmitted { reason } => anyhow::bail!("turn rejected: {reason:?}"),
-    };
-    wait_for_event(
-        thread,
-        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == turn_id),
-    )
-    .await;
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while thread.has_pending_subagent_work().await {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await?;
-    Ok(turn_id)
-}
-
-/// Acknowledges root continuations that process child results between fixture turns.
-async fn mount_root_result_acknowledgement(
-    server: &wiremock::MockServer,
-    root_thread_id: codex_protocol::ThreadId,
-) {
-    Mock::given(method("POST"))
-        .and(path("/v1/responses"))
-        .and(move |request: &wiremock::Request| {
-            decoded_body(request)
-                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
-                .is_some_and(|body| {
-                    body["client_metadata"]["thread_id"] == json!(root_thread_id)
-                        && body["input"].as_array().is_some_and(|items| {
-                            items.iter().any(|item| {
-                                item["type"] == "agent_message"
-                                    && item["recipient"] == "/root"
-                                    && item["content"]
-                                        .to_string()
-                                        .contains("Message Type: FINAL_ANSWER")
-                            })
-                        })
-                })
-        })
-        .respond_with(sse_response(sse(vec![
-            ev_response_created("resp-result-consumed"),
-            ev_assistant_message("msg-result-consumed", "child result processed"),
-            ev_completed("resp-result-consumed"),
-        ])))
-        .with_priority(/*p*/ 10)
-        .mount(server)
-        .await;
 }
 
 async fn mount_root_collaboration_call(
@@ -347,8 +280,23 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     let initial = initial_builder.build_with_auto_env(&server).await?;
     let root_thread_id = initial.session_configured.thread_id;
     let root_session_id = initial.session_configured.session_id;
-    mount_root_result_acknowledgement(&server, root_thread_id).await;
-    submit_durable_root_turn(&initial.codex, INITIAL_PROMPT).await?;
+    initial
+        .codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: INITIAL_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                permission_profile: Some(PermissionProfile::Disabled),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    wait_for_event(&initial.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let worker_thread_id = loop {
@@ -433,7 +381,7 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         ]),
     )
     .await;
-    submit_durable_root_turn(&initial.codex, SIBLING_PROMPT).await?;
+    initial.submit_turn(SIBLING_PROMPT).await?;
 
     let grandchild = nested_mock.last_request().expect("grandchild").body_json();
     let nested_id = &grandchild["client_metadata"]["thread_id"];
@@ -578,11 +526,10 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
         ]),
     )
     .await;
-    let compact_turn_id = resumed.codex.submit(Op::Compact).await?;
-    wait_for_event(
-        &resumed.codex,
-        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == compact_turn_id),
-    )
+    resumed.codex.submit(Op::Compact).await?;
+    wait_for_event(&resumed.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
     .await;
 
     let redirected_server = start_mock_server().await;
@@ -614,7 +561,7 @@ openai_base_url = "{redirected_base_url}"
         ]),
     )
     .await;
-    submit_durable_root_turn(&resumed.codex, QUEUE_PROMPT).await?;
+    resumed.submit_turn(QUEUE_PROMPT).await?;
 
     let reloaded_worker = resumed
         .thread_manager
@@ -626,18 +573,11 @@ openai_base_url = "{redirected_base_url}"
         resumed.codex.config().await.model_provider,
         "cold reload must preserve the parent's complete model provider",
     );
-    submit_durable_root_turn(&resumed.codex, FOLLOWUP_PROMPT).await?;
+    resumed.submit_turn(FOLLOWUP_PROMPT).await?;
     wait_for_event(reloaded_worker.as_ref(), |event| {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-    // The worker's follow-up result continues the root; let it settle before the next stage.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while resumed.codex.has_pending_subagent_work().await {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await?;
     tokio::time::timeout(Duration::from_secs(10), analytics_client.flush()).await?;
     let mut worker_initializations = Vec::new();
     for request in server.received_requests().await.unwrap_or_default() {
@@ -683,9 +623,8 @@ openai_base_url = "{redirected_base_url}"
             && !request.body_contains_text(SUBAGENT_DEVELOPER_INSTRUCTIONS)
     }));
     // The worker is loaded again, while its alphabetically earlier sibling remains unloaded.
-    mount_sse_once_match(
+    mount_sse_once(
         &server,
-        |request: &wiremock::Request| request_has_input_type(request, "compaction_trigger"),
         sse(vec![
             json!({
                 "type": "response.output_item.done",
@@ -695,19 +634,14 @@ openai_base_url = "{redirected_base_url}"
         ]),
     )
     .await;
-    let compact_turn_id = resumed.codex.submit(Op::Compact).await?;
-    wait_for_event(
-        &resumed.codex,
-        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == compact_turn_id),
-    )
+    resumed.codex.submit(Op::Compact).await?;
+    wait_for_event(&resumed.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
     .await;
-    let roster_request = mount_sse_once_match(
-        &server,
-        |request: &wiremock::Request| body_contains(request, "inspect the agent roster"),
-        sse(vec![ev_completed("resp-loaded-first-roster")]),
-    )
-    .await;
-    submit_durable_root_turn(&resumed.codex, "inspect the agent roster").await?;
+    let roster_request =
+        mount_sse_once(&server, sse(vec![ev_completed("resp-loaded-first-roster")])).await;
+    resumed.submit_turn("inspect the agent roster").await?;
     assert!(roster_request.single_request().body_contains_text(
         r#"<subagents>
     <agent name="/root/worker" />
@@ -821,7 +755,7 @@ openai_base_url = "{redirected_base_url}"
         &interrupt_args,
     )
     .await;
-    submit_durable_root_turn(&resumed.codex, INTERRUPT_PROMPT).await?;
+    resumed.submit_turn(INTERRUPT_PROMPT).await?;
     assert!(
         resumed
             .thread_manager
@@ -856,7 +790,7 @@ openai_base_url = "{redirected_base_url}"
         ]),
     )
     .await;
-    submit_durable_root_turn(&resumed.codex, SIBLING_FOLLOWUP_PROMPT).await?;
+    resumed.submit_turn(SIBLING_FOLLOWUP_PROMPT).await?;
 
     let surviving_sibling = resumed
         .thread_manager

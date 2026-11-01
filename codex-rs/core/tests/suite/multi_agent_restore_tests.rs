@@ -5,10 +5,8 @@ use super::ROLE_NAME;
 use super::body_contains;
 use super::configure_multi_agent_v2_with_role;
 use super::mount_root_collaboration_call;
-use super::mount_root_result_acknowledgement;
 use super::request_has_input_type;
 use super::request_has_model;
-use super::submit_durable_root_turn;
 use anyhow::Context;
 use anyhow::Result;
 use codex_features::Feature;
@@ -191,7 +189,6 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
         .build_with_auto_env(&server)
         .await?;
     let root = initial.session_configured.thread_id;
-    mount_root_result_acknowledgement(&server, root).await;
 
     for (name, prompt, call_id, task) in [
         ("alpha", "start alpha", "spawn-alpha", "alpha child task"),
@@ -217,7 +214,7 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
             sse(vec![ev_completed(&format!("{call_id}-child"))]),
         )
         .await;
-        submit_durable_root_turn(&initial.codex, prompt).await?;
+        initial.submit_turn(prompt).await?;
     }
 
     let subtree = initial
@@ -323,7 +320,7 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
         sse(vec![ev_completed("restored-child-followup")]),
     )
     .await;
-    submit_durable_root_turn(&resumed.codex, "continue restored child").await?;
+    resumed.submit_turn("continue restored child").await?;
     let child = resumed.thread_manager.get_thread(first).await?;
     wait_for_event(child.as_ref(), |event| {
         matches!(event, EventMsg::TurnComplete(_))

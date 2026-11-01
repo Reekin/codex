@@ -19,6 +19,7 @@ use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::skip_if_no_network;
 use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::start_streaming_sse_server;
+use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
@@ -121,6 +122,56 @@ async fn assert_no_turn_start(codex: &codex_core::CodexThread, reason: &str) {
     );
 }
 
+/// Builds a parent with collaboration in the selected multi-agent version.
+async fn build_parent(
+    server: &wiremock::MockServer,
+    version: Version,
+    subagent_continuation: bool,
+) -> Result<TestCodex> {
+    test_codex()
+        .with_model("koffing")
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("enable collaboration");
+            match version {
+                Version::V1 => config.features.disable(Feature::MultiAgentV2),
+                Version::V2 => config.features.enable(Feature::MultiAgentV2),
+            }
+            .expect("select multi-agent version");
+            if subagent_continuation {
+                config
+                    .features
+                    .enable(Feature::SubagentContinuation)
+                    .expect("enable subagent continuation");
+            }
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.stream_max_retries = Some(0);
+            config.model_provider.supports_websockets = false;
+        })
+        .build_with_auto_env(server)
+        .await
+}
+
+fn spawn_child_call(version: Version) -> Value {
+    match version {
+        Version::V1 => ev_function_call_with_namespace(
+            "spawn-child",
+            "multi_agent_v1",
+            "spawn_agent",
+            &json!({"message": "do child work"}).to_string(),
+        ),
+        Version::V2 => ev_function_call_with_namespace(
+            "spawn-child",
+            "collaboration",
+            "spawn_agent",
+            &json!({"message": "do child work", "task_name": "worker", "fork_turns": "none"})
+                .to_string(),
+        ),
+    }
+}
+
 #[test_case(Version::V1, Arrival::Idle, Outcome::Completed; "v1_idle_completion")]
 #[test_case(Version::V2, Arrival::Idle, Outcome::Completed; "v2_idle_completion")]
 #[test_case(Version::V1, Arrival::Idle, Outcome::Errored; "v1_idle_error")]
@@ -154,44 +205,12 @@ async fn child_result_continues_parent(
         body: answer("parent-finish", "parent finished"),
     }]])
     .await;
-    let test = test_codex()
-        .with_model("koffing")
-        .with_config(move |config| {
-            config
-                .features
-                .enable(Feature::Collab)
-                .expect("enable collaboration");
-            match version {
-                Version::V1 => config.features.disable(Feature::MultiAgentV2),
-                Version::V2 => config.features.enable(Feature::MultiAgentV2),
-            }
-            .expect("select multi-agent version");
-            config.model_provider.request_max_retries = Some(0);
-            config.model_provider.stream_max_retries = Some(0);
-            config.model_provider.supports_websockets = false;
-        })
-        .build_with_auto_env(&server)
-        .await?;
+    let test = build_parent(&server, version, /*subagent_continuation*/ true).await?;
     let parent_id = test.session_configured.thread_id.to_string();
     let mut created = test.thread_manager.subscribe_thread_created();
-    let spawn_call = match version {
-        Version::V1 => ev_function_call_with_namespace(
-            "spawn-child",
-            "multi_agent_v1",
-            "spawn_agent",
-            &json!({"message": "do child work"}).to_string(),
-        ),
-        Version::V2 => ev_function_call_with_namespace(
-            "spawn-child",
-            "collaboration",
-            "spawn_agent",
-            &json!({"message": "do child work", "task_name": "worker", "fork_turns": "none"})
-                .to_string(),
-        ),
-    };
     let spawn = sse(vec![
         ev_response_created("spawn"),
-        spawn_call,
+        spawn_child_call(version),
         ev_completed("spawn"),
     ]);
     let parent_match_id = parent_id.clone();
@@ -402,34 +421,12 @@ async fn v2_child_shutdown_notice_waits_for_next_user_turn() -> Result<()> {
         body: answer("child", "child result"),
     }]])
     .await;
-    let test = test_codex()
-        .with_model("koffing")
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::Collab)
-                .expect("enable collaboration");
-            config
-                .features
-                .enable(Feature::MultiAgentV2)
-                .expect("select multi-agent version");
-            config.model_provider.request_max_retries = Some(0);
-            config.model_provider.stream_max_retries = Some(0);
-            config.model_provider.supports_websockets = false;
-        })
-        .build_with_auto_env(&server)
-        .await?;
+    let test = build_parent(&server, Version::V2, /*subagent_continuation*/ true).await?;
     let parent_id = test.session_configured.thread_id.to_string();
     let mut created = test.thread_manager.subscribe_thread_created();
     let spawn = sse(vec![
         ev_response_created("spawn"),
-        ev_function_call_with_namespace(
-            "spawn-child",
-            "collaboration",
-            "spawn_agent",
-            &json!({"message": "do child work", "task_name": "worker", "fork_turns": "none"})
-                .to_string(),
-        ),
+        spawn_child_call(Version::V2),
         ev_completed("spawn"),
     ]);
     let parent_match_id = parent_id.clone();
@@ -545,6 +542,82 @@ async fn v2_child_shutdown_notice_waits_for_next_user_turn() -> Result<()> {
         }])
     );
     let _ = release_child.send(());
+    child_server.shutdown().await;
+    Ok(())
+}
+
+#[test_case(Version::V1; "v1")]
+#[test_case(Version::V2; "v2")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_flag_keeps_child_results_passive(version: Version) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let (release_child, child_gate) = oneshot::channel();
+    let (child_server, _) = start_streaming_sse_server(vec![vec![StreamingSseChunk {
+        gate: Some(child_gate),
+        body: answer("child", "child result"),
+    }]])
+    .await;
+    let test = build_parent(&server, version, /*subagent_continuation*/ false).await?;
+    let parent_id = test.session_configured.thread_id.to_string();
+    let mut created = test.thread_manager.subscribe_thread_created();
+    let spawn = sse(vec![
+        ev_response_created("spawn"),
+        spawn_child_call(version),
+        ev_completed("spawn"),
+    ]);
+    let parent_match_id = parent_id.clone();
+    let child_url = format!("{}/v1/responses", child_server.uri());
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .respond_with(move |request: &wiremock::Request| {
+            if request_thread_id(request) != parent_match_id {
+                return ResponseTemplate::new(307).insert_header("location", child_url.as_str());
+            }
+            let body = request_body(request);
+            if carries_child_result(&body) {
+                sse_response(answer("processed", "processed child"))
+            } else if body["input"].to_string().contains("spawn-child") {
+                sse_response(answer("parent-finish", "parent finished"))
+            } else {
+                sse_response(spawn.clone())
+            }
+        })
+        .mount(&server)
+        .await;
+
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "delegate and finish".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let child_id = timeout(Duration::from_secs(10), created.recv()).await??;
+    let child = test.thread_manager.get_thread(child_id).await?;
+    timeout(
+        Duration::from_secs(10),
+        child_server.wait_for_request_count(1),
+    )
+    .await?;
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+        Duration::from_secs(10),
+    )
+    .await;
+
+    release_child.send(()).unwrap();
+    wait_for_event(&child, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    assert_no_turn_start(
+        &test.codex,
+        "without subagent_continuation a child result must not start a parent turn",
+    )
+    .await;
+    let parent_requests = parent_requests(&server, &parent_id).await;
+    assert_eq!(parent_requests.len(), 2);
+    let tools = parent_requests[0]["tools"].to_string();
+    assert!(!tools.contains("automatically resumes its parent"));
+    assert!(!tools.contains("New user input ends the wait early"));
     child_server.shutdown().await;
     Ok(())
 }

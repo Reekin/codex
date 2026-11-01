@@ -4,9 +4,17 @@ use crate::session::session::Session;
 use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskResult;
+use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use futures::FutureExt;
 use pretty_assertions::assert_eq;
 use test_case::test_case;
+
+fn continuation_wait_handler() -> WaitAgentHandler {
+    WaitAgentHandler::new(
+        WaitAgentTimeoutOptions::default(),
+        /*subagent_continuation*/ true,
+    )
+}
 
 /// Keeps the parent turn active so steering lands in its turn-local input.
 struct HeldTask;
@@ -86,7 +94,7 @@ async fn wait_agent_returns_on_steer_without_stopping_child(timing: SteerTiming)
             .expect("steering should be accepted");
     }
 
-    let handler = WaitAgentHandler::default();
+    let handler = continuation_wait_handler();
     let wait = handler.handle(invocation(
         session.clone(),
         turn.clone(),
@@ -160,7 +168,7 @@ async fn wait_agent_ignores_unrelated_mail_and_returns_child_completion() {
     let session = Arc::new(session);
     let turn = Arc::new(turn);
     enqueue_unrelated_mail(&session).await;
-    let handler = WaitAgentHandler::default();
+    let handler = continuation_wait_handler();
     let wait = handler.handle(invocation(
         session.clone(),
         turn,
