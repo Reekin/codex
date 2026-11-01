@@ -1047,6 +1047,9 @@
             "fast_mode": {
               "type": "boolean"
             },
+            "final_answer_retry": {
+              "type": "boolean"
+            },
             "goals": {
               "type": "boolean"
             },
@@ -7697,6 +7700,9 @@
           "type": "boolean"
         },
         "fast_mode": {
+          "type": "boolean"
+        },
+        "final_answer_retry": {
           "type": "boolean"
         },
         "goals": {

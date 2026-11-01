@@ -12,10 +12,14 @@ answer, or when a final-answer assistant message contains only empty or whitespa
 - Do not retry a completed sampling response that contains no output items.
 - Do not change plan-mode completion semantics.
 - Do not retry indefinitely.
-- Do not add a public configuration surface unless product requirements change.
+- Do not add configuration beyond the on/off feature flag.
 
 ## Stable Contract
 
+- **REQ-0 Opt-In**: The behavior is enabled by `[features] final_answer_retry = true` in the user's
+  `config.toml`. The flag is a Stable feature that defaults to off; with it off, Codex keeps
+  upstream behavior: no recovery request is sent, no recovery prompt is recorded, and turn
+  completion, hooks, and goal accounting are upstream's.
 - **REQ-1 Classification**: Preserve three states for each completed sampling response: no final
   assistant message, only empty final assistant messages, and at least one non-empty final
   assistant message. A completed assistant message whose phase is final or absent under upstream
@@ -35,6 +39,8 @@ answer, or when a final-answer assistant message contains only empty or whitespa
 
 ## Portability Constraints
 
+- **MUST** check the flag at the retry seam and keep upstream's completion path intact for the
+  flag-off case, so upstream tests run unmodified; feature-owned tests enable the flag explicitly.
 - **MUST** preserve three distinct states: no final assistant message, empty final assistant
   message, and non-empty final assistant message.
 - **MUST** derive the empty-final fact where assistant items and phases are aggregated.
