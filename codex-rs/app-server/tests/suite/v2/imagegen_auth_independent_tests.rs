@@ -1,6 +1,7 @@
 use super::*;
 use codex_login::AuthKeyringBackendKind;
 use codex_login::login_with_api_key;
+use pretty_assertions::assert_eq;
 use test_case::test_case;
 
 #[test_case("api"; "API key exposes installed image tool")]
