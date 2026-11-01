@@ -801,7 +801,11 @@ elif mode == "exit_2":
     Ok(())
 }
 
-fn write_logging_pre_and_blocking_post_tool_use_hooks(
+fn write_logging_pre_and_blocking_post_tool_use_hooks(home: &Path, feedback: &str) -> Result<()> {
+    write_logging_pre_and_blocking_post_tool_use_hooks_for_matcher(home, "Bash", feedback)
+}
+
+fn write_logging_pre_and_blocking_post_tool_use_hooks_for_matcher(
     home: &Path,
     matcher: &str,
     feedback: &str,
@@ -1202,13 +1206,22 @@ fn assert_permission_request_hook_input(
     command: &str,
     description: Option<&str>,
 ) {
-    let mut expected_tool_input = json!({ "command": command });
-    if let Some(description) = description {
-        expected_tool_input["description"] = description.into();
-    }
-    assert_permission_request_hook_payload(hook_input, tool_name, &expected_tool_input);
+    assert_eq!(hook_input["hook_event_name"], "PermissionRequest");
+    assert_eq!(hook_input["tool_name"], tool_name);
+    assert_eq!(hook_input["tool_input"]["command"], command);
+    assert_eq!(
+        hook_input["tool_input"]["description"],
+        description.map_or(Value::Null, Value::from)
+    );
+    assert!(hook_input.get("approval_attempt").is_none());
+    assert!(hook_input.get("sandbox_permissions").is_none());
+    assert!(hook_input.get("additional_permissions").is_none());
+    assert!(hook_input.get("justification").is_none());
+    assert!(hook_input.get("host").is_none());
+    assert!(hook_input.get("protocol").is_none());
 }
 
+/// Asserts the complete hook-facing tool input, as exec_argv adds `argv` beside `command`.
 fn assert_permission_request_hook_payload(
     hook_input: &Value,
     tool_name: &str,
@@ -3443,7 +3456,8 @@ async fn permission_request_hook_sees_exec_argv_identity_and_authoritative_argv(
             )
             .expect("failed to write exec_argv permission request hook fixture");
         })
-        .with_config(trust_discovered_hooks);
+        .with_config(trust_discovered_hooks)
+        .with_config(super::enable_exec_argv);
     let test = builder.build(&server).await?;
 
     test.submit_turn_with_approval_and_permission_profile(
@@ -3486,14 +3500,7 @@ async fn permission_request_hook_allows_network_approval_without_prompt() -> Res
         "allow",
         PERMISSION_REQUEST_ALLOW_REASON,
         "permissionrequest-network-approval",
-        "exec_command",
-        PERMISSION_REQUEST_HOOK_MATCHER,
-        "Bash",
-        json!({ "cmd": command }),
-        json!({
-            "command": command,
-            "description": "network-access http://codex-network-test.invalid:80",
-        }),
+        command,
         /*expected_denial*/ None,
     )
     .await
@@ -3507,14 +3514,7 @@ async fn permission_request_hook_denies_network_approval_with_custom_message() -
         "deny",
         denial,
         "permissionrequest-network-denied",
-        "exec_command",
-        PERMISSION_REQUEST_HOOK_MATCHER,
-        "Bash",
-        json!({ "cmd": command }),
-        json!({
-            "command": command,
-            "description": "network-access http://codex-network-test.invalid:80",
-        }),
+        command,
         Some(denial),
     )
     .await
@@ -3529,7 +3529,7 @@ async fn managed_network_permission_request_preserves_exec_argv_attribution() ->
         "import urllib.request; opener = urllib.request.build_opener(urllib.request.ProxyHandler()); print('OK:' + opener.open('http://codex-network-test.invalid', timeout=2).read().decode(errors='replace'))".to_string(),
     ];
     let command = codex_shell_command::parse_command::shlex_join(&argv);
-    run_network_permission_hook_test(
+    run_network_permission_hook_test_for_tool(
         "allow",
         PERMISSION_REQUEST_ALLOW_REASON,
         "permissionrequest-network-exec-argv",
@@ -3547,8 +3547,32 @@ async fn managed_network_permission_request_preserves_exec_argv_attribution() ->
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn run_network_permission_hook_test(
+    hook_mode: &'static str,
+    hook_reason: &'static str,
+    call_id: &'static str,
+    command: &'static str,
+    expected_denial: Option<&'static str>,
+) -> Result<()> {
+    run_network_permission_hook_test_for_tool(
+        hook_mode,
+        hook_reason,
+        call_id,
+        "exec_command",
+        PERMISSION_REQUEST_HOOK_MATCHER,
+        "Bash",
+        json!({ "cmd": command }),
+        json!({
+            "command": command,
+            "description": "network-access http://codex-network-test.invalid:80",
+        }),
+        expected_denial,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_network_permission_hook_test_for_tool(
     hook_mode: &'static str,
     hook_reason: &'static str,
     call_id: &'static str,
@@ -3624,6 +3648,9 @@ review_domains = ["codex-network-test.invalid"]
         )
         .with_config(move |config| {
             trust_discovered_hooks(config);
+            if model_tool_name == "exec_argv" {
+                super::enable_exec_argv(config);
+            }
             config.approvals_reviewer = codex_config::types::ApprovalsReviewer::AutoReview;
             config.permissions.approval_policy = Constrained::allow_any(approval_policy);
             config
@@ -6027,7 +6054,7 @@ async fn post_tool_use_blocks_when_exec_session_completes_via_write_stdin() -> R
 
     let mut builder = test_codex()
         .with_pre_build_hook(|home| {
-            write_logging_pre_and_blocking_post_tool_use_hooks(home, "Bash", feedback)
+            write_logging_pre_and_blocking_post_tool_use_hooks(home, feedback)
                 .expect("failed to write tool use hook test fixture");
         })
         .with_config(|config| {
@@ -6122,10 +6149,15 @@ async fn exec_argv_background_write_stdin_preserves_post_hook_contract() -> Resu
     .await;
     let mut builder = test_codex()
         .with_pre_build_hook(move |home| {
-            write_logging_pre_and_blocking_post_tool_use_hooks(home, "^exec_argv$", feedback)
-                .expect("failed to write exec_argv session hook fixture");
+            write_logging_pre_and_blocking_post_tool_use_hooks_for_matcher(
+                home,
+                "^exec_argv$",
+                feedback,
+            )
+            .expect("failed to write exec_argv session hook fixture");
         })
-        .with_config(trust_discovered_hooks);
+        .with_config(trust_discovered_hooks)
+        .with_config(super::enable_exec_argv);
     let test = builder.build(&server).await?;
 
     test.submit_turn("run the argv-native background session")
@@ -6217,7 +6249,8 @@ async fn pre_tool_use_rewrites_exec_argv_before_real_execution() -> Result<()> {
             write_updating_pre_tool_use_hook(home, "^exec_argv$", &updated_input)
                 .expect("failed to write exec_argv rewrite hook fixture");
         })
-        .with_config(trust_discovered_hooks);
+        .with_config(trust_discovered_hooks)
+        .with_config(super::enable_exec_argv);
     let test = builder.build(&server).await?;
 
     test.submit_turn_with_permission_profile(
@@ -6287,7 +6320,8 @@ async fn pre_tool_use_command_only_rewrite_rejects_exec_argv_without_execution()
             write_updating_pre_tool_use_hook(home, "^exec_argv$", &updated_input)
                 .expect("failed to write exec_argv command-only rewrite hook fixture");
         })
-        .with_config(trust_discovered_hooks);
+        .with_config(trust_discovered_hooks)
+        .with_config(super::enable_exec_argv);
     let test = builder.build(&server).await?;
 
     test.submit_turn_with_permission_profile(
@@ -6352,7 +6386,8 @@ async fn post_tool_use_records_exec_argv_identity_and_authoritative_argv() -> Re
             write_post_tool_use_hook(home, Some("^exec_argv$"), "context", "argv post context")
                 .expect("failed to write exec_argv post hook fixture");
         })
-        .with_config(trust_discovered_hooks);
+        .with_config(trust_discovered_hooks)
+        .with_config(super::enable_exec_argv);
     let test = builder.build(&server).await?;
 
     test.submit_turn("run exec_argv with a post hook").await?;

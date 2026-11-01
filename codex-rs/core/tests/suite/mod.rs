@@ -11,6 +11,14 @@ use ctor::ctor;
 
 pub(crate) const EXEC_ARGV_TEST_HELPER_ARG: &str = "--exec-argv-test-helper";
 
+/// Turns on the `exec_argv` feature for scenario tests that exercise the tool.
+pub(crate) fn enable_exec_argv(config: &mut codex_core::config::Config) {
+    config
+        .features
+        .enable(codex_features::Feature::ExecArgv)
+        .expect("test config should enable exec_argv");
+}
+
 /// Builds argv that re-runs this test binary as a helper which sleeps for
 /// `delay_ms` and prints the literal arguments it received as a JSON array.
 pub(crate) fn exec_argv_test_helper_argv(
