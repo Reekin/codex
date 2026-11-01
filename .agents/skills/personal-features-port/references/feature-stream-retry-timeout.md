@@ -18,9 +18,11 @@ return a usable result sooner.
   commentary, and partial output do not select a winner. A terminal response is also delivered so
   existing empty-answer handling remains effective. Once selected, the winner is fixed and the
   other request is canceled. If one candidate fails, keep waiting for the other.
-- **REQ-4**: Candidate events are buffered until selection, so initial text and reasoning become
-  visible together with the selected complete result. Only that stream enters history and tool
-  execution; subsequent events resume normal streaming. Canceling the turn cancels both candidates.
+- **REQ-4**: Until a replacement starts, the original streams normally, so steering, mailbox
+  preemption and other mid-stream behavior are unchanged. Once a replacement starts, candidate
+  events are buffered until selection; only the selected stream's complete result enters history
+  and tool execution, and subsequent events resume normal streaming. Canceling the turn cancels
+  both candidates.
 - **REQ-5**: Sampling and streaming remote compaction share this policy over HTTP SSE and
   WebSockets. Transport fallback preserves cumulative waiting-interval growth. Upload and
   connection retries retain their existing ownership.
