@@ -116,13 +116,14 @@ fn assemble_compaction_history(
 
 pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    step_context: Arc<StepContext>,
     replacement_step_context: Arc<StepContext>,
     world_state: Arc<WorldState>,
     reason: CompactionReason,
     phase: CompactionPhase,
 ) -> CodexResult<()> {
-    let prompt = turn_context
+    let prompt = step_context
+        .turn
         .config
         .compact_prompt
         .as_deref()
@@ -136,7 +137,7 @@ pub(crate) async fn run_inline_auto_compact_task(
 
     run_compact_task_inner(
         sess,
-        turn_context,
+        step_context,
         replacement_step_context,
         input,
         world_state,
@@ -159,7 +160,7 @@ pub(crate) async fn run_compact_task(
 ) -> CodexResult<()> {
     run_compact_task_inner(
         sess.clone(),
-        Arc::clone(&step_context.turn),
+        Arc::clone(&step_context),
         step_context,
         input,
         world_state,
@@ -176,12 +177,13 @@ pub(crate) async fn run_compact_task(
 
 async fn run_compact_task_inner(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    step_context: Arc<StepContext>,
     replacement_step_context: Arc<StepContext>,
     input: Vec<UserInput>,
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<()> {
+    let turn_context = Arc::clone(&step_context.turn);
     let trigger = compaction_metadata.trigger();
     let reason = compaction_metadata.reason();
     let phase = compaction_metadata.phase();
@@ -212,7 +214,7 @@ async fn run_compact_task_inner(
     }
     let result = run_compact_task_inner_impl(
         Arc::clone(&sess),
-        Arc::clone(&turn_context),
+        step_context,
         replacement_step_context,
         input,
         world_state,
@@ -262,12 +264,15 @@ async fn run_compact_task_inner(
 
 async fn run_compact_task_inner_impl(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    step_context: Arc<StepContext>,
     replacement_step_context: Arc<StepContext>,
     input: Vec<UserInput>,
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<String> {
+    // The compactor step owns the request model; it may differ from the turn's initial model.
+    let turn_context = Arc::clone(&step_context.turn);
+    let model_info = &step_context.settings.model_info;
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
@@ -277,7 +282,7 @@ async fn run_compact_task_inner_impl(
     let input_goal_ids = UserGoalUpdate::message_ids(history.raw_items());
     history.record_items(
         &[initial_input_for_turn.into()],
-        turn_context.model_info().truncation_policy.into(),
+        model_info.truncation_policy.into(),
     );
     let mut fallback_instructions = sess.get_prompt_base_instructions().await;
     if let Some(text) = history
@@ -300,7 +305,7 @@ async fn run_compact_task_inner_impl(
         let mut turn_input = history
             .clone()
             .for_prompt(
-                &turn_context.model_info().input_modalities,
+                &model_info.input_modalities,
                 sess.services.image_store.as_ref(),
             )
             .await;
@@ -330,7 +335,7 @@ async fn run_compact_task_inner_impl(
             .await;
         let attempt_result = drain_to_completed(
             &sess,
-            turn_context.as_ref(),
+            &step_context,
             &mut client_session,
             &responses_metadata,
             &prompt,
@@ -432,7 +437,7 @@ async fn run_compact_task_inner_impl(
             window_number,
             window_ids,
             compaction_response_id: Some(compaction_response.response_id),
-            compaction_model_hash: turn_context.model_info().comp_hash.clone(),
+            compaction_model_hash: model_info.comp_hash.clone(),
             reviewer_compaction_hash: None,
         },
     )
@@ -824,25 +829,24 @@ struct CompactionResponse {
 
 async fn drain_to_completed(
     sess: &Session,
-    turn_context: &TurnContext,
+    step_context: &StepContext,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Prompt,
     phase: CompactionPhase,
 ) -> CodexResult<CompactionResponse> {
-    let mut includes_reasoning = turn_context.model_info().use_responses_lite;
+    let turn_context = step_context.turn.as_ref();
+    let settings = &step_context.settings;
+    let mut includes_reasoning = settings.model_info.use_responses_lite;
     let mut stream = client_session
         .stream(
             prompt,
-            turn_context.model_info(),
-            &turn_context.session_telemetry,
-            sess.reasoning_effort_for_request(
-                &turn_context.initial_settings,
-                RequestEffortUsage::Compaction,
-            )
-            .await,
-            turn_context.reasoning_summary(),
-            turn_context.config.service_tier.clone(),
+            &settings.model_info,
+            &step_context.session_telemetry,
+            sess.reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
+                .await,
+            settings.reasoning_summary,
+            settings.service_tier.clone(),
             responses_metadata,
             // Rollout tracing currently models remote compaction only; local compaction streams
             // are left untraced until the reducer has a first-class local compaction lifecycle.
@@ -876,7 +880,7 @@ async fn drain_to_completed(
                     for item in std::mem::take(&mut output) {
                         sess.record_annotated_conversation_items(
                             turn_context,
-                            turn_context.model_info(),
+                            &settings.model_info,
                             vec![ResponseItemEnvelope {
                                 item,
                                 metadata: Some(CodexHarnessMetadata {
@@ -909,12 +913,8 @@ async fn drain_to_completed(
             Ok(_) => continue,
             Err(e) => {
                 if let CodexErrorDetails::ResponseIncomplete(incomplete) = e.details() {
-                    sess.record_incomplete_response_usage(
-                        turn_context,
-                        &turn_context.initial_settings,
-                        incomplete,
-                    )
-                    .await;
+                    sess.record_incomplete_response_usage(turn_context, settings, incomplete)
+                        .await;
                     sess.send_token_count_event(turn_context).await;
                 }
                 return Err(e);

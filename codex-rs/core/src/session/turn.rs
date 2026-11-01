@@ -230,7 +230,10 @@ pub(crate) async fn run_turn(
             .await;
         // Publish the failure only after prompt hooks finish, so clients cannot react to
         // an error by steering follow-up input into a turn still preserving its prompt.
-        let message_prefix = match turn_context.provider.capabilities().remote_compaction {
+        let message_prefix = match crate::compaction_policy::remote_compaction_support(
+            turn_context.provider.capabilities().remote_compaction,
+            turn_context.model_info(),
+        ) {
             RemoteCompactionSupport::V2 => Some("Error running remote compact task".to_string()),
             RemoteCompactionSupport::Unsupported => None,
         };
@@ -437,7 +440,7 @@ pub(crate) async fn run_turn(
         .await;
     }
 
-    if super::async_compaction::enabled(&turn_context) {
+    if super::async_compaction::enabled(&turn_context, &first_step_context.settings.model_info) {
         let token_status = super::context_window::context_window_token_status(
             sess.as_ref(),
             turn_context.as_ref(),
@@ -679,7 +682,12 @@ pub(crate) async fn run_turn(
                 }
 
                 let candidate = if needs_follow_up {
-                    super::async_compaction::take_ready(&sess, &turn_context).await
+                    super::async_compaction::take_ready(
+                        &sess,
+                        &turn_context,
+                        &step_context.settings.model_info,
+                    )
+                    .await
                 } else {
                     None
                 };
@@ -830,8 +838,12 @@ pub(crate) async fn run_turn(
                         )
                         .await;
                         let foreground_due = token_status.turn_end_compaction_threshold_reached;
-                        let candidate =
-                            super::async_compaction::take_ready(&sess, &turn_context).await;
+                        let candidate = super::async_compaction::take_ready(
+                            &sess,
+                            &turn_context,
+                            &step_context.settings.model_info,
+                        )
+                        .await;
                         if (foreground_due || candidate.is_some())
                             && let Err(err) = run_auto_compact(
                                 &sess,
@@ -1431,7 +1443,12 @@ async fn run_pre_sampling_compact(
     let token_status =
         super::context_window::context_window_token_status(sess.as_ref(), turn_context.as_ref())
             .await;
-    let candidate = super::async_compaction::take_ready(sess, turn_context).await;
+    let candidate = super::async_compaction::take_ready(
+        sess,
+        turn_context,
+        &turn_context.capture_current_model_info(),
+    )
+    .await;
     // Compact if the configured auto-compaction budget or usable context window is exhausted.
     if token_status.token_limit_reached || candidate.is_some() {
         // Pre-turn compaction runs before run_turn creates the normal sampling step.
@@ -1527,14 +1544,35 @@ async fn maybe_run_previous_model_inline_compact(
         CompactionReason::ModelDownshift
     };
 
-    let step_context = sess
-        .capture_step_context(previous_model_turn_context, cancellation_token)
-        .await?;
-    // The previous model summarizes the old window; the current model owns its replacement.
-    // Reuse the replacement step if the compaction request needs to fall back to that model.
-    let replacement_step_context = sess
-        .capture_speculative_step_context(Arc::clone(turn_context), cancellation_token)
-        .await?;
+    let previous_support = crate::compaction_policy::remote_compaction_support(
+        previous_model_turn_context
+            .provider
+            .capabilities()
+            .remote_compaction,
+        previous_model_turn_context.model_info(),
+    );
+    let current_support = crate::compaction_policy::remote_compaction_support(
+        turn_context.provider.capabilities().remote_compaction,
+        &turn_context.capture_current_model_info(),
+    );
+    let (step_context, replacement_step_context) = if previous_support == current_support {
+        let step_context = sess
+            .capture_step_context(previous_model_turn_context, cancellation_token)
+            .await?;
+        // The previous model summarizes the old window; the current model owns its replacement.
+        // Reuse the replacement step if the compaction request needs to fall back to that model.
+        let replacement_step_context = sess
+            .capture_speculative_step_context(Arc::clone(turn_context), cancellation_token)
+            .await?;
+        (step_context, replacement_step_context)
+    } else {
+        // A compaction route the current model cannot use would leave it an unreadable window,
+        // so the current model compacts on its own route.
+        let step_context = sess
+            .capture_step_context(Arc::clone(turn_context), cancellation_token)
+            .await?;
+        (Arc::clone(&step_context), step_context)
+    };
     run_auto_compact(
         sess,
         step_context,
@@ -1594,7 +1632,10 @@ async fn run_auto_compact(
         return Ok(true);
     }
 
-    match turn_context.provider.capabilities().remote_compaction {
+    match crate::compaction_policy::remote_compaction_support(
+        turn_context.provider.capabilities().remote_compaction,
+        &step_context.settings.model_info,
+    ) {
         RemoteCompactionSupport::V2 => {
             let has_candidate = candidate.is_some();
             if !has_candidate {
@@ -1650,7 +1691,7 @@ async fn run_auto_compact(
             );
             run_inline_auto_compact_task(
                 Arc::clone(sess),
-                Arc::clone(turn_context),
+                step_context,
                 replacement_step_context,
                 world_state,
                 reason,
