@@ -12,6 +12,11 @@ lifetimes, and interrupting unrelated tools are outside this feature.
 
 ## Stable Contract
 
+- **REQ-0**: The behavior below is enabled by `[features] subagent_continuation = true` in the
+  user's `config.toml`; the flag is off by default. With it off, Codex keeps upstream behavior:
+  child results are delivered without automatic parent turns, `wait_agent` is not released by
+  steering, idle unloading and residency are unchanged, and multi-agent tool descriptions are
+  upstream's.
 - **REQ-1**: In both multi-agent versions, a subagent completion or error delivers its existing
   result to its direct parent. If the parent has naturally finished its turn, a follow-up turn
   processes that result without requiring or fabricating a new user request.
@@ -28,6 +33,8 @@ lifetimes, and interrupting unrelated tools are outside this feature.
 
 ## Portability Constraints
 
+- MUST keep the upstream paths this feature replaces and select between them with the flag at
+  each seam, so upstream tests run unmodified with the flag off.
 - MUST attach wakeup to actual child completion and parent admission/finalization hooks, so
   completion at the turn boundary is handled without polling or concurrent parent turns.
 - MUST return control from the wait tool on steering while keeping the tool-call transcript valid.
@@ -42,6 +49,8 @@ and interruption; subagent wait activity subscriptions; model-visible tool descr
 
 ## P0 Acceptance
 
+Run the scenarios below with `subagent_continuation` enabled.
+
 - Finish a parent reply while a child is held by a deterministic model server, then release the
   child. Observe a new parent model request with the child result and no new user submission.
   Exercise both multi-agent versions through the production RPC/model path. Covers REQ-1/5.
@@ -54,6 +63,8 @@ and interruption; subagent wait activity subscriptions; model-visible tool descr
   completion and timeout results. Covers REQ-3.
 - Interrupt a parent with an outstanding child, then release the child. Observe no autonomous
   restart; a later user turn can consume the result. Covers REQ-4.
+- With the flag off, finish a parent reply and release its child in both versions. Observe no
+  new parent request and upstream tool descriptions. Covers REQ-0.
 
 ## Integration Contract
 
