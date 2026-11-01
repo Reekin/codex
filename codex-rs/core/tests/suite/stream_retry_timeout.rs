@@ -1,4 +1,5 @@
 use codex_core::TurnInputRequest;
+use codex_features::Feature;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
@@ -37,7 +38,10 @@ async fn response_events_stream_before_the_waiting_interval() -> anyhow::Result<
     // Default retry settings allow a replacement, so the stream is eligible for selection.
     let test = test_codex()
         .with_model("gpt-5.4")
-        .with_config(|config| config.model_provider.supports_websockets = false)
+        .with_config(|config| {
+            config.features.enable(Feature::StreamRetryTimeout).unwrap();
+            config.model_provider.supports_websockets = false;
+        })
         .build_with_streaming_server(&server)
         .await?;
     test.codex
@@ -108,6 +112,7 @@ async fn only_the_winning_request_executes_its_tool(winner: &str) -> anyhow::Res
     let (server, _) = start_streaming_sse_server(streams).await;
     let test = test_codex()
         .with_config(|config| {
+            config.features.enable(Feature::StreamRetryTimeout).unwrap();
             config.model_provider.stream_idle_timeout_ms = Some(100);
             config.model_provider.stream_max_retries = Some(1);
             config.model_provider.request_max_retries = Some(0);
@@ -147,6 +152,63 @@ async fn only_the_winning_request_executes_its_tool(winner: &str) -> anyhow::Res
         .map(|item| item["call_id"].as_str().unwrap())
         .collect();
     assert_eq!(calls, vec![winner]);
+    drop(gates);
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabled_flag_retries_sequentially_with_the_fixed_waiting_interval() -> anyhow::Result<()>
+{
+    skip_if_no_network!(Ok(()));
+
+    let mut gates = Vec::new();
+    let mut streams = Vec::new();
+    for id in ["first", "retry"] {
+        let (tx, rx) = oneshot::channel();
+        gates.push(tx);
+        streams.push(vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![responses::ev_response_created(id)]),
+            },
+            StreamingSseChunk {
+                gate: Some(rx),
+                body: responses::sse(vec![
+                    responses::ev_assistant_message(id, "done"),
+                    responses::ev_completed(id),
+                ]),
+            },
+        ]);
+    }
+    let (server, _) = start_streaming_sse_server(streams).await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model_provider.stream_idle_timeout_ms = Some(100);
+            config.model_provider.stream_max_retries = Some(1);
+            config.model_provider.request_max_retries = Some(0);
+            config.model_provider.supports_websockets = false;
+        })
+        .build_with_streaming_server(&server)
+        .await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Answer.".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    // Each attempt idles out after the configured interval and no replacement runs beside it, so
+    // the retry budget is spent within two short intervals instead of a growing selection window.
+    let EventMsg::TurnComplete(completed) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await
+    else {
+        unreachable!("predicate guarantees turn completion");
+    };
+    assert!(completed.error.is_some());
+    assert_eq!(server.requests().await.len(), 2);
     drop(gates);
     server.shutdown().await;
     Ok(())
