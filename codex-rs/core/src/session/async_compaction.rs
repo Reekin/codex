@@ -16,6 +16,7 @@ use codex_analytics::CompactionPhase;
 use codex_features::Feature;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_otel::auth_storage::AuthStorageOriginator;
+use codex_protocol::openai_models::ModelInfo;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -38,14 +39,17 @@ pub(crate) struct AsyncCompactionState {
     shutdown_cancellation: CancellationToken,
 }
 
-pub(super) fn enabled(turn_context: &TurnContext) -> bool {
+pub(super) fn enabled(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
     turn_context
         .config
         .features
         .enabled(Feature::AsyncCompaction)
         && !turn_context.config.features.enabled(Feature::TokenBudget)
         && matches!(
-            turn_context.provider.capabilities().remote_compaction,
+            crate::compaction_policy::remote_compaction_support(
+                turn_context.provider.capabilities().remote_compaction,
+                model_info,
+            ),
             RemoteCompactionSupport::V2
         )
 }
@@ -64,7 +68,7 @@ pub(super) async fn maybe_start(
     if matches!(phase, CompactionPhase::PreTurn) && turn_state.is_none() {
         return;
     }
-    if !enabled(turn_context)
+    if !enabled(turn_context, &step_context.settings.model_info)
         || token_status.token_limit_reached
         || (matches!(phase, CompactionPhase::PostTurn)
             && token_status.turn_end_compaction_threshold_reached)
@@ -154,8 +158,9 @@ pub(super) async fn maybe_start(
 pub(super) async fn take_ready(
     sess: &Session,
     turn_context: &TurnContext,
+    model_info: &ModelInfo,
 ) -> Option<Box<BackgroundCompactionCandidate>> {
-    if !enabled(turn_context) {
+    if !enabled(turn_context, model_info) {
         return None;
     }
     let mut state = sess.state.lock().await;
@@ -176,7 +181,7 @@ pub(crate) async fn wait_for_pending(
     sess: &Session,
     step_context: &StepContext,
 ) -> Option<Box<BackgroundCompactionCandidate>> {
-    if !enabled(&step_context.turn) {
+    if !enabled(&step_context.turn, &step_context.settings.model_info) {
         return None;
     }
     let result = {
