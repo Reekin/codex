@@ -3217,7 +3217,9 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
 
     let extension_disabled = probe_with(
         |turn| {
-            use_chatgpt_auth(turn);
+            turn.auth_manager = Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+                "image-tool-test-key",
+            )));
             set_feature(turn, Feature::ImageGeneration, /*enabled*/ false);
             update_turn_settings_for_test(turn, |settings| {
                 Arc::make_mut(&mut settings.model_info).input_modalities =
@@ -3234,7 +3236,9 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
 
     let text_only_model = probe_with(
         |turn| {
-            use_chatgpt_auth(turn);
+            turn.auth_manager = Some(AuthManager::from_auth_for_testing(CodexAuth::from_api_key(
+                "image-tool-test-key",
+            )));
             update_turn_settings_for_test(turn, |settings| {
                 Arc::make_mut(&mut settings.model_info).input_modalities = vec![];
             });
@@ -3247,7 +3251,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
     .await;
     text_only_model.assert_visible_lacks(&["image_gen"]);
 
-    let unsupported_provider = probe_with(
+    let bedrock_provider = probe_with(
         |turn| {
             use_bedrock_provider(turn);
             update_turn_settings_for_test(turn, |settings| {
@@ -3261,7 +3265,7 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
         },
     )
     .await;
-    unsupported_provider.assert_visible_lacks(&["image_gen"]);
+    bedrock_provider.assert_visible_contains(&["image_gen"]);
 
     let live_web_search = probe(|turn| {
         set_web_search_mode(turn, WebSearchMode::Live);

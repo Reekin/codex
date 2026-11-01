@@ -805,21 +805,7 @@ fn image_generation_available(turn_context: &TurnContext, model_info: &ModelInfo
         return false;
     }
 
-    if !turn_context.provider.capabilities().image_generation {
-        return false;
-    }
-
-    if !model_info.input_modalities.contains(&InputModality::Image) {
-        return false;
-    }
-
-    let provider = turn_context.provider.info();
-    provider.uses_openai_actor_authorization()
-        || (provider.requires_openai_auth
-            && turn_context
-                .auth_manager
-                .as_deref()
-                .is_some_and(AuthManager::current_auth_uses_codex_backend))
+    model_info.input_modalities.contains(&InputModality::Image)
 }
 
 fn wait_agent_timeout_options(turn_context: &TurnContext) -> WaitAgentTimeoutOptions {
