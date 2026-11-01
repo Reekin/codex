@@ -95,6 +95,12 @@ impl ImageGenerationTool {
 #[serde(deny_unknown_fields)]
 struct ImagegenArgs {
     prompt: String,
+    /// Image model identifier; defaults to gpt-image-2. Forwarded unchanged to the provider.
+    model: Option<String>,
+    /// Output size as WIDTHxHEIGHT or auto (default). Supported sizes depend on the provider.
+    size: Option<String>,
+    /// Image quality; defaults to auto. Supported quality levels depend on the image model.
+    quality: Option<ImageQuality>,
     /// Whether the output should have a transparent background. Defaults to false.
     #[serde(default)]
     transparent_background: bool,
@@ -131,7 +137,8 @@ impl<'call> ToolExecutor<ToolCall<'call>> for ImageGenerationTool {
         ToolName::namespaced(IMAGE_GEN_NAMESPACE, IMAGEGEN_TOOL_NAME)
     }
 
-    /// Advertises a rewritten prompt, background choice, and optional edit references.
+    /// Advertises a rewritten prompt, image options, background choice, and optional edit
+    /// references.
     fn spec(&self) -> ToolSpec {
         imagegen_tool_spec()
     }
@@ -492,6 +499,12 @@ async fn request_for_call_args(
     } else {
         ImageBackground::Opaque
     };
+    let model = args
+        .model
+        .clone()
+        .unwrap_or_else(|| IMAGE_MODEL.to_string());
+    let quality = Some(args.quality.unwrap_or(ImageQuality::Auto));
+    let size = Some(args.size.clone().unwrap_or_else(|| "auto".to_string()));
     let paths = args.referenced_image_paths.as_deref().unwrap_or_default();
     if paths.len() > MAX_EDIT_IMAGES {
         return Err(FunctionCallError::RespondToModel(format!(
@@ -505,10 +518,10 @@ async fn request_for_call_args(
                 request: ImageRequest::Generate(ImageGenerationRequest {
                     prompt: args.prompt.clone(),
                     background: Some(background),
-                    model: IMAGE_MODEL.to_string(),
+                    model,
                     n: None,
-                    quality: Some(ImageQuality::Auto),
-                    size: Some("auto".to_string()),
+                    quality,
+                    size,
                 }),
                 input_images,
             });
@@ -554,10 +567,10 @@ async fn request_for_call_args(
             images,
             prompt: args.prompt.clone(),
             background: Some(background),
-            model: IMAGE_MODEL.to_string(),
+            model,
             n: None,
-            quality: Some(ImageQuality::Auto),
-            size: Some("auto".to_string()),
+            quality,
+            size,
         }),
         input_images,
     })
