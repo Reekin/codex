@@ -14,6 +14,13 @@ keep original local records queryable without a hosted notes service.
 
 ## Stable Contract
 
+- **Activation**: `[features] local_context_compaction = true` enables every requirement below;
+  the flag is stable and off by default. With it off, Codex keeps upstream behavior on every
+  route: full compaction without native support is upstream's local summary request, no marking,
+  tool cleanup or reasoning trimming runs, no recall tools are offered to the model, and token
+  budget resolves as upstream. The `codex recall` CLI and the `thread/toolCleanup/{read,apply}`
+  methods stay available; with the flag off the methods report nothing to clean and apply
+  nothing.
 - **REQ-1**: A separate background request uses the current step's model and inference settings to
   classify completed, unmarked tool results, including results with images, as keep, shorten, or
   drop. It is sent after an ordinary request returns and repeats that request's instructions,
@@ -108,8 +115,8 @@ keep original local records queryable without a hosted notes service.
   include them as data URLs on request.
 - **REQ-9**: Background marking, tool cleanup and earlier-reasoning trimming run on every model
   route. Only full compaction is routed: native compaction when both the provider and the model
-  metadata (`supports_remote_compaction`) support it, the local window pipeline otherwise; there is
-  no configuration switch that overrides this. Configuration controls the marking volume
+  metadata (`supports_remote_compaction`) support it, the local window pipeline otherwise; no
+  configuration forces either route. Configuration controls the marking volume
   threshold, reclaim percentage, kept earlier reasoning, and the kept-window share of full
   compaction. Obsolete occupancy-trigger, minimum-savings, record-count and forced-route options
   have no fallback path. Custom guidance supplements the structured protocol.
@@ -165,6 +172,8 @@ keep original local records queryable without a hosted notes service.
 9. With a model that keeps earlier reasoning, verify cleanup removes earlier reasoning beyond its
    share while keeping the current turn's, and that a model dropping it reports no release from it
    (REQ-3).
+10. With the flag off, verify that upstream's own compaction, token-budget and tool-list tests
+    pass unmodified, and that the app-server cleanup methods report and apply nothing.
 
 ## Integration Contract
 
