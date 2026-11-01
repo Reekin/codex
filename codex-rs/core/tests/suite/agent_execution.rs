@@ -2,6 +2,9 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_core::AgentTreeShutdownFailure;
 use codex_core::AgentTreeShutdownFailureReason;
+use codex_core::CodexThread;
+use codex_core::TurnInputRequest;
+use codex_core::TurnInputSubmission;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_features::Feature;
@@ -13,6 +16,7 @@ use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentRequests;
+use codex_protocol::user_input::UserInput;
 use core_test_support::apps_test_server::AppsTestServer;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_assistant_message;
@@ -21,6 +25,7 @@ use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::submit_thread_settings;
@@ -237,6 +242,19 @@ async fn child_turn_start_preserves_root_attribution() -> Result<()> {
     )
     .await;
     let worker = mount_completed_worker(&server, FIRST_TASK, "first-call").await;
+    // The worker's result may continue the root after its turn. Answer that request silently;
+    // the root's completion response keeps precedence when the result arrives mid-turn.
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(move |request: &wiremock::Request| {
+            has_function_call_output(request, "first-call")
+                && body_contains(request, "Message Type: FINAL_ANSWER")
+        })
+        .respond_with(core_test_support::responses::sse_response(sse(vec![
+            ev_completed("resp-root-continuation"),
+        ])))
+        .with_priority(/*p*/ 10)
+        .mount(&server)
+        .await;
     let test = test_codex()
         .with_model("gpt-5.6-sol")
         .with_config(|config| {
@@ -252,6 +270,12 @@ async fn child_turn_start_preserves_root_attribution() -> Result<()> {
         .build_with_auto_env(&server)
         .await?;
     test.submit_turn(FIRST_PROMPT).await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while test.codex.has_pending_subagent_work().await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
     let thread_ids = test.thread_manager.list_thread_ids().await;
     assert_eq!(thread_ids.len(), 2);
     let mut starts = Vec::new();
@@ -273,6 +297,16 @@ async fn child_turn_start_preserves_root_attribution() -> Result<()> {
                 starts.push((thread_id, event));
             }
         }
+    }
+    // Keep the root's user turn; a later continuation is a separate root turn.
+    let root_thread_id = test.session_configured.thread_id;
+    if let Some(first_root) = starts.iter().position(|(id, _)| *id == root_thread_id) {
+        let mut index = 0;
+        starts.retain(|(id, _)| {
+            let keep = *id != root_thread_id || index == first_root;
+            index += 1;
+            keep
+        });
     }
     worker.single_request();
     assert_eq!(starts.len(), 2);
@@ -335,6 +369,33 @@ enum ResidencyReload {
     OwnerPreservesStricterChild,
     OwnerRevokesWorkspaceRoot,
     OwnerPendingConfiguration,
+}
+
+/// Submits a root prompt, waits for that turn, then lets child-result continuations settle.
+async fn submit_residency_turn(thread: &CodexThread, prompt: &str) -> Result<()> {
+    let submission = thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: prompt.to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    let turn_id = match submission {
+        TurnInputSubmission::Started { turn_id, .. }
+        | TurnInputSubmission::Steered { turn_id, .. } => turn_id,
+        TurnInputSubmission::NotSubmitted { reason } => anyhow::bail!("turn rejected: {reason:?}"),
+    };
+    wait_for_event(
+        thread,
+        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == turn_id),
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while thread.has_pending_subagent_work().await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    Ok(())
 }
 
 #[test_case(ResidencyReload::Sender; "sender preserves stricter child")]
@@ -412,6 +473,35 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
                 .expect("thread permissions should allow workspace writes");
         });
     let test = builder.build_with_remote_and_local_env(&server).await?;
+    // Worker results continue the root between fixture turns; acknowledge them at low priority.
+    let root_thread_id = test.session_configured.thread_id;
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(move |request: &wiremock::Request| {
+            serde_json::from_slice::<serde_json::Value>(&request.body).is_ok_and(|body| {
+                body["client_metadata"]["thread_id"] == json!(root_thread_id)
+                    && body["input"].as_array().is_some_and(|items| {
+                        items
+                            .iter()
+                            .rev()
+                            .find(|item| item["type"] != "additional_tools")
+                            .is_some_and(|item| {
+                                item["type"] == "agent_message"
+                                    && item["recipient"] == "/root"
+                                    && item["content"]
+                                        .to_string()
+                                        .contains("Message Type: FINAL_ANSWER")
+                            })
+                    })
+            })
+        })
+        .respond_with(sse_response(sse(vec![
+            ev_response_created("resp-result-consumed"),
+            ev_assistant_message("msg-result-consumed", "worker result processed"),
+            ev_completed("resp-result-consumed"),
+        ])))
+        .with_priority(/*p*/ 10)
+        .mount(&server)
+        .await;
     let mut child_environment = test.executor_environment().selection().clone();
     let (child_permissions, parent_permissions) = match reload {
         ResidencyReload::Sender
@@ -530,7 +620,7 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
         },
     )
     .await?;
-    test.submit_text_turn(FIRST_PROMPT).await?;
+    submit_residency_turn(&test.codex, FIRST_PROMPT).await?;
     let first_thread_id = created_threads.recv().await?;
     let first_thread = test.thread_manager.get_thread(first_thread_id).await?;
     wait_for_event(first_thread.as_ref(), |event| {
@@ -575,7 +665,7 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
         )
         .await?;
     }
-    test.submit_text_turn(EVICT_PROMPT).await?;
+    submit_residency_turn(&test.codex, EVICT_PROMPT).await?;
     let replacement_thread_id = created_threads.recv().await?;
     let replacement_thread = test
         .thread_manager
@@ -678,7 +768,7 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
             PermissionProfileSnapshot::legacy(PermissionProfile::read_only());
     }
 
-    test.submit_text_turn(FOLLOWUP_PROMPT).await?;
+    submit_residency_turn(&test.codex, FOLLOWUP_PROMPT).await?;
     let reloaded_worker = test.thread_manager.get_thread(first_thread_id).await?;
     wait_for_event(reloaded_worker.as_ref(), |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -731,7 +821,9 @@ async fn v2_residency_reload_preserves_inherited_environment_and_tools(
             .into_iter()
             .find_map(|request| {
                 let body = request.body_json();
-                if body["client_metadata"]["thread_id"] != json!(first_thread_id) {
+                if body["client_metadata"]["thread_id"] != json!(first_thread_id)
+                    || !request.body_contains_text(FOLLOWUP_TASK)
+                {
                     return None;
                 }
                 body.get("tools")

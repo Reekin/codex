@@ -502,11 +502,26 @@ async fn setup_turn_one_with_custom_spawned_child(
 
     let _turn1_followup = mount_sse_once_match(
         server,
-        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        |req: &wiremock::Request| {
+            body_contains(req, SPAWN_CALL_ID) && !body_contains(req, "<subagent_notification>")
+        },
         sse(vec![
             ev_response_created("resp-turn1-2"),
             ev_assistant_message("msg-turn1-2", "parent done"),
             ev_completed("resp-turn1-2"),
+        ]),
+    )
+    .await;
+    // The parent continues after turn one to process the child's result.
+    mount_sse_once_match(
+        server,
+        |req: &wiremock::Request| {
+            body_contains(req, SPAWN_CALL_ID) && body_contains(req, "<subagent_notification>")
+        },
+        sse(vec![
+            ev_response_created("resp-child-result"),
+            ev_assistant_message("msg-child-result", "parent handled child"),
+            ev_completed("resp-child-result"),
         ]),
     )
     .await;
@@ -826,11 +841,26 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
 
     let _turn1_followup = mount_sse_once_match(
         &server,
-        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        |req: &wiremock::Request| {
+            body_contains(req, SPAWN_CALL_ID) && !body_contains(req, "<subagent_notification>")
+        },
         sse(vec![
             ev_response_created("resp-turn1-2"),
             ev_assistant_message("msg-turn1-2", "parent done"),
             ev_completed("resp-turn1-2"),
+        ]),
+    )
+    .await;
+    // The root processes the child's final result once, after or within turn one.
+    let parent_result_request = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, SPAWN_CALL_ID) && body_contains(req, "<subagent_notification>")
+        },
+        sse(vec![
+            ev_response_created("resp-parent-result"),
+            ev_assistant_message("msg-parent-result", "parent handled child"),
+            ev_completed("resp-parent-result"),
         ]),
     )
     .await;
@@ -867,6 +897,16 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
     test.submit_turn(TURN_1_PROMPT).await?;
     let _ = wait_for_requests(&first_child_request).await?;
     let _ = wait_for_requests(&second_child_request).await?;
+    let parent_result = wait_for_requests(&parent_result_request).await?;
+    assert_eq!(parent_result.len(), 1);
+    assert!(parent_result[0].body_contains_text("child done final"));
+    timeout(Duration::from_secs(5), async {
+        while test.codex.has_pending_subagent_work().await {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("root should finish processing the child result");
 
     let subagent_stop_inputs = wait_for_hook_log(
         test.codex_home_path(),
@@ -2990,6 +3030,26 @@ async fn multi_agent_v2_peer_followup_completion_notifies_initiating_turn(
     let root_thread_id = test.session_configured.thread_id;
     let mut created_threads = test.thread_manager.subscribe_thread_created();
 
+    // Child results continue the root between the explicit fixture turns.
+    // Specific spawn/read responses take precedence over these acknowledgements.
+    Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .and(move |request: &wiremock::Request| {
+            decoded_body(request)
+                .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+                .is_some_and(|body| body["client_metadata"]["thread_id"] == json!(root_thread_id))
+                && body_contains(request, "Message Type: FINAL_ANSWER")
+                && !body_contains(request, READ_RESULT_PROMPT)
+        })
+        .respond_with(sse_response(sse(vec![
+            ev_response_created("resp-routing-root-completion"),
+            ev_assistant_message("msg-routing-root-completion", "root handled child"),
+            ev_completed("resp-routing-root-completion"),
+        ])))
+        .with_priority(/*p*/ 10)
+        .mount(&server)
+        .await;
+
     let worker_spawn_args = serde_json::to_string(&json!({
         "message": WORKER_INITIAL_TASK,
         "task_name": "worker",
@@ -3032,6 +3092,7 @@ async fn multi_agent_v2_peer_followup_completion_notifies_initiating_turn(
             body_contains(request, WORKER_CALL_ID)
                 && body_contains(request, SPAWN_WORKER_PROMPT)
                 && !body_contains(request, SPAWN_REQUESTER_PROMPT)
+                && !body_contains(request, "Message Type: FINAL_ANSWER")
         },
         sse(vec![
             ev_response_created("resp-routing-worker-spawned"),
@@ -3041,7 +3102,24 @@ async fn multi_agent_v2_peer_followup_completion_notifies_initiating_turn(
     )
     .await;
 
-    submit_turn_with_trigger(&test, SPAWN_WORKER_PROMPT, "automation_cron_scheduled").await?;
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: SPAWN_WORKER_PROMPT.to_string(),
+                text_elements: Vec::new(),
+            }])
+            .on_start(TurnStartOptions {
+                turn_trigger: Some("automation_cron_scheduled".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await?;
+    // Settle the root after it has processed the worker's initial result.
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(completed)
+            if completed.last_agent_message.as_deref() == Some("root handled child"))
+    })
+    .await;
     let worker_thread_id = created_threads.recv().await?;
     let mut worker_thread = test.thread_manager.get_thread(worker_thread_id).await?;
     wait_for_event(worker_thread.as_ref(), |event| {
@@ -3293,7 +3371,18 @@ async fn multi_agent_v2_peer_followup_completion_notifies_initiating_turn(
         ]),
     )
     .await;
-    test.submit_turn(READ_RESULT_PROMPT).await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: READ_RESULT_PROMPT.to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    // Earlier continuations may complete first; wait for the explicit read turn.
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(completed)
+            if completed.last_agent_message.as_deref() == Some("result received"))
+    })
+    .await;
     let root_request = root_result_request
         .requests()
         .into_iter()
