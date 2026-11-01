@@ -54,12 +54,14 @@ async fn custom_provider_receives_explicit_image_options(
     )
     .await;
     let codex_home = TempDir::new()?;
+    // A custom Responses provider only sees the image tool with auth-independent tool exposure.
     MockResponsesConfig::new(&server.uri())
         .with_model_provider("custom-images")
         .with_provider_name("Custom Responses")
         .with_provider_config(
             "supports_websockets = false\nrequires_openai_auth = false\nenv_key = \"IMAGEGEN_TEST_API_KEY\"",
         )
+        .enable_feature(Feature::AuthIndependentTools)
         .write(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
