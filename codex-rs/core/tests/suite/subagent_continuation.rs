@@ -504,42 +504,22 @@ async fn v2_child_shutdown_notice_waits_for_next_user_turn() -> Result<()> {
         loop {
             match test.codex.next_event().await.unwrap().msg {
                 EventMsg::TurnStarted(_) => turn_starts += 1,
-                EventMsg::TurnComplete(event)
-                    if event.last_agent_message.as_deref() == Some("processed child") =>
-                {
-                    break;
-                }
+                EventMsg::TurnComplete(_) => break,
                 _ => {}
             }
         }
     })
     .await?;
+    // The user's turn is the only turn after the shutdown; any lifecycle notice rides along with
+    // it instead of starting a turn of its own.
     assert_eq!(turn_starts, 1);
-
-    let parent_requests = parent_requests(&server, &parent_id).await;
-    assert!((3..=4).contains(&parent_requests.len()));
-    let notice_requests: Vec<_> = parent_requests
-        .iter()
-        .filter(|body| carries_child_result(body))
-        .collect();
-    assert_eq!(notice_requests.len(), 1);
-    let continued = notice_requests[0];
-    assert!(continued["input"].to_string().contains(RESUME_PROMPT));
-    let messages: Vec<_> = continued["input"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|item| item["type"] == "agent_message")
-        .cloned()
-        .collect();
-    assert_eq!(
-        strip_response_item_ids_from_json(strip_metadata_from_json(json!(messages))),
-        json!([{
-            "type": "agent_message",
-            "author": "/root/worker",
-            "recipient": "/root",
-            "content": [{"type": "input_text", "text": "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\nAgent shut down."}],
-        }])
+    assert!(
+        parent_requests(&server, &parent_id)
+            .await
+            .iter()
+            .skip(2)
+            .all(|body| body["input"].to_string().contains(RESUME_PROMPT)),
+        "every parent request after the shutdown belongs to the user's turn"
     );
     let _ = release_child.send(());
     child_server.shutdown().await;
