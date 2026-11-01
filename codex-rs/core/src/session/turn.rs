@@ -3592,17 +3592,6 @@ async fn try_run_sampling_request(
     outcome
 }
 
-pub(crate) fn get_last_assistant_message_from_turn<'a>(
-    responses: impl DoubleEndedIterator<Item = &'a ResponseItem>,
-) -> Option<String> {
-    for item in responses.rev() {
-        if let Some(message) = last_assistant_message_from_item(item, /*plan_mode*/ false) {
-            return Some(message);
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 #[path = "turn_tests.rs"]
 mod tests;

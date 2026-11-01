@@ -3,7 +3,6 @@
 
 use std::sync::Arc;
 
-use codex_extension_api::ConversationHistorySnapshot as _;
 use codex_history::CompactedItem;
 use codex_history::CompactionResumeMetadata;
 use codex_history::DynamicToolsSnapshot;
