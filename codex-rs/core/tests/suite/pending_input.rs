@@ -54,7 +54,6 @@ use core_test_support::streaming_sse::StreamingSseChunk;
 use core_test_support::streaming_sse::StreamingSseServer;
 use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::TestCodex;
-use core_test_support::test_codex::TestCodexBuilder;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
@@ -329,15 +328,8 @@ fn response_completed_chunks(response_id: &str) -> Vec<StreamingSseChunk> {
     ]
 }
 
-/// Builds a session whose provider has no stream retries. With retry budget left, the client
-/// buffers candidate events until a complete result arrives, so tests that release a gated
-/// stream only after observing mid-stream events use this builder to get plain streaming.
-fn test_codex_without_stream_retries() -> TestCodexBuilder {
-    test_codex().with_config(|config| config.model_provider.stream_max_retries = Some(0))
-}
-
-async fn build_codex(builder: TestCodexBuilder, server: &StreamingSseServer) -> Arc<CodexThread> {
-    builder
+async fn build_codex(server: &StreamingSseServer) -> Arc<CodexThread> {
+    test_codex()
         .with_config(|config| config.update_plan_enabled = true)
         .with_model("gpt-5.4")
         .build_with_streaming_server(server)
@@ -1071,7 +1063,7 @@ async fn queued_inter_agent_mail_triggers_follow_up_after_reasoning_item() {
     let (server, _completions) =
         start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
 
-    let codex = build_codex(test_codex_without_stream_retries(), &server).await;
+    let codex = build_codex(&server).await;
 
     submit_user_input(&codex, "first prompt").await;
 
@@ -1126,7 +1118,7 @@ async fn queued_inter_agent_mail_triggers_follow_up_after_commentary_message_ite
     let (server, _completions) =
         start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
 
-    let codex = build_codex(test_codex_without_stream_retries(), &server).await;
+    let codex = build_codex(&server).await;
 
     submit_user_input(&codex, "first prompt").await;
 
@@ -1180,7 +1172,7 @@ async fn queued_inter_agent_mail_does_not_restart_after_final_answer(final_answe
         response_completed_chunks("unexpected-resp-2"),
     ])
     .await;
-    let codex = build_codex(test_codex(), &server).await;
+    let codex = build_codex(&server).await;
 
     submit_queue_only_agent_mail(&codex, "queued child update").await;
     submit_user_input(&codex, "first prompt").await;
@@ -1255,7 +1247,7 @@ async fn injected_response_item_reopens_turn_after_final_answer() {
     ];
     let (server, _completions) =
         start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
-    let codex = build_codex(test_codex(), &server).await;
+    let codex = build_codex(&server).await;
 
     submit_user_input(&codex, INITIAL_PROMPT).await;
     wait_for_reasoning_item_started(&codex).await;
@@ -1353,7 +1345,7 @@ async fn steer_interrupts_and_drains_websocket(
         ],
     ]])
     .await;
-    let test = test_codex_without_stream_retries()
+    let test = test_codex()
         .with_model("gpt-5.4")
         .with_model_info_override("gpt-5.4", |model_info| {
             model_info.use_responses_lite = true;
@@ -2036,7 +2028,7 @@ async fn user_input_does_not_preempt_after_reasoning_item() {
     let (server, _completions) =
         start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
 
-    let codex = test_codex_without_stream_retries()
+    let codex = test_codex()
         .with_config(|config| {
             config.update_plan_enabled = true;
             config.features.disable(Feature::InstantInterrupt).unwrap();
@@ -2104,7 +2096,7 @@ async fn interrupt_if_no_pending_input_checks_turn_and_queue(
         start_streaming_sse_server(vec![first_chunks, response_completed_chunks("resp-2")]).await;
     let config_server = responses::start_mock_server().await;
     let base_url = format!("{}/v1", server.uri());
-    let test = test_codex_without_stream_retries()
+    let test = test_codex()
         .with_model("gpt-5.4")
         .with_config(move |config| {
             config.model_provider.base_url = Some(base_url);
@@ -2468,7 +2460,7 @@ async fn steered_user_input_waits_for_model_continuation_after_mid_turn_compact(
     ])
     .await;
 
-    let codex = test_codex_without_stream_retries()
+    let codex = test_codex()
         .with_model("gpt-5.4")
         .with_config(|config| {
             config.features.disable(Feature::InstantInterrupt).unwrap();
@@ -2554,7 +2546,7 @@ async fn steered_user_input_follows_compact_when_only_the_steer_needs_follow_up(
         start_streaming_sse_server(vec![first_chunks, compact_chunks, steered_follow_up_chunks])
             .await;
 
-    let codex = test_codex_without_stream_retries()
+    let codex = test_codex()
         .with_model("gpt-5.4")
         .with_config(|config| {
             config.features.disable(Feature::InstantInterrupt).unwrap();
@@ -2672,7 +2664,7 @@ async fn steered_user_input_waits_when_tool_output_triggers_compact_before_next_
     ])
     .await;
 
-    let test = test_codex_without_stream_retries()
+    let test = test_codex()
         .with_model("gpt-5.4")
         .with_config(|config| {
             config.features.disable(Feature::InstantInterrupt).unwrap();
