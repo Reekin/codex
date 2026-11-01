@@ -132,20 +132,63 @@ pub(crate) struct PermissionRequestPayload {
     pub tool_cwd: Option<PathUri>,
 }
 
-impl PermissionRequestPayload {
-    pub(crate) fn bash(command: String, description: Option<String>, cwd: PathUri) -> Self {
-        let mut tool_input = serde_json::Map::new();
-        tool_input.insert("command".to_string(), serde_json::Value::String(command));
-        if let Some(description) = description {
+/// Hook-facing identity and input of one unified-exec launch.
+///
+/// Hooks, approvals, terminal listings, and resumed `write_stdin` completions all
+/// observe this value. Execution reads the launch request's argv instead, so the
+/// rendered `command` is never parsed back into a process command line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ExecHookMetadata {
+    pub(crate) tool_name: HookToolName,
+    pub(crate) tool_input: serde_json::Value,
+}
+
+impl ExecHookMetadata {
+    /// Shell launches expose the raw script under the historical `Bash` hook name.
+    pub(crate) fn shell(script: &str) -> Self {
+        Self {
+            tool_name: HookToolName::bash(),
+            tool_input: serde_json::json!({ "command": script }),
+        }
+    }
+
+    /// Argv launches expose the authoritative argv plus a rendered command for display.
+    pub(crate) fn argv(argv: &[String]) -> Self {
+        Self {
+            tool_name: HookToolName::new("exec_argv"),
+            tool_input: serde_json::json!({
+                "command": codex_shell_command::parse_command::shlex_join(argv),
+                "argv": argv,
+            }),
+        }
+    }
+
+    /// Display command for approval prompts and background terminal listings.
+    pub(crate) fn command(&self) -> &str {
+        self.tool_input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    }
+
+    /// Builds the PermissionRequest payload; approvals may only add a description.
+    pub(crate) fn permission_request(
+        &self,
+        description: Option<String>,
+        cwd: PathUri,
+    ) -> PermissionRequestPayload {
+        let mut tool_input = self.tool_input.clone();
+        if let Some(description) = description
+            && let Some(tool_input) = tool_input.as_object_mut()
+        {
             tool_input.insert(
                 "description".to_string(),
                 serde_json::Value::String(description),
             );
         }
-
-        Self {
-            tool_name: HookToolName::bash(),
-            tool_input: serde_json::Value::Object(tool_input),
+        PermissionRequestPayload {
+            tool_name: self.tool_name.clone(),
+            tool_input,
             tool_cwd: Some(cwd),
         }
     }

@@ -970,10 +970,12 @@ async fn shell_family_registers_only_unified_exec_tools() {
     })
     .await;
 
-    plan.assert_visible_contains(&["exec_command", "write_stdin"]);
-    plan.assert_registered_contains(&["exec_command", "write_stdin"]);
+    plan.assert_visible_contains(&["exec_argv", "exec_command", "write_stdin"]);
+    plan.assert_registered_contains(&["exec_argv", "exec_command", "write_stdin"]);
     assert!(plan.has_terminal_controls);
     assert!(has_parameter(plan.visible_spec("exec_command"), "shell"));
+    assert!(has_parameter(plan.visible_spec("exec_argv"), "argv"));
+    assert!(!has_parameter(plan.visible_spec("exec_argv"), "shell"));
 }
 
 #[tokio::test]
@@ -1039,8 +1041,8 @@ async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
         );
     })
     .await;
-    remote_environment.assert_visible_lacks(&["exec_command", "write_stdin"]);
-    remote_environment.assert_registered_lacks(&["exec_command", "write_stdin"]);
+    remote_environment.assert_visible_lacks(&["exec_argv", "exec_command", "write_stdin"]);
+    remote_environment.assert_registered_lacks(&["exec_argv", "exec_command", "write_stdin"]);
     assert!(!remote_environment.has_terminal_controls);
 
     let multiple_local_environments = probe(|turn| {
@@ -1051,8 +1053,12 @@ async fn disabling_shell_tools_disables_command_tools_for_all_environments() {
         duplicate_primary_environment(turn);
     })
     .await;
-    multiple_local_environments.assert_visible_lacks(&["exec_command", "write_stdin"]);
-    multiple_local_environments.assert_registered_lacks(&["exec_command", "write_stdin"]);
+    multiple_local_environments.assert_visible_lacks(&["exec_argv", "exec_command", "write_stdin"]);
+    multiple_local_environments.assert_registered_lacks(&[
+        "exec_argv",
+        "exec_command",
+        "write_stdin",
+    ]);
 }
 
 #[tokio::test]
@@ -1096,6 +1102,7 @@ async fn multiple_environments_expose_environment_selectors() {
     })
     .await;
     multiple_environments.assert_visible_contains(&[
+        "exec_argv",
         "exec_command",
         "apply_patch",
         "view_image",
@@ -1104,6 +1111,10 @@ async fn multiple_environments_expose_environment_selectors() {
     assert!(multiple_environments.has_terminal_controls);
     assert!(has_parameter(
         multiple_environments.visible_spec("exec_command"),
+        "environment_id"
+    ));
+    assert!(has_parameter(
+        multiple_environments.visible_spec("exec_argv"),
         "environment_id"
     ));
     assert!(apply_patch_accepts_environment_id(
@@ -1145,7 +1156,7 @@ async fn environment_tools_follow_the_step_context() {
         &Default::default(),
     ));
 
-    plan.assert_visible_contains(&["exec_command", "apply_patch", "view_image"]);
+    plan.assert_visible_contains(&["exec_argv", "exec_command", "apply_patch", "view_image"]);
 }
 
 #[tokio::test]
@@ -1670,8 +1681,13 @@ async fn candidate_model_plan_leaves_selected_model_and_inventory_unchanged() {
     ));
 
     candidate.assert_visible_contains(&["exec", "wait"]);
-    candidate.assert_visible_lacks(&["exec_command", "write_stdin", "apply_patch"]);
-    candidate.assert_registered_contains(&["exec_command", "write_stdin", "apply_patch"]);
+    candidate.assert_visible_lacks(&["exec_argv", "exec_command", "write_stdin", "apply_patch"]);
+    candidate.assert_registered_contains(&[
+        "exec_argv",
+        "exec_command",
+        "write_stdin",
+        "apply_patch",
+    ]);
     assert_eq!(candidate.tool_mode, ToolMode::CodeModeOnly);
     assert!(candidate.requires_code_mode_worker);
     assert!(candidate.has_terminal_controls);

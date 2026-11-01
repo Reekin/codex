@@ -42,6 +42,7 @@ use crate::tools::runtimes::is_managed_proxy_env_var;
 use crate::tools::runtimes::unified_exec::UnifiedExecAttempt;
 use crate::tools::runtimes::unified_exec::UnifiedExecRequest as UnifiedExecToolRequest;
 use crate::tools::runtimes::unified_exec::UnifiedExecRuntime;
+use crate::tools::sandboxing::ExecHookMetadata;
 use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
@@ -262,7 +263,7 @@ struct PreparedProcessHandles {
     session: Option<Arc<crate::session::session::Session>>,
     network_approval: Option<DeferredNetworkApproval>,
     call_id: String,
-    hook_command: String,
+    hook_metadata: ExecHookMetadata,
     tool_cwd: Option<PathUri>,
     process_id: i32,
     tty: bool,
@@ -631,7 +632,7 @@ impl UnifiedExecProcessManager {
                 Arc::clone(&process),
                 context,
                 command,
-                prepared.hook_command.clone(),
+                prepared.resolved.hook_metadata(),
                 cwd.clone(),
                 prepared.turn_environment.selection.environment_id.clone(),
                 permissions,
@@ -867,7 +868,7 @@ impl UnifiedExecProcessManager {
             process_id: response_process_id,
             exit_code,
             original_token_count: Some(original_token_count),
-            hook_command: Some(prepared.hook_command.clone()),
+            hook_metadata: Some(prepared.resolved.hook_metadata()),
             tool_cwd: (!prepared.turn_environment.environment.is_remote())
                 .then(|| prepared.cwd.clone()),
         };
@@ -997,7 +998,7 @@ impl UnifiedExecProcessManager {
             session,
             network_approval,
             call_id,
-            hook_command,
+            hook_metadata,
             tool_cwd,
             process_id,
             tty,
@@ -1128,7 +1129,7 @@ impl UnifiedExecProcessManager {
             process_id,
             exit_code,
             original_token_count: Some(original_token_count),
-            hook_command: Some(hook_command),
+            hook_metadata: Some(hook_metadata),
             tool_cwd,
         };
 
@@ -1233,7 +1234,7 @@ impl UnifiedExecProcessManager {
             session,
             network_approval: entry.network_approval.clone(),
             call_id: entry.call_id.clone(),
-            hook_command: entry.hook_command.clone(),
+            hook_metadata: entry.hook_metadata.clone(),
             // Capture the original process's locality before it can be removed
             // from the store. A later turn may select a different environment.
             tool_cwd: (entry.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID)
@@ -1249,7 +1250,7 @@ impl UnifiedExecProcessManager {
         process: Arc<UnifiedExecProcess>,
         context: &UnifiedExecContext,
         command: &[String],
-        hook_command: String,
+        hook_metadata: ExecHookMetadata,
         cwd: PathUri,
         environment_id: String,
         permissions: super::TerminalPermissions,
@@ -1272,7 +1273,7 @@ impl UnifiedExecProcessManager {
             process_id,
             cwd: cwd.clone(),
             initial_exec_command_active,
-            hook_command,
+            hook_metadata,
             tty,
             environment_id,
             permissions,
@@ -1534,7 +1535,7 @@ impl UnifiedExecProcessManager {
             step_context: Arc::clone(&context.step_context),
             cancellation_token: context.cancellation_token.clone(),
             call_id: context.call_id.clone(),
-            tool_name: ToolName::plain("exec_command"),
+            tool_name: prepared.resolved.tool_name(),
         };
         let result = orchestrator
             .run(&mut runtime, &req, &tool_ctx)
@@ -1847,7 +1848,7 @@ impl UnifiedExecProcessManager {
             .map(|entry| BackgroundTerminalInfo {
                 item_id: entry.call_id.clone(),
                 process_id: entry.process_id.to_string(),
-                command: entry.hook_command.clone(),
+                command: entry.hook_metadata.command().to_string(),
                 cwd: entry.cwd.clone(),
             })
             .collect()

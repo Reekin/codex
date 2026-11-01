@@ -41,6 +41,7 @@ use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::unified_exec::preparation::PreparedExecCommand;
 use crate::tools::network_approval::DeferredNetworkApproval;
+use crate::tools::sandboxing::ExecHookMetadata;
 use codex_core_plugins::PluginMetricsSidecar;
 
 mod async_watcher;
@@ -183,7 +184,8 @@ struct ProcessEntry {
     process_id: i32,
     cwd: PathUri,
     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
-    hook_command: String,
+    /// Originating tool contract, reused when `write_stdin` observes completion.
+    hook_metadata: ExecHookMetadata,
     tty: bool,
     environment_id: String,
     permissions: TerminalPermissions,

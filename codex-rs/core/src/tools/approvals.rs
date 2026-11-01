@@ -16,6 +16,7 @@ use crate::tools::hook_names::HookToolName;
 use crate::tools::runtimes::apply_patch::ApplyPatchApprovalKey;
 use crate::tools::runtimes::unified_exec::UnifiedExecApprovalKey;
 use crate::tools::sandboxing::ApprovalRequestReasons;
+use crate::tools::sandboxing::ExecHookMetadata;
 use crate::tools::sandboxing::PermissionRequestPayload;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::with_cached_approval;
@@ -69,7 +70,7 @@ pub(crate) enum ApprovalAction {
         environment_id: String,
         command: Vec<String>,
         #[serde(skip_serializing)]
-        hook_command: String,
+        hook_metadata: ExecHookMetadata,
         cwd: PathUri,
         sandbox_permissions: SandboxPermissions,
         additional_permissions: Option<AdditionalPermissionProfile>,
@@ -132,7 +133,7 @@ pub(crate) enum ApprovalAction {
         port: u16,
         trigger: Option<GuardianNetworkAccessTrigger>,
         #[serde(skip_serializing)]
-        hook_command: String,
+        hook_metadata: ExecHookMetadata,
         #[serde(skip_serializing)]
         hook_run_id: String,
         command: Vec<String>,
@@ -169,15 +170,11 @@ impl ApprovalAction {
     pub(crate) fn permission_request_payload(&self) -> PermissionRequestPayload {
         let mut payload = match self {
             Self::ExecCommand {
-                hook_command,
+                hook_metadata,
                 justification,
                 cwd,
                 ..
-            } => PermissionRequestPayload::bash(
-                hook_command.clone(),
-                justification.clone(),
-                cwd.clone(),
-            ),
+            } => hook_metadata.permission_request(justification.clone(), cwd.clone()),
             Self::WriteStdin {
                 id,
                 approval_id,
@@ -222,13 +219,12 @@ impl ApprovalAction {
                     .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
             },
             Self::NetworkAccess {
-                hook_command,
+                hook_metadata,
                 target,
                 cwd,
                 trigger,
                 ..
-            } => PermissionRequestPayload::bash(
-                hook_command.clone(),
+            } => hook_metadata.permission_request(
                 Some(format!("network-access {target}")),
                 trigger.as_ref().map_or_else(
                     || PathUri::from_abs_path(cwd),

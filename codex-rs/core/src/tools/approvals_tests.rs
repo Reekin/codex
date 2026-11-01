@@ -141,7 +141,7 @@ async fn non_utf8_cwd_preserves_approval_routing(
         id: context.call_id.clone(),
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         command: vec!["npm".to_string(), "install".to_string()],
-        hook_command: "npm install".to_string(),
+        hook_metadata: ExecHookMetadata::shell("npm install"),
         cwd: cwd.clone(),
         sandbox_permissions: if reviewer == ApprovalsReviewer::User {
             SandboxPermissions::RequireEscalated
@@ -279,7 +279,7 @@ fn network_hook_cwd_overrides_only_local_commands() {
                 justification: None,
                 tty: None,
             }),
-            hook_command: "curl https://example.com".into(),
+            hook_metadata: ExecHookMetadata::shell("curl https://example.com"),
             hook_run_id: "hook-1".into(),
             command: vec!["network-access".into(), "https://example.com:443".into()],
             cwd: local_cwd.clone(),
