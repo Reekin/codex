@@ -2,11 +2,8 @@
 
 use super::compact::local_support::*;
 use anyhow::Result;
-use codex_core::CodexThread;
 use codex_core::TurnInputRequest;
-use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
-use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::recall::RecallArchive;
 use core_test_support::responses::start_mock_server;
@@ -15,26 +12,8 @@ use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
-
-/// TurnComplete is emitted just before the active turn is cleared, so an immediate rollback can
-/// be rejected as in progress; retry only that rejection.
-async fn rollback_one_turn(codex: &CodexThread) -> Result<ThreadRolledBackEvent> {
-    loop {
-        codex.submit(Op::ThreadRollback { num_turns: 1 }).await?;
-        let rolled_back = core_test_support::wait_for_event_match(codex, |event| match event {
-            EventMsg::ThreadRolledBack(event) => Some(Some(event.clone())),
-            EventMsg::Error(error) if error.message.contains("while a turn is in progress") => {
-                Some(None)
-            }
-            _ => None,
-        })
-        .await;
-        if let Some(event) = rolled_back {
-            return Ok(event);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-}
+use std::io::Write as _;
+use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compact_resume_and_fork_preserve_installed_history_and_original_ids() -> Result<()> {
@@ -283,9 +262,22 @@ async fn rollback_discards_later_dialogue_after_local_cleanup() -> Result<()> {
     finish_marking(&test, &model, /*expected_batches*/ 1).await?;
     model.text("Discard this answer.");
     test.submit_text_turn("Discard this instruction.").await?;
-    // TurnComplete is emitted just before the active turn is cleared, so an immediate
-    // rollback can be rejected as in progress; retry only that rejection.
-    rollback_one_turn(&test.codex).await?;
+    // Live rollback is unsupported; replay a persisted rollback marker over the installed
+    // cleanup checkpoint, as older rollouts do.
+    test.codex.flush_rollout().await?;
+    let path = test.codex.rollout_path().unwrap();
+    test.codex.shutdown_and_wait().await?;
+    let marker = json!({"timestamp": "2026-01-01T00:00:00Z", "type": "event_msg", "payload": {
+        "type": "thread_rolled_back", "num_turns": 1
+    }});
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(&path)?,
+        "{marker}"
+    )?;
+    let test = test_codex()
+        .with_config(configure_marking)
+        .resume(&server, Arc::clone(&test.home), path)
+        .await?;
     model.text("Edited answer.");
     test.submit_text_turn("Edited instruction.").await?;
     let body: Value = model.ordinary_bodies().last().unwrap().clone();

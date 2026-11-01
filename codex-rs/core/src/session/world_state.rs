@@ -179,14 +179,12 @@ impl Session {
             )?);
         }
         world_state.add_section(model_state);
-        let token_budget_enabled = crate::local_compaction::token_budget_route(
-            turn_context,
-            &step_context.settings.model_info,
-        ) && step_context
-            .settings
-            .model_info
-            .resolved_context_window()
-            .is_some();
+        let token_budget_enabled = turn_context.config.features.enabled(Feature::TokenBudget)
+            && step_context
+                .settings
+                .model_info
+                .resolved_context_window()
+                .is_some();
         if token_budget_enabled {
             let window_ids = self.state.lock().await.auto_compact_window_ids();
             world_state.add_section(TokenBudgetContext::new(

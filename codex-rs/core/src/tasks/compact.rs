@@ -7,6 +7,7 @@ use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
 use crate::state::TaskKind;
+use codex_features::Feature;
 use codex_model_provider::RemoteCompactionSupport;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -52,7 +53,7 @@ impl SessionTask for CompactTask {
             // The local pipeline first applies the marks already validated.
             crate::local_compaction::cancel(&session).await;
         }
-        if crate::local_compaction::token_budget_route(&ctx, &step_context.settings.model_info) {
+        if ctx.config.features.enabled(Feature::TokenBudget) {
             crate::compact_token_budget::run_manual_compact_task(
                 session,
                 step_context,

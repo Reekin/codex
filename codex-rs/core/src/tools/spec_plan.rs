@@ -1366,18 +1366,15 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
 
     // Local full compaction replaces history with summaries; tool cleanup on any route
     // replaces results. Either way the originals stay readable through recall.
-    let local_route = crate::compaction_policy::remote_compaction_support(
-        turn_context.provider.capabilities().remote_compaction,
-        context.model_info,
-    ) == codex_model_provider::RemoteCompactionSupport::Unsupported;
-    if context.has_local_compaction_history || local_route {
+    if context.has_local_compaction_history
+        || crate::local_compaction::uses_local_route(turn_context, context.model_info)
+    {
         for action in ["list_turns", "search", "read_turn", "read_item"] {
             registry.add(RecallHandler(action));
         }
     }
 
-    // A token-budget window reset never stands in for local full compaction.
-    if features.enabled(Feature::TokenBudget) && !local_route {
+    if features.enabled(Feature::TokenBudget) {
         let model_messages = ResolvedModelMessages::from_model(context.model_info);
         let messages = model_messages.context_management();
         registry.add_with_exposure(

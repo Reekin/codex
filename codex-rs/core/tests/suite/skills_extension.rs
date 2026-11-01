@@ -3087,7 +3087,6 @@ async fn production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_r
         .with_config(|config| {
             configure_catalog_test(config);
             config.cloud_skill_enabled = true;
-            config.model_provider.name = "Skills compaction test".to_string();
             config.model_post_turn_compact_threshold_percent = 50;
             config
                 .features
@@ -3170,7 +3169,13 @@ async fn production_turn_keeps_rebalanced_catalogs_stable_after_compaction_and_r
             ]),
             sse(vec![
                 ev_response_created("compact"),
-                responses::ev_assistant_message("summary", "The available skills were inspected."),
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "compaction",
+                        "encrypted_content": "SKILLS_COMPACTION_SUMMARY",
+                    },
+                }),
                 ev_completed("compact"),
             ]),
             sse(vec![

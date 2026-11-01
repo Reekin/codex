@@ -42,7 +42,6 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
     let test = test_codex()
         .with_history_mode(ThreadHistoryMode::Paginated)
         .with_config(|config| {
-            config.model_provider.name = "Local compaction test provider".to_string();
             config
                 .features
                 .disable(Feature::LocalThreadStoreCompression)
@@ -60,7 +59,13 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
     mount_sse_once(
         &server,
         sse(vec![
-            ev_assistant_message("summary", "PERSISTED_COMPRESSION_CHECKPOINT"),
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "compaction",
+                    "encrypted_content": "PERSISTED_COMPRESSION_CHECKPOINT",
+                },
+            }),
             ev_completed("compact"),
         ]),
     )
