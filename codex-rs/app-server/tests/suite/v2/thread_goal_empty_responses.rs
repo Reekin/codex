@@ -75,11 +75,19 @@ async fn empty_goal_continuations_block_after_three_without_activity(
                 events.push(event);
             }
         }
-        let mut empty_final = responses::ev_assistant_message(&format!("empty-final-{turn}"), "");
-        empty_final["item"]["phase"] = json!("final_answer");
-        events.push(empty_final);
+        events.push(empty_final_answer(&format!("empty-final-{turn}")));
         events.push(responses::ev_completed(&id));
         scripts.push(responses::sse(events));
+        // Without a visible final answer the turn gets one recovery request; keep it empty so
+        // the turn still ends without activity.
+        if !(turn == 3 && recovery == Some("final_answer")) {
+            let recovery_id = format!("{id}-recovery");
+            scripts.push(responses::sse(vec![
+                responses::ev_response_created(&recovery_id),
+                empty_final_answer(&format!("empty-final-{turn}-recovery")),
+                responses::ev_completed(&recovery_id),
+            ]));
+        }
     }
     let server = create_mock_responses_server_sequence(scripts).await;
     let codex_home = TempDir::new()?;
@@ -184,4 +192,10 @@ command_windows = """Write-Output '{"continue":false}'"""
     .await??;
     server.verify().await;
     Ok(())
+}
+
+fn empty_final_answer(item_id: &str) -> serde_json::Value {
+    let mut event = responses::ev_assistant_message(item_id, "");
+    event["item"]["phase"] = json!("final_answer");
+    event
 }
