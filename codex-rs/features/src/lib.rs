@@ -251,6 +251,8 @@ pub enum Feature {
     DeferMailboxPreemption,
     /// Allow agent messages to wake idle root sessions after a completed turn.
     WakeOnAgentMessages,
+    /// Continue parents with completed subagent results and release subagent waits on steering.
+    SubagentContinuation,
     /// Preempt responses and yield foreground code-mode observations on new user input.
     InstantInterrupt,
     /// Enable shared discussion tools for an agent tree.
@@ -1599,6 +1601,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::WakeOnAgentMessages,
         key: "wake_on_agent_messages",
         stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::SubagentContinuation,
+        key: "subagent_continuation",
+        stage: Stage::Stable,
         default_enabled: false,
     },
     FeatureSpec {
