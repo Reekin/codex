@@ -250,6 +250,7 @@ async fn new_config(
         model_auto_compact_token_limit: None,
         model_auto_compact_token_limit_scope: AutoCompactTokenLimitScope::Total,
         model_post_turn_compact_threshold_percent: 0,
+        local_compaction: Default::default(),
         async_compaction_threshold_percent: 65,
         model_provider_id,
         model_provider,

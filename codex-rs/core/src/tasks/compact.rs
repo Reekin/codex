@@ -50,6 +50,12 @@ impl SessionTask for CompactTask {
                 .build_world_state_for_step(&step_context, /*new_window*/ true)
                 .await?,
         );
+        crate::local_compaction::before_full_compaction(
+            &session,
+            &ctx,
+            &step_context.settings.model_info,
+        )
+        .await;
         if ctx.config.features.enabled(Feature::TokenBudget) {
             crate::compact_token_budget::run_manual_compact_task(
                 session,

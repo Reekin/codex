@@ -192,6 +192,10 @@ pub struct ConfigToml {
     #[schemars(range(min = 0, max = 100))]
     pub model_post_turn_compact_threshold_percent: Option<u8>,
 
+    /// Background tool marking, cleanup and local full-compaction budgets.
+    #[serde(default)]
+    pub local_compaction: crate::LocalCompactionConfig,
+
     /// Default approval policy for executing commands.
     #[schemars(with = "Option<crate::schema::ConfigAskForApproval>")]
     pub approval_policy: Option<AskForApproval>,

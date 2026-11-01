@@ -114,6 +114,7 @@ fn assemble_compaction_history(
         .collect()
 }
 
+/// Automatic compaction on the local route. Returns whether a new history was installed.
 pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
@@ -121,7 +122,7 @@ pub(crate) async fn run_inline_auto_compact_task(
     world_state: Arc<WorldState>,
     reason: CompactionReason,
     phase: CompactionPhase,
-) -> CodexResult<()> {
+) -> CodexResult<bool> {
     let prompt = step_context
         .turn
         .config
@@ -148,8 +149,7 @@ pub(crate) async fn run_inline_auto_compact_task(
             phase,
         ),
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 pub(crate) async fn run_compact_task(
@@ -182,7 +182,7 @@ async fn run_compact_task_inner(
     input: Vec<UserInput>,
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
-) -> CodexResult<()> {
+) -> CodexResult<bool> {
     let turn_context = Arc::clone(&step_context.turn);
     let trigger = compaction_metadata.trigger();
     let reason = compaction_metadata.reason();
@@ -212,15 +212,27 @@ async fn run_compact_task_inner(
             return Err(error);
         }
     }
-    let result = run_compact_task_inner_impl(
-        Arc::clone(&sess),
-        step_context,
-        replacement_step_context,
-        input,
-        world_state,
-        compaction_metadata,
-    )
-    .await;
+    let result = if crate::local_compaction::enabled(&turn_context.config) {
+        run_local_compaction(
+            &sess,
+            &step_context,
+            &replacement_step_context,
+            &world_state,
+            compaction_metadata,
+        )
+        .await
+    } else {
+        run_compact_task_inner_impl(
+            Arc::clone(&sess),
+            step_context,
+            replacement_step_context,
+            input,
+            world_state,
+            compaction_metadata,
+        )
+        .await
+        .map(|_| true)
+    };
     let status = compaction_status_from_result(&result);
     let codex_error = result.as_ref().err();
     if result.is_ok() {
@@ -259,7 +271,33 @@ async fn run_compact_task_inner(
             sess.send_event(&turn_context, event).await;
         }
     }
-    result.map(|_| ())
+    result
+}
+
+/// Local context compaction replaces the summary loop with its window pipeline; see
+/// `crate::local_compaction::run_pipeline`. Returns whether a new history was installed.
+async fn run_local_compaction(
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
+    replacement_step_context: &Arc<StepContext>,
+    world_state: &WorldState,
+    compaction_metadata: CompactionTurnMetadata,
+) -> CodexResult<bool> {
+    let turn_context = &step_context.turn;
+    let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
+    sess.emit_turn_item_started(turn_context, &compaction_item)
+        .await;
+    let installed = Box::pin(crate::local_compaction::run_pipeline(
+        sess,
+        step_context,
+        replacement_step_context,
+        world_state,
+        compaction_metadata,
+    ))
+    .await?;
+    sess.emit_turn_item_completed(turn_context, compaction_item)
+        .await;
+    Ok(installed)
 }
 
 async fn run_compact_task_inner_impl(

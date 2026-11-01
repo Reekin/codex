@@ -260,6 +260,7 @@ mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
 pub(crate) use submission::Submission;
 mod input_queue;
+mod local_compaction;
 mod mcp;
 mod mcp_prewarm;
 mod mcp_refresh;
@@ -295,6 +296,7 @@ pub(crate) use self::input_queue::InputQueueActivity;
 pub(crate) use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
 pub(crate) use self::input_queue::UserInputMetadata;
+pub(crate) use self::local_compaction::LocalInstall;
 use self::review::spawn_review_thread;
 use self::session::AppServerClientMetadata;
 use self::session::Session;
@@ -820,21 +822,37 @@ impl Session {
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
         let auth = auth_manager.auth_cached();
+        let local_route = crate::local_compaction::enabled(&config)
+            && crate::local_compaction::is_local_route(
+                create_model_provider(
+                    config.model_provider.clone(),
+                    Some(Arc::clone(&auth_manager)),
+                )
+                .capabilities()
+                .remote_compaction,
+                &model_info,
+            );
         // Forked subagents keep their parent's activation with the copied history.
         // Fresh children restore configured preferences before applying startup defaults.
+        // A local-route child clears any inherited activation.
         let inherits_token_budget = matches!(&conversation_history, InitialHistory::Forked(_))
-            && config.token_budget_startup_config.is_some();
+            && config.token_budget_startup_config.is_some()
+            && !local_route;
         if !inherits_token_budget {
             Arc::make_mut(&mut config)
                 .prepare_token_budget_for_startup()
                 .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
             // Resolve activation for this runtime, including when resuming saved history.
-            token_budget::apply_experimental_context(
-                Arc::make_mut(&mut config),
-                auth.as_ref(),
-                &model_info,
-            )?;
-            token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
+            if local_route {
+                token_budget::clear_for_local_compaction(Arc::make_mut(&mut config));
+            } else {
+                token_budget::apply_experimental_context(
+                    Arc::make_mut(&mut config),
+                    auth.as_ref(),
+                    &model_info,
+                )?;
+                token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
+            }
         }
         let configured_config = Arc::clone(&config);
         let multi_agent_version = config.multi_agent_version_override().or_else(|| {
@@ -4092,11 +4110,8 @@ impl Session {
             }
         }
         let dynamic_tools = self.dynamic_tools().await;
-        let token_budget = token_budget::resolve_token_budget(
-            turn_context.configured_token_budget.as_ref(),
-            turn_context.use_model_token_budget_defaults,
-            settings.model_info.as_ref(),
-        );
+        let token_budget =
+            token_budget::resolve_for_model(&turn_context, settings.model_info.as_ref());
         let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
         let environments = environments.or_cancel(cancellation_token).await?;
         let inherited_environments = inherited_environments.unwrap_or_else(|| environments.clone());

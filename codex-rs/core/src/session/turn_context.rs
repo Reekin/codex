@@ -1058,6 +1058,11 @@ impl Session {
         let available_models = models_manager.try_list_models().unwrap_or_default();
 
         let mut per_turn_config = per_turn_config;
+        super::token_budget::disable_for_local_route(
+            &mut per_turn_config,
+            provider.capabilities().remote_compaction,
+            model_info,
+        );
         let configured_token_budget = per_turn_config.token_budget.clone();
         let use_model_token_budget_defaults =
             per_turn_config.features.enabled(Feature::TokenBudget)

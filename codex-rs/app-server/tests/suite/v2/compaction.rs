@@ -751,3 +751,6 @@ fn compaction_config(server_uri: &str, auto_compact_limit: i64) -> MockResponses
         ))
         .with_provider_config("supports_websockets = false")
 }
+
+#[path = "compaction_tool_cleanup.rs"]
+mod tool_cleanup;

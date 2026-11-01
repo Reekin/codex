@@ -16,6 +16,7 @@ use codex_config::ConfigRequirements;
 use codex_config::ConfigRequirementsToml;
 use codex_config::ConstrainedWithSource;
 use codex_config::FeatureRequirementsToml;
+pub use codex_config::LocalCompactionConfig;
 use codex_config::ManagedAuthPolicy;
 use codex_config::McpEnterpriseManagedAuthConfig;
 use codex_config::McpServerRequirement;
@@ -665,6 +666,9 @@ pub struct Config {
     /// Percentage of the usable context window that triggers turn-end compaction.
     /// Zero disables turn-end compaction.
     pub model_post_turn_compact_threshold_percent: u8,
+
+    /// Background tool marking, cleanup and local full-compaction budgets.
+    pub local_compaction: LocalCompactionConfig,
 
     /// Percentage of the model's full context window at which background compaction starts.
     pub async_compaction_threshold_percent: u8,
@@ -4015,6 +4019,7 @@ impl Config {
         };
         let code_mode = resolve_code_mode_config(&cfg);
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
+        cfg.local_compaction.validate()?;
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
@@ -4540,6 +4545,7 @@ impl Config {
             model_post_turn_compact_threshold_percent: cfg
                 .model_post_turn_compact_threshold_percent
                 .unwrap_or_default(),
+            local_compaction: cfg.local_compaction,
             async_compaction_threshold_percent,
             model_provider_id,
             model_provider,
@@ -5265,6 +5271,10 @@ pub fn log_dir(cfg: &Config) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "local_compaction_tests.rs"]
+mod local_compaction_tests;
 
 #[cfg(test)]
 #[path = "config_loader_tests.rs"]

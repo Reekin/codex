@@ -2918,6 +2918,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-context-compaction"
+version = "0.0.0"
+dependencies = [
+ "codex-context-fragments",
+ "codex-history",
+ "codex-protocol",
+ "codex-utils-output-truncation",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha1 0.10.6",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "codex-context-fragments"
 version = "0.0.0"
 dependencies = [
@@ -2954,6 +2972,7 @@ dependencies = [
  "codex-code-mode",
  "codex-config",
  "codex-connectors",
+ "codex-context-compaction",
  "codex-context-fragments",
  "codex-core-plugins",
  "codex-diagnostics",

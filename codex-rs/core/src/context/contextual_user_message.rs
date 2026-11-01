@@ -20,8 +20,10 @@ use super::UserInstructions;
 use super::UserShellCommand;
 use super::world_state::EnvironmentsState;
 use crate::image_preparation::ImagePreparationError;
+use codex_context_compaction::LocalCompactionFragment;
 
 const CONTEXTUAL_USER_FRAGMENT_MATCHERS: &[fn(&str) -> bool] = &[
+    LocalCompactionFragment::matches_text,
     UserInstructions::matches_text,
     EnvironmentsState::matches_text,
     AdditionalContextUserFragment::matches_text,

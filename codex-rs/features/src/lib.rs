@@ -473,6 +473,9 @@ pub enum Feature {
     AsyncCompaction,
     /// Include retained images in the remote compaction context budget.
     CompactionImageBudget,
+    /// Mark tool results in the background, clean them up at sampling boundaries, and run full
+    /// compaction through the local window pipeline on routes without native compaction.
+    LocalContextCompaction,
     /// Retain client-authored developer messages across compacted context windows.
     RetainClientDeveloperMessages,
     /// Honor client-requested tool-output retention across context windows.
@@ -2265,6 +2268,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "compaction_image_budget",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::LocalContextCompaction,
+        key: "local_context_compaction",
+        stage: Stage::Stable,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::RetainClientDeveloperMessages,

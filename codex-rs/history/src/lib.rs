@@ -137,6 +137,33 @@ pub struct CodexHarnessMetadata {
     /// Sender context captured by the host when this task message was accepted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_user_messages: Option<Box<SenderUserMessages>>,
+
+    /// Durable source range of a locally compacted result, folded tool run or summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_compaction: Option<LocalCompactionSource>,
+
+    /// Kept verbatim by the latest local full compaction; the next one summarizes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub previous_window: bool,
+}
+
+/// Local archive addresses survive replacement views and repeated summarization.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
+pub struct LocalCompactionSource {
+    pub first_item_id: String,
+    pub last_item_id: String,
+    pub kind: LocalCompactionKind,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalCompactionKind {
+    ToolResult,
+    /// Low-value tool work that full compaction folded into one line.
+    ToolRun,
+    CondensedDialogue,
+    OldestOverview,
+    ConstraintsLedger,
 }
 
 fn deserialize_mcp_attribution_checkpoint<'de, D>(

@@ -43,6 +43,14 @@ pub(super) async fn spawn_review_thread(
     // Preserve configured overrides without carrying over the parent model's defaults.
     per_turn_config.token_budget = config.token_budget.clone();
     per_turn_config.features = review_features.clone();
+    super::token_budget::disable_for_local_route(
+        &mut per_turn_config,
+        parent_turn_context
+            .provider
+            .capabilities()
+            .remote_compaction,
+        &review_model_info,
+    );
     if let Some(current_effort) = reasoning_effort.as_ref()
         && review_model_info.slug != parent_turn_context.model_info().slug
         && !review_model_info.used_fallback_model_metadata

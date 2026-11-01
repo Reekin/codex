@@ -6235,3 +6235,15 @@ async fn remote_v2_compaction_refreshes_instructions_and_preserves_them_on_cold_
 
 #[path = "compact_program_tests.rs"]
 mod program_tests;
+
+// Local context compaction scenarios; each enables `Feature::LocalContextCompaction`.
+#[path = "compact_local.rs"]
+mod local;
+#[path = "compact_local_resume_fork.rs"]
+mod local_resume_fork;
+#[path = "compact_local_routing.rs"]
+mod local_routing;
+#[path = "compact_local_support.rs"]
+mod local_support;
+#[path = "compact_local_tool_cleanup.rs"]
+mod tool_cleanup;
