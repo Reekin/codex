@@ -4,7 +4,7 @@ These prompting principles are shared by both top-level modes of the skill:
 - built-in `image_gen` tool (default)
 - explicit `scripts/image_gen.py` CLI fallback
 
-This file is about prompt structure, specificity, and iteration. Fallback-only execution controls such as `quality`, `input_fidelity`, masks, output format, and output paths live in the fallback docs.
+This file is about prompt structure, specificity, and iteration. Built-in model, quality, and size selection is defined in `SKILL.md`. CLI-only controls such as `input_fidelity`, masks, output format, and output paths live in the fallback docs.
 
 ## Contents
 - [Structure](#structure)
@@ -76,12 +76,12 @@ Do not add:
 - Ask built-in `image_gen` for a genuinely transparent background and preserve its alpha.
 
 ## Fallback-only execution controls
-- `quality`, `input_fidelity`, explicit masks, output format, and output paths are fallback-only execution controls.
-- Do not assume they are built-in `image_gen` tool arguments.
+- Model, quality, and size are built-in tool arguments; set them explicitly using `SKILL.md` guidance.
+- Input fidelity, explicit masks, output format, and destination paths are CLI-only execution controls; do not pass them as built-in arguments.
 - If the user explicitly chooses CLI fallback, see `references/cli.md` and `references/image-api.md` for those controls.
 - In CLI fallback mode, `gpt-image-2` is the default. It supports `quality=low|medium|high|auto`; use `low` for fast drafts and thumbnails, and move to `medium`, `high`, or `auto` for final assets.
 - `gpt-image-2` always uses high fidelity for image inputs, so do not set `input_fidelity` with that model.
-- CLI `gpt-image-2` does not support `background=transparent`; ask before using `gpt-image-1.5` unless the user explicitly requested that model.
+- The bundled CLI rejects `background=transparent` with `gpt-image-2`; do not generalize this script restriction to the API. Ask before using its `gpt-image-1.5` path unless the user explicitly requested that model.
 - If the user asks for 4K-style output with `gpt-image-2`, use `3840x2160` for landscape or `2160x3840` for portrait.
 
 ## Use-case tips
