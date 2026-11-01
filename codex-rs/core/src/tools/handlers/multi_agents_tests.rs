@@ -240,22 +240,6 @@ struct InterruptAgentResult {
     previous_status: AgentStatus,
 }
 
-fn multi_agent_v2_wait_result(
-    current_agent_name: &str,
-    timed_out: bool,
-) -> crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-    let message = if timed_out {
-        format!(
-            "Wait timed out for your mailbox as `{current_agent_name}`. This wait only observes updates delivered to your own mailbox; it does not wait for `/root`'s child tasks unless you are `/root`."
-        )
-    } else {
-        format!(
-            "Wait completed for your mailbox as `{current_agent_name}`. This wait only observed an update delivered to your own mailbox; it did not wait for another agent's mailbox."
-        )
-    };
-    crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult { message, timed_out }
-}
-
 #[tokio::test]
 async fn handler_rejects_non_function_payloads() {
     let (session, turn) = make_session_and_context().await;
@@ -1489,9 +1473,6 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
     session.thread_id = root.thread_id;
     let mut config = (*turn.config).clone();
     let _ = config.features.enable(Feature::MultiAgentV2);
-    config.multi_agent_v2.min_wait_timeout_ms = 0;
-    config.multi_agent_v2.max_wait_timeout_ms = 0;
-    config.multi_agent_v2.default_wait_timeout_ms = 0;
     set_turn_config(&mut turn, config);
 
     let session = Arc::new(session);
@@ -1520,8 +1501,7 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .get_thread(agent_id)
         .await
         .expect("child thread should exist");
-    let child_session = Arc::clone(&child_thread.session);
-    let child_turn = child_session.new_default_turn().await;
+    let child_turn = child_thread.session.new_default_turn().await;
     child_thread
         .session
         .send_event(
@@ -1539,11 +1519,10 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         )
         .await;
 
-    // List from the child so its contextual identity is compared with upstream list entries.
     let output = ListAgentsHandlerV2
         .handle(invocation(
-            Arc::clone(&child_session),
-            Arc::clone(&child_turn),
+            session,
+            turn,
             "list_agents",
             function_payload(json!({})),
         ))
@@ -1566,23 +1545,6 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .expect("worker agent should be listed");
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
     assert_eq!(success, Some(true));
-
-    let output = WaitAgentHandlerV2::default()
-        .handle(invocation(
-            child_session,
-            child_turn,
-            "wait_agent",
-            function_payload(json!({})),
-        ))
-        .await
-        .expect("wait_agent should succeed");
-    let (content, _) = expect_text_output(output);
-    let wait_result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
-        serde_json::from_str(&content).expect("wait_agent result should be json");
-    assert_eq!(
-        wait_result,
-        multi_agent_v2_wait_result("/root/worker", /*timed_out*/ true)
-    );
 }
 
 #[tokio::test]
@@ -2279,55 +2241,25 @@ async fn multi_agent_v2_spawn_surfaces_task_name_validation_errors() {
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
     set_turn_config(&mut turn, config);
-    let max_task_name = "a".repeat(AgentPath::MAX_AGENT_NAME_BYTES);
-    let mut parent_path = AgentPath::root();
-    while let Ok(next) = parent_path.join(&max_task_name) {
-        parent_path = next;
-    }
-    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: ThreadId::new(),
-        depth: 1,
-        agent_path: Some(parent_path),
-        agent_nickname: None,
-        agent_role: None,
-    });
 
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-    for (task_name, expected) in [
-        (
-            "BadName".to_string(),
-            "agent_name must use only lowercase letters, digits, and underscores".to_string(),
-        ),
-        (
-            "a".repeat(AgentPath::MAX_AGENT_NAME_BYTES + 1),
-            format!(
-                "agent_name must not exceed {} UTF-8 bytes",
-                AgentPath::MAX_AGENT_NAME_BYTES
-            ),
-        ),
-        (
-            max_task_name,
-            format!(
-                "agent path must not exceed {} UTF-8 bytes",
-                AgentPath::MAX_PATH_BYTES
-            ),
-        ),
-    ] {
-        let invocation = invocation(
-            Arc::clone(&session),
-            Arc::clone(&turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "inspect this repo",
-                "task_name": task_name
-            })),
-        );
-        let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
-            panic!("invalid agent name should be rejected");
-        };
-        assert_eq!(err, FunctionCallError::RespondToModel(expected));
-    }
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo",
+            "task_name": "BadName"
+        })),
+    );
+    let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
+        panic!("invalid agent name should be rejected");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "agent_name must use only lowercase letters, digits, and underscores".to_string()
+        )
+    );
 }
 
 // TODO(anp): Restore this test on Linux once sandbox helpers work inside test microVMs.
@@ -3040,69 +2972,6 @@ async fn wait_agent_rejects_empty_targets() {
 }
 
 #[tokio::test]
-async fn wait_agent_rejects_current_agent_target() {
-    let (session, turn) = make_session_and_context().await;
-    let current_thread_id = session.thread_id;
-    let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
-        "wait_agent",
-        function_payload(json!({"targets": [current_thread_id.to_string()]})),
-    );
-    let Err(err) = WaitAgentHandler::default().handle(invocation).await else {
-        panic!("current agent target should be rejected");
-    };
-    let FunctionCallError::RespondToModel(message) = err else {
-        panic!("expected respond-to-model error");
-    };
-    assert!(message.contains("wait_agent cannot wait for the current agent `/root`"));
-    assert!(message.contains("Return your result if your task is complete"));
-}
-
-#[tokio::test]
-async fn multi_agent_v2_wait_agent_names_pathless_subagent_mailbox() {
-    let (session, mut turn) = make_session_and_context().await;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    config.multi_agent_v2.min_wait_timeout_ms = 0;
-    config.multi_agent_v2.max_wait_timeout_ms = 0;
-    config.multi_agent_v2.default_wait_timeout_ms = 0;
-    set_turn_config(&mut turn, config);
-    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: ThreadId::new(),
-        depth: 1,
-        agent_path: None,
-        agent_nickname: None,
-        agent_role: None,
-    });
-    let current_thread_id = session.thread_id.to_string();
-
-    let output = timeout(
-        Duration::from_secs(/*secs*/ 1),
-        WaitAgentHandlerV2::default().handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "wait_agent",
-            function_payload(json!({})),
-        )),
-    )
-    .await
-    .expect("zero configured timeout should return promptly")
-    .expect("wait_agent should succeed");
-    let (content, _) = expect_text_output(output);
-    let result: crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult =
-        serde_json::from_str(&content).expect("wait_agent result should be json");
-
-    assert_eq!(
-        result,
-        multi_agent_v2_wait_result(&current_thread_id, /*timed_out*/ true)
-    );
-}
-
-#[tokio::test]
 async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3187,7 +3056,10 @@ async fn multi_agent_v2_wait_agent_accepts_timeout_only_argument() {
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
         result,
-        multi_agent_v2_wait_result("/root", /*timed_out*/ false)
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait completed.".to_string(),
+            timed_out: false,
+        }
     );
     assert_eq!(success, None);
 }
@@ -3230,10 +3102,9 @@ async fn multi_agent_v2_wait_agent_clamps_timeout_below_configured_min() {
     assert_eq!(
         result,
         crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
-            message: format!(
-                "{}\n\nRequested timeout of 1ms was clamped to the minimum of 50ms.",
-                multi_agent_v2_wait_result("/root", /*timed_out*/ true).message
-            ),
+            message:
+                "Wait timed out.\n\nRequested timeout of 1ms was clamped to the minimum of 50ms."
+                    .to_string(),
             timed_out: true,
         }
     );
@@ -3267,7 +3138,10 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_min() 
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
         result,
-        multi_agent_v2_wait_result("/root", /*timed_out*/ true)
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait timed out.".to_string(),
+            timed_out: true,
+        }
     );
     assert_eq!(success, None);
 }
@@ -3319,7 +3193,10 @@ async fn multi_agent_v2_wait_agent_uses_configured_default_timeout() {
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
         result,
-        multi_agent_v2_wait_result("/root", /*timed_out*/ true)
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait timed out.".to_string(),
+            timed_out: true,
+        }
     );
     assert_eq!(success, None);
 }
@@ -3356,7 +3233,10 @@ async fn multi_agent_v2_wait_agent_allows_zero_configured_timeout() {
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
         result,
-        multi_agent_v2_wait_result("/root", /*timed_out*/ true)
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait timed out.".to_string(),
+            timed_out: true,
+        }
     );
     assert_eq!(success, None);
 }
@@ -3418,7 +3298,10 @@ async fn multi_agent_v2_wait_agent_accepts_explicit_timeout_at_configured_max() 
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
         result,
-        multi_agent_v2_wait_result("/root", /*timed_out*/ true)
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait timed out.".to_string(),
+            timed_out: true,
+        }
     );
     assert_eq!(success, None);
 }
@@ -3674,7 +3557,10 @@ async fn multi_agent_v2_wait_agent_returns_summary_for_mailbox_activity() {
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
         result,
-        multi_agent_v2_wait_result("/root", /*timed_out*/ false)
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait completed.".to_string(),
+            timed_out: false,
+        }
     );
     assert_eq!(success, None);
 }
@@ -3756,7 +3642,10 @@ async fn multi_agent_v2_wait_agent_returns_for_already_queued_mail() {
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
         result,
-        multi_agent_v2_wait_result("/root", /*timed_out*/ false)
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait completed.".to_string(),
+            timed_out: false,
+        }
     );
     assert_eq!(success, None);
 }
@@ -3848,7 +3737,10 @@ async fn multi_agent_v2_wait_agent_wakes_on_any_mailbox_notification() {
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
         result,
-        multi_agent_v2_wait_result("/root", /*timed_out*/ false)
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait completed.".to_string(),
+            timed_out: false,
+        }
     );
     assert_eq!(success, None);
 }
@@ -3937,7 +3829,10 @@ async fn multi_agent_v2_wait_agent_does_not_return_completed_content() {
         serde_json::from_str(&content).expect("wait_agent result should be json");
     assert_eq!(
         result,
-        multi_agent_v2_wait_result("/root", /*timed_out*/ false)
+        crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult {
+            message: "Wait completed.".to_string(),
+            timed_out: false,
+        }
     );
     assert!(!content.contains("sensitive child output"));
     assert_eq!(success, None);
@@ -4783,6 +4678,9 @@ async fn build_agent_spawn_config_uses_captured_step_settings_and_turn_context_v
         .expect("approval policy set");
     assert_eq!(config, expected);
 }
+
+#[path = "multi_agents_subagent_identity_tests.rs"]
+mod subagent_identity;
 
 #[tokio::test]
 async fn build_agent_resume_config_clears_base_instructions() {

@@ -9,26 +9,18 @@ Scenario: A forked worker receives both stable answer fragments, with their phas
 00:message/developer:
     <MODEL_INSTRUCTIONS>
 01:message/developer:
-    You are a spawned subagent forked from a parent agent conversation. The following messages are inherited... you receive after the closing fork-history boundary. [hash=31e39101dba410f5]
-
-    ==== forked parent conversation history begins ====
-02:message/developer:
     <PERMISSIONS_INSTRUCTIONS>
-03:message/user:
+02:message/user:
     <ENVIRONMENT_CONTEXT>
-04:message/user:
+03:message/user:
     Give me both results.
-05:message/assistant:
+04:message/assistant:
     The first result is ready.
-06:message/assistant:
+05:message/assistant:
     The second result is ready.
-07:message/user:
+06:message/user:
     Have a worker check both results.
-08:message/developer:
-    ==== forked parent conversation history ends ====
-
-    The inherited parent conversation history above is present so you can understand the context. It is not ...llowing all system, developer, and user instructions. [hash=63ee70e4028289d1]
-09:message/developer:
+07:message/developer:
     You are an agent in a team of agents collaborating to complete a task.
 
     You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents. All ag...nd capable, and have access to the same set of tools. [hash=876a93c54d3f61d6]
@@ -46,8 +38,6 @@ Scenario: A forked worker receives both stable answer fragments, with their phas
     There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
 
     Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...uctions; when doing so, set `fork_turns` to `"none"`. [hash=18ccf7e93ecabab9]
-10:message/developer:
-    You are a spawned subagent in the multi-agent tree. Your current canonical agent path is `/root/worker`,...llowing all system, developer, and user instructions. [hash=882a3f8b5c16c343]
-11:message/developer:
+08:message/developer:
     <MULTI_AGENT_MODE>
-12:agent_message
+09:agent_message

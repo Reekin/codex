@@ -6,7 +6,7 @@ use codex_protocol::protocol::SubAgentSource;
 
 fn high_entropy_task_name() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789_";
-    (0..AgentPath::MAX_AGENT_NAME_BYTES)
+    (0..AgentIdentity::MAX_AGENT_NAME_BYTES)
         .map(|index| char::from(ALPHABET[index.wrapping_mul(17) % ALPHABET.len()]))
         .collect()
 }
@@ -14,10 +14,13 @@ fn high_entropy_task_name() -> String {
 fn near_max_agent_path() -> AgentPath {
     let task_name = high_entropy_task_name();
     let mut path = AgentPath::root();
-    while let Ok(next) = path.join(&task_name) {
+    while let Ok(next) = AgentIdentity::join_spawned_agent_path(&path, &task_name) {
         path = next;
     }
-    assert!(path.as_str().len() > AgentPath::MAX_PATH_BYTES - AgentPath::MAX_AGENT_NAME_BYTES - 1);
+    assert!(
+        path.as_str().len()
+            > AgentIdentity::MAX_AGENT_PATH_BYTES - AgentIdentity::MAX_AGENT_NAME_BYTES - 1
+    );
     path
 }
 

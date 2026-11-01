@@ -212,23 +212,6 @@ pub fn strip_metadata_from_json(value: Value) -> Value {
     }
 }
 
-/// Returns request input without the developer boundaries that wrap a forked child's inherited
-/// parent history, so a child's inherited prefix can be compared with the parent's request.
-pub fn strip_fork_history_boundaries(input: Vec<Value>) -> Vec<Value> {
-    input
-        .into_iter()
-        .filter(|item| {
-            !item["content"].as_array().is_some_and(|content| {
-                content.iter().any(|part| {
-                    part["text"].as_str().is_some_and(|text| {
-                        text.contains("==== forked parent conversation history ")
-                    })
-                })
-            })
-        })
-        .collect()
-}
-
 impl ResponsesRequest {
     pub fn body_json(&self) -> Value {
         let body = decode_body_bytes(
