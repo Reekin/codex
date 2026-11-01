@@ -1,4 +1,5 @@
 use codex_core::TurnInputRequest;
+use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
@@ -9,6 +10,64 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use tokio::sync::oneshot;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn response_events_stream_before_the_waiting_interval() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (release, gate) = oneshot::channel();
+    let (server, _) = start_streaming_sse_server(vec![vec![
+        StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![
+                responses::ev_response_created("resp"),
+                responses::ev_reasoning_item_added("reason", &["thinking"]),
+            ]),
+        },
+        StreamingSseChunk {
+            gate: Some(gate),
+            body: responses::sse(vec![
+                responses::ev_reasoning_item("reason", &["thinking"], &[]),
+                responses::ev_assistant_message("final", "done"),
+                responses::ev_completed("resp"),
+            ]),
+        },
+    ]])
+    .await;
+    // Default retry settings allow a replacement, so the stream is eligible for selection.
+    let test = test_codex()
+        .with_model("gpt-5.4")
+        .with_config(|config| config.model_provider.supports_websockets = false)
+        .build_with_streaming_server(&server)
+        .await?;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "Think, then answer.".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+
+    // The reasoning item is visible while the response is still open, well before the interval.
+    wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ItemStarted(started) if matches!(started.item, TurnItem::Reasoning(_))
+        )
+    })
+    .await;
+    release.send(()).unwrap();
+    let EventMsg::TurnComplete(completed) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await
+    else {
+        unreachable!("predicate guarantees turn completion");
+    };
+    assert_eq!(completed.error, None);
+    assert_eq!(server.requests().await.len(), 1);
+    server.shutdown().await;
+    Ok(())
+}
 
 #[test_case::test_case("primary"; "original finishes first")]
 #[test_case::test_case("backup"; "backup finishes first")]

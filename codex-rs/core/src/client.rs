@@ -332,8 +332,9 @@ pub struct ModelClientSession {
     stream_idle_timeout: Duration,
     /// Whether the next request may start a concurrent replacement after the interval.
     hedge_allowed: bool,
-    /// Whether the latest request started a replacement, which consumes one retry.
-    hedge_started: bool,
+    /// Shared with the latest request's stream: whether it started a replacement, which consumes
+    /// one retry, and the replacement's connection state if it was selected.
+    hedge: Option<Arc<hedged_stream::HedgeState>>,
     /// Replacement candidates must not publish their WebSocket state into the shared cache.
     cache_websocket_on_drop: bool,
     /// Turn state for sticky routing.
@@ -766,7 +767,7 @@ impl ModelClient {
             websocket_session,
             stream_idle_timeout: self.state.provider.info().stream_idle_timeout(),
             hedge_allowed: false,
-            hedge_started: false,
+            hedge: None,
             cache_websocket_on_drop: true,
             turn_state: Arc::new(OnceLock::new()),
         }
@@ -1578,6 +1579,7 @@ impl ModelClient {
 impl Drop for ModelClientSession {
     fn drop(&mut self) {
         if self.cache_websocket_on_drop {
+            self.adopt_selected_replacement();
             let websocket_session = std::mem::take(&mut self.websocket_session);
             self.client
                 .store_cached_websocket_session(websocket_session);
@@ -1596,7 +1598,7 @@ impl ModelClientSession {
     }
 
     pub(crate) fn take_hedged_retry(&mut self) -> bool {
-        std::mem::take(&mut self.hedge_started)
+        self.adopt_selected_replacement()
     }
 
     pub(crate) fn inference_tools_changed(&self, tools: &Arc<[ToolSpec]>) -> bool {
