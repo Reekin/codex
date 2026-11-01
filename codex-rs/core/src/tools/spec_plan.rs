@@ -117,8 +117,9 @@ struct CoreToolPlanContext<'a> {
     wait_for_environment_tool_config: Option<&'a Arc<crate::WaitForEnvironmentToolConfig>>,
     default_agent_type_description: &'a str,
     wait_agent_timeouts: WaitAgentTimeoutOptions,
-    /// History contains locally compacted records whose originals the recall tools read.
-    has_local_compaction_history: bool,
+    /// The thread has a local archive and either uses local full compaction or holds locally
+    /// compacted records, so the recall tools can read the originals.
+    recall_available: bool,
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -133,7 +134,7 @@ pub(crate) fn build_tool_router(
     step_store: &ExtensionData,
     tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
     dynamic_tools: &[DynamicToolSpec],
-    has_local_compaction_history: bool,
+    recall_available: bool,
 ) -> CodexResult<ToolRouter> {
     let default_agent_type_description =
         crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
@@ -151,7 +152,7 @@ pub(crate) fn build_tool_router(
         wait_for_environment_tool_config: wait_for_environment_tool_config.as_ref(),
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
-        has_local_compaction_history,
+        recall_available,
     };
     let mut registry = ToolRegistry::with_tool_policy(Arc::clone(&session.tool_policy));
     add_core_tool_sources(&context, &mut registry);
@@ -319,7 +320,7 @@ pub(crate) fn build_core_tool_registry(
         wait_for_environment_tool_config,
         default_agent_type_description: &default_agent_type_description,
         wait_agent_timeouts: wait_agent_timeout_options(turn_context),
-        has_local_compaction_history: false,
+        recall_available: false,
     };
     let mut registry = ToolRegistry::default();
     add_core_tool_sources(&context, &mut registry);
@@ -1366,9 +1367,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
 
     // Local full compaction replaces history with summaries; tool cleanup on any route
     // replaces results. Either way the originals stay readable through recall.
-    if context.has_local_compaction_history
-        || crate::local_compaction::uses_local_route(turn_context, context.model_info)
-    {
+    if context.recall_available {
         for action in ["list_turns", "search", "read_turn", "read_item"] {
             registry.add(RecallHandler(action));
         }

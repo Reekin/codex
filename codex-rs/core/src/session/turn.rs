@@ -2098,7 +2098,10 @@ pub(crate) async fn built_tools(
             .instrument(trace_span!("built_tools.load_discoverable_tools"))
             .await
         };
-    let has_local_compaction_history = crate::local_compaction::has_local_records(sess).await;
+    // Recall reads the thread's local archive, which ephemeral threads do not have.
+    let recall_available = sess.live_thread().is_some()
+        && (crate::local_compaction::uses_local_route(turn_context, model_info)
+            || crate::local_compaction::has_local_records(sess).await);
     Ok(Arc::new(build_tool_router(
         sess,
         turn_context,
@@ -2109,7 +2112,7 @@ pub(crate) async fn built_tools(
         step_store,
         tool_suggest_candidates.as_ref(),
         dynamic_tools,
-        has_local_compaction_history,
+        recall_available,
     )?))
 }
 

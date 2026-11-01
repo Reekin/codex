@@ -8,7 +8,6 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ResponsesRequest;
-use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
 use core_test_support::responses::ev_function_call_with_namespace;
@@ -349,14 +348,11 @@ async fn exhausted_budget_respects_enforcement_on_current_and_later_turns(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[test_case(false, false ; "local token usage")]
-#[test_case(false, true ; "local provider units")]
-#[test_case(true, false ; "remote v2 token usage")]
-#[test_case(true, true ; "remote v2 provider units")]
-async fn compaction_budget_exhaustion_fails_without_retry(
-    remote_v2: bool,
-    provider_units: bool,
-) -> Result<()> {
+// Local compaction of an empty history sends no model request, so only native compaction
+// spends budget here.
+#[test_case(false ; "remote v2 token usage")]
+#[test_case(true ; "remote v2 provider units")]
+async fn compaction_budget_exhaustion_fails_without_retry(provider_units: bool) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -367,24 +363,16 @@ async fn compaction_budget_exhaustion_fails_without_retry(
     if provider_units {
         completed["response"]["usage"]["codex_rollout_budget_units"] = json!(10.0);
     }
-    let compact_response = if remote_v2 {
-        sse(vec![
-            json!({
-                "type": "response.output_item.done",
-                "item": {
-                    "type": "compaction",
-                    "encrypted_content": "encrypted-summary",
-                }
-            }),
-            completed,
-        ])
-    } else {
-        sse(vec![
-            ev_response_created("compact"),
-            ev_assistant_message("compact-summary", "compact summary"),
-            completed,
-        ])
-    };
+    let compact_response = sse(vec![
+        json!({
+            "type": "response.output_item.done",
+            "item": {
+                "type": "compaction",
+                "encrypted_content": "encrypted-summary",
+            }
+        }),
+        completed,
+    ]);
     let responses = mount_sse_sequence(&server, vec![compact_response]).await;
     let test = test_codex()
         .with_config(move |config| {
@@ -393,9 +381,6 @@ async fn compaction_budget_exhaustion_fails_without_retry(
                 reminder_at_remaining_tokens: vec![5],
                 ..rollout_budget()
             });
-            if !remote_v2 {
-                config.model_provider.name = "OpenAI-compatible test provider".to_string();
-            }
         })
         .build(&server)
         .await?;
@@ -432,15 +417,18 @@ async fn restates_the_current_remainder_after_compaction() -> Result<()> {
             ]),
             sse(vec![
                 ev_response_created("resp-compact"),
-                ev_assistant_message("msg-compact", "compact summary"),
+                json!({
+                    "type": "response.output_item.done",
+                    "item": {"type": "compaction", "encrypted_content": "compact summary"},
+                }),
                 ev_completed_with_tokens("resp-compact", /*total_tokens*/ 10),
             ]),
             sse(vec![ev_response_created("resp-2"), ev_completed("resp-2")]),
         ],
     )
     .await;
+    // Native compaction opens a new window even for this short history.
     let mut model_provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
-    model_provider.name = "OpenAI-compatible test provider".to_string();
     model_provider.base_url = Some(format!("{}/v1", server.uri()));
     model_provider.supports_websockets = false;
     let test = test_codex()

@@ -421,8 +421,10 @@ async fn thread_revert_preserves_fork_cutoff_after_cold_resume() -> Result<()> {
 #[tokio::test]
 async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
     let server = responses::start_mock_server().await;
+    // Three turns; the model switch's local compaction has nothing to summarize and sends no
+    // request.
     let response_mock =
-        responses::mount_sse_sequence(&server, vec![responses::sse_completed("done"); 4]).await;
+        responses::mount_sse_sequence(&server, vec![responses::sse_completed("done"); 3]).await;
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .with_model("gpt-5.5")

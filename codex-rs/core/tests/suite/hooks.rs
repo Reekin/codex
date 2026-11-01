@@ -16,8 +16,6 @@ use codex_core::config::ThreadStoreConfig;
 use codex_features::Feature;
 use codex_history::InitialHistory;
 use codex_history::RolloutItem;
-use codex_model_provider_info::ModelProviderInfo;
-use codex_model_provider_info::built_in_model_providers;
 use codex_models_manager::bundled_models_response;
 use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::mcp::ClientMcpExtensions;
@@ -161,13 +159,13 @@ fn code_mode_custom_tool_output_text(output_item: &Value) -> String {
     }
 }
 
-fn non_openai_model_provider(server: &wiremock::MockServer) -> ModelProviderInfo {
-    let mut provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
-    provider.name = "OpenAI (test)".into();
-    provider.base_url = Some(format!("{}/v1", server.uri()));
-    provider.supports_websockets = false;
-    provider
+/// A native compaction result. Compaction hook tests use the native route, which compacts even
+/// a short history.
+fn compaction_item(summary: &str) -> Value {
+    json!({
+        "type": "response.output_item.done",
+        "item": {"type": "compaction", "encrypted_content": summary},
+    })
 }
 
 fn write_stop_hook(home: &Path, block_prompts: &[&str]) -> Result<()> {
@@ -2208,7 +2206,7 @@ async fn compact_session_start_hook_records_additional_context_for_next_turn() -
             ]),
             sse(vec![
                 ev_response_created("resp-2"),
-                ev_assistant_message("msg-2", "summary after compact"),
+                compaction_item("summary after compact"),
                 ev_completed("resp-2"),
             ]),
             sse(vec![
@@ -2220,7 +2218,6 @@ async fn compact_session_start_hook_records_additional_context_for_next_turn() -
     )
     .await;
     let additional_context = "remember the compacted reef";
-    let model_provider = non_openai_model_provider(&server);
 
     let mut builder = test_codex()
         .with_pre_build_hook(move |home| {
@@ -2228,7 +2225,6 @@ async fn compact_session_start_hook_records_additional_context_for_next_turn() -
                 .expect("failed to write compact session start hook fixture");
         })
         .with_config(move |config| {
-            config.model_provider = model_provider;
             trust_discovered_hooks(config);
         });
     let test = builder.build(&server).await?;
@@ -2289,7 +2285,7 @@ async fn mid_turn_auto_compact_session_start_hooks_run_before_each_continuation(
         &server,
         sse(vec![
             ev_response_created("resp-2"),
-            ev_assistant_message("summary-1", "first compact summary"),
+            compaction_item("first compact summary"),
             ev_completed_with_tokens("resp-2", compacted_tokens),
         ]),
     )
@@ -2307,7 +2303,7 @@ async fn mid_turn_auto_compact_session_start_hooks_run_before_each_continuation(
         &server,
         sse(vec![
             ev_response_created("resp-4"),
-            ev_assistant_message("summary-2", "second compact summary"),
+            compaction_item("second compact summary"),
             ev_completed_with_tokens("resp-4", compacted_tokens),
         ]),
     )
@@ -2330,7 +2326,6 @@ async fn mid_turn_auto_compact_session_start_hooks_run_before_each_continuation(
         ]),
     )
     .await;
-    let model_provider = non_openai_model_provider(&server);
 
     let mut builder = test_codex()
         .with_pre_build_hook(|home| {
@@ -2341,7 +2336,6 @@ async fn mid_turn_auto_compact_session_start_hooks_run_before_each_continuation(
             .expect("failed to write indexed compact session start hook fixture");
         })
         .with_config(move |config| {
-            config.model_provider = model_provider;
             config.model_auto_compact_token_limit = Some(limit);
             trust_discovered_hooks(config);
         });
@@ -2427,7 +2421,7 @@ async fn mid_turn_auto_compact_session_start_hook_stop_blocks_continuation() -> 
         &server,
         sse(vec![
             ev_response_created("resp-2"),
-            ev_assistant_message("summary-1", "compact summary"),
+            compaction_item("compact summary"),
             ev_completed_with_tokens("resp-2", compacted_tokens),
         ]),
     )
@@ -2441,7 +2435,6 @@ async fn mid_turn_auto_compact_session_start_hook_stop_blocks_continuation() -> 
         ]),
     )
     .await;
-    let model_provider = non_openai_model_provider(&server);
 
     let mut builder = test_codex()
         .with_pre_build_hook(|home| {
@@ -2449,7 +2442,6 @@ async fn mid_turn_auto_compact_session_start_hook_stop_blocks_continuation() -> 
                 .expect("failed to write stopping compact session start hook fixture");
         })
         .with_config(move |config| {
-            config.model_provider = model_provider;
             config.model_auto_compact_token_limit = Some(limit);
             trust_discovered_hooks(config);
         });
