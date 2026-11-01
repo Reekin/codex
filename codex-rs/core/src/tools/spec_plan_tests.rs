@@ -612,7 +612,7 @@ async fn reviewer_tool_policy_exclude_optional_core_tools() {
             .iter()
             .map(codex_tools::ToolSpec::name)
             .collect::<Vec<_>>(),
-        vec!["exec_command", "write_stdin", "view_image"]
+        vec!["exec_argv", "exec_command", "write_stdin", "view_image"]
     );
 }
 
@@ -717,7 +717,7 @@ async fn reviewer_tool_policy_require_managed_secondary_environments() {
     for (secondary_profile, expected_tools) in [
         (
             codex_protocol::models::PermissionProfile::workspace_write(),
-            vec!["exec_command", "write_stdin", "view_image"],
+            vec!["exec_argv", "exec_command", "write_stdin", "view_image"],
         ),
         (
             codex_protocol::models::PermissionProfile::Disabled,
