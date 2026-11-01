@@ -1,3 +1,5 @@
+use super::FinalAnswerItem;
+use super::FinalAnswerObservation;
 use super::HandleOutputCtx;
 use super::TurnItemContributorPolicy;
 use super::completed_item_defers_mailbox_delivery_to_next_turn;
@@ -516,6 +518,51 @@ async fn finalized_turn_item_keeps_mailbox_open_for_nonterminal_text(phase: Mess
         Some("contributed assistant text")
     );
     assert!(!finalized.facts.defers_mailbox_delivery_to_next_turn);
+}
+
+#[test_case::test_case(None, "answer", Some(FinalAnswerItem::NonEmpty); "untagged_text")]
+#[test_case::test_case(None, " \n\t", Some(FinalAnswerItem::Empty); "untagged_whitespace")]
+#[test_case::test_case(Some(MessagePhase::FinalAnswer), "answer", Some(FinalAnswerItem::NonEmpty); "final_text")]
+#[test_case::test_case(Some(MessagePhase::FinalAnswer), " ", Some(FinalAnswerItem::Empty); "final_whitespace")]
+#[test_case::test_case(Some(MessagePhase::Commentary), "progress", None; "commentary")]
+#[test_case::test_case(Some(MessagePhase::PartialAnswer), "partial", None; "partial_answer")]
+#[tokio::test]
+async fn finalized_turn_item_classifies_final_answer(
+    phase: Option<MessagePhase>,
+    text: &str,
+    expected: Option<FinalAnswerItem>,
+) {
+    let (session, _turn_context) = make_session_and_context().await;
+    let item = assistant_output_text_with_phase(text, phase);
+
+    let finalized = finalize_non_tool_response_item(
+        &session,
+        TurnItemContributorPolicy::Skip,
+        &item,
+        /*plan_mode*/ false,
+    )
+    .await
+    .expect("assistant message should parse");
+
+    assert_eq!(finalized.facts.final_answer, expected);
+}
+
+#[test]
+fn final_answer_observation_tracks_visible_final_answer_within_one_response() {
+    let mut observation = FinalAnswerObservation::default();
+    assert!(!observation.lacks_visible_final_answer());
+
+    observation.observe_output_item(/*final_answer*/ None);
+    assert!(observation.lacks_visible_final_answer());
+
+    observation.observe_output_item(Some(FinalAnswerItem::Empty));
+    assert!(observation.lacks_visible_final_answer());
+
+    observation.observe_output_item(Some(FinalAnswerItem::NonEmpty));
+    assert!(!observation.lacks_visible_final_answer());
+
+    observation.observe_output_item(Some(FinalAnswerItem::Empty));
+    assert!(!observation.lacks_visible_final_answer());
 }
 
 #[test]
