@@ -1057,8 +1057,6 @@ async fn generated_image_is_replayed_for_image_capable_models() -> Result<()> {
             sse(vec![
                 ev_response_created("resp-1"),
                 ev_image_generation_call("ig_123", "completed", "lobster", "Zm9v"),
-                // A visible final answer keeps this turn out of empty-final-answer recovery.
-                ev_assistant_message("msg-1", "here is your lobster"),
                 ev_completed_with_tokens("resp-1", /*total_tokens*/ 10),
             ]),
             sse_completed("resp-2"),

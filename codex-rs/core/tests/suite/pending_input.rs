@@ -1167,14 +1167,11 @@ async fn queued_inter_agent_mail_does_not_restart_after_final_answer(final_answe
         chunk(ev_completed("resp-1")),
     ];
 
-    // An empty final answer gets one same-turn recovery request before the turn completes.
-    let recovers = final_answer.trim().is_empty();
-    let mut responses = vec![first_chunks];
-    if recovers {
-        responses.push(response_completed_chunks("recovery-resp"));
-    }
-    responses.push(response_completed_chunks("second-turn-resp"));
-    let (server, _completions) = start_streaming_sse_server(responses).await;
+    let (server, _completions) = start_streaming_sse_server(vec![
+        first_chunks,
+        response_completed_chunks("unexpected-resp-2"),
+    ])
+    .await;
     let codex = build_codex(&server).await;
 
     submit_queue_only_agent_mail(&codex, "queued child update").await;
@@ -1182,25 +1179,22 @@ async fn queued_inter_agent_mail_does_not_restart_after_final_answer(final_answe
     wait_for_turn_complete(&codex).await;
 
     let mut requests = server.requests().await;
-    let first_turn_requests = if recovers { 2 } else { 1 };
-    assert_eq!(requests.len(), first_turn_requests);
-    for request in &requests {
-        let request: Value = from_slice(request).expect("parse request");
-        assert!(
-            request["input"]
-                .as_array()
-                .expect("request input")
-                .iter()
-                .all(|item| item.get("type").and_then(Value::as_str) != Some("agent_message"))
-        );
-    }
+    assert_eq!(requests.len(), 1);
+    let request: Value = from_slice(&requests[0]).expect("parse request");
+    assert!(
+        request["input"]
+            .as_array()
+            .expect("request input")
+            .iter()
+            .all(|item| item.get("type").and_then(Value::as_str) != Some("agent_message"))
+    );
 
     submit_user_input(&codex, "second prompt").await;
     wait_for_turn_complete(&codex).await;
 
     requests = server.requests().await;
-    assert_eq!(requests.len(), first_turn_requests + 1);
-    let request: Value = from_slice(&requests[first_turn_requests]).expect("parse request");
+    assert_eq!(requests.len(), 2);
+    let request: Value = from_slice(&requests[1]).expect("parse request");
     let input = request["input"].as_array().expect("request input");
     let agent_message = input
         .iter()
@@ -2198,11 +2192,8 @@ async fn interrupt_if_no_pending_input_checks_turn_and_queue(
             mail["content"],
             json!([{ "type": "input_text", "text": PENDING_PROMPT }])
         );
-    } else if should_abort {
-        assert_eq!(requests.len(), 1);
     } else {
-        // The completed reasoning-only response gets one recovery request for a final answer.
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 1);
     }
     server.shutdown().await;
     Ok(())
