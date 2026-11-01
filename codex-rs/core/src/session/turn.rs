@@ -1879,6 +1879,7 @@ async fn run_sampling_request(
         if first_attempt && turn_context.config.notify.is_some() {
             notify_messages = legacy_notify_input_messages(&prompt.input);
         }
+        sess.record_request_overhead(&prompt).await;
         let mut draining_for_mailbox = false;
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
@@ -2821,7 +2822,8 @@ async fn try_run_sampling_request(
     let sampling_timing_guard = turn_context.turn_timing_state.begin_sampling();
     let mut response_completed = false;
     let mut request_token_usage = None;
-    let mut includes_reasoning = step_context.settings.model_info.use_responses_lite;
+    // The request carries exactly the current active context.
+    let mut response_context = sess.response_context().await;
     let stream = client_session
         .stream(
             &prompt,
@@ -2999,6 +3001,7 @@ async fn try_run_sampling_request(
                 }
             }
             ResponseEvent::OutputItemDone(mut item) => {
+                response_context.observe(&item);
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
                 sess.reserve_assistant_message_order(&turn_context, &item)
                     .await;
@@ -3279,9 +3282,8 @@ async fn try_run_sampling_request(
                 )
                 .await;
             }
-            ResponseEvent::ServerReasoningIncluded(included) => {
-                includes_reasoning = included;
-            }
+            // Provider usage totals already cover retained reasoning.
+            ResponseEvent::ServerReasoningIncluded(_) => {}
             ResponseEvent::RateLimits(snapshot) => {
                 // Update internal state with latest rate limits, but defer sending until
                 // token usage is available to avoid duplicate TokenCount events.
@@ -3332,7 +3334,7 @@ async fn try_run_sampling_request(
                         &turn_context,
                         &step_context.settings,
                         token_usage.as_ref(),
-                        super::TokenUsageContext::Sampling { includes_reasoning },
+                        super::TokenUsageContext::Sampling(response_context),
                     )
                     .await;
                 should_emit_token_count = true;

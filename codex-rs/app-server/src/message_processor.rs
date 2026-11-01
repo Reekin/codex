@@ -1584,6 +1584,9 @@ impl MessageProcessor {
             ClientRequest::ThreadItemsRead { params, .. } => {
                 self.thread_processor.thread_items_read(params).await
             }
+            ClientRequest::ThreadTokenUsageRead { params, .. } => {
+                self.thread_processor.thread_token_usage_read(params).await
+            }
             ClientRequest::ThreadShellCommand { params, .. } => {
                 self.thread_processor
                     .thread_shell_command(&request_id, params)

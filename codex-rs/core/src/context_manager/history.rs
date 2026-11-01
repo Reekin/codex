@@ -55,6 +55,8 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ImageReference;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -897,44 +899,16 @@ impl ContextManager {
         self.review_history = review_history;
     }
 
+    /// Adds `usage` to the totals; `active_usage` becomes the latest active-context measurement.
     pub(crate) fn update_token_info(
         &mut self,
         usage: &TokenUsage,
+        active_usage: &TokenUsage,
         model_context_window: Option<i64>,
-        includes_reasoning: bool,
     ) {
-        self.token_info = Some(TokenUsageInfo::new_or_append(
-            &self.token_info,
-            usage,
-            includes_reasoning,
-            model_context_window,
-        ));
-    }
-
-    fn get_non_last_reasoning_items_tokens(&self) -> i64 {
-        // Get reasoning items excluding all the ones after the last instruction boundary.
-        let Some(last_user_index) = self
-            .items
-            .iter()
-            .rposition(|envelope| is_user_turn_boundary(&envelope.item))
-        else {
-            return 0;
-        };
-
-        self.items
-            .iter()
-            .take(last_user_index)
-            .filter(|envelope| {
-                matches!(
-                    &envelope.item,
-                    ResponseItem::Reasoning {
-                        encrypted_content: Some(_),
-                        ..
-                    }
-                )
-            })
-            .map(|envelope| estimate_item_token_count(&envelope.item))
-            .fold(0i64, i64::saturating_add)
+        let mut info = TokenUsageInfo::new_or_append(&self.token_info, usage, model_context_window);
+        info.last_token_usage = active_usage.clone();
+        self.token_info = Some(info);
     }
 
     // These are local items added after the most recent model-emitted item.
@@ -950,27 +924,15 @@ impl ContextManager {
         self.items[start..].iter().map(|envelope| &envelope.item)
     }
 
+    /// Active context usage: the provider-reported total of the latest response plus local
+    /// items appended after it. Provider totals already account for retained reasoning.
     pub(crate) fn get_total_token_usage(&self) -> i64 {
         let last_tokens = self
             .token_info
             .as_ref()
             .map(|info| info.last_token_usage.total_tokens)
             .unwrap_or(0);
-        let items_after_last_model_generated_tokens = self
-            .items_after_last_model_generated_item()
-            .map(estimate_item_token_count)
-            .fold(0i64, i64::saturating_add);
-        if self
-            .token_info
-            .as_ref()
-            .is_some_and(|info| info.last_usage_includes_reasoning == Some(true))
-        {
-            last_tokens.saturating_add(items_after_last_model_generated_tokens)
-        } else {
-            last_tokens
-                .saturating_add(self.get_non_last_reasoning_items_tokens())
-                .saturating_add(items_after_last_model_generated_tokens)
-        }
+        last_tokens.saturating_add(self.estimated_tokens_after_last_model_generated_item())
     }
 
     pub(crate) fn estimated_tokens_after_last_model_generated_item(&self) -> i64 {
@@ -1165,7 +1127,24 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
         ResponseItem::Reasoning {
             encrypted_content: Some(content),
             ..
-        } => i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX),
+        } if !content.is_empty() => {
+            i64::try_from(estimate_reasoning_length(content.len())).unwrap_or(i64::MAX)
+        }
+        // Providers with plaintext reasoning send an empty encrypted payload; the visible
+        // summary and content are what the model reads back.
+        ResponseItem::Reasoning {
+            summary,
+            content,
+            encrypted_content: Some(_),
+            ..
+        } => summary
+            .iter()
+            .map(|ReasoningItemReasoningSummary::SummaryText { text }| text_bytes(text))
+            .chain(content.iter().flatten().map(|part| match part {
+                ReasoningItemContent::ReasoningText { text }
+                | ReasoningItemContent::Text { text } => text_bytes(text),
+            }))
+            .fold(0i64, i64::saturating_add),
         ResponseItem::Compaction {
             encrypted_content: content,
             ..

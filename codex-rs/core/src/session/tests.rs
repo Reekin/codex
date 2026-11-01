@@ -3420,7 +3420,6 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             total_tokens: 30,
             codex_rollout_budget_units: None,
         },
-        last_usage_includes_reasoning: None,
         last_token_usage: TokenUsage {
             input_tokens: 3,
             cached_input_tokens: 0,
@@ -3431,6 +3430,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             codex_rollout_budget_units: None,
         },
         model_context_window: Some(1_000),
+        context_usage: None,
     };
     let info2 = TokenUsageInfo {
         total_token_usage: TokenUsage {
@@ -3442,7 +3442,6 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             total_tokens: 375,
             codex_rollout_budget_units: None,
         },
-        last_usage_includes_reasoning: None,
         last_token_usage: TokenUsage {
             input_tokens: 10,
             cached_input_tokens: 0,
@@ -3453,6 +3452,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             codex_rollout_budget_units: None,
         },
         model_context_window: Some(2_000),
+        context_usage: None,
     };
 
     rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
@@ -3592,9 +3592,9 @@ async fn recompute_token_usage_updates_model_context_window() {
         let mut state = session.state.lock().await;
         state.set_token_info(Some(TokenUsageInfo {
             total_token_usage: TokenUsage::default(),
-            last_usage_includes_reasoning: None,
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(258_400),
+            context_usage: None,
         }));
     }
 
@@ -3609,7 +3609,7 @@ async fn recompute_token_usage_updates_model_context_window() {
     assert_eq!(actual.model_context_window, Some(128_000));
 }
 
-#[test_case(crate::session::TokenUsageContext::Sampling { includes_reasoning: false }; "sampling")]
+#[test_case(crate::session::TokenUsageContext::Sampling(Default::default()); "sampling")]
 #[test_case(crate::session::TokenUsageContext::SpendingOnly; "spending_only")]
 #[tokio::test]
 async fn record_token_usage_info_notifies_extension_contributors(
@@ -3696,9 +3696,7 @@ async fn record_token_usage_info_notifies_extension_contributors(
             &turn_context,
             &turn_context.initial_settings,
             Some(&first_usage),
-            crate::session::TokenUsageContext::Sampling {
-                includes_reasoning: true,
-            },
+            crate::session::TokenUsageContext::Sampling(Default::default()),
         )
         .await
         .expect("first usage should be recorded");
@@ -3716,15 +3714,12 @@ async fn record_token_usage_info_notifies_extension_contributors(
     expected_total_usage.add_assign(&second_usage);
     let expected_session_info = TokenUsageInfo {
         total_token_usage: expected_total_usage.clone(),
-        last_usage_includes_reasoning: Some(matches!(
-            context,
-            crate::session::TokenUsageContext::SpendingOnly
-        )),
         last_token_usage: match context {
-            crate::session::TokenUsageContext::Sampling { .. } => second_usage.clone(),
+            crate::session::TokenUsageContext::Sampling(_) => second_usage.clone(),
             crate::session::TokenUsageContext::SpendingOnly => first_usage.clone(),
         },
         model_context_window: turn_context.model_context_window(),
+        context_usage: None,
     };
     let expected = vec![
         RecordedTokenUsage {
@@ -3733,9 +3728,9 @@ async fn record_token_usage_info_notifies_extension_contributors(
             turn_level_id: turn_context.sub_id.clone(),
             token_usage: TokenUsageInfo {
                 total_token_usage: first_usage.clone(),
-                last_usage_includes_reasoning: Some(true),
                 last_token_usage: first_usage,
                 model_context_window: turn_context.model_context_window(),
+                context_usage: None,
             },
             saw_session_store: true,
             saw_thread_store: true,
@@ -3746,14 +3741,9 @@ async fn record_token_usage_info_notifies_extension_contributors(
             turn_level_id: turn_context.sub_id.clone(),
             token_usage: TokenUsageInfo {
                 total_token_usage: expected_total_usage,
-                last_usage_includes_reasoning: match context {
-                    crate::session::TokenUsageContext::Sampling { includes_reasoning } => {
-                        Some(includes_reasoning)
-                    }
-                    crate::session::TokenUsageContext::SpendingOnly => None,
-                },
                 last_token_usage: second_usage,
                 model_context_window: turn_context.model_context_window(),
+                context_usage: None,
             },
             saw_session_store: true,
             saw_thread_store: true,
@@ -12988,9 +12978,9 @@ async fn set_total_token_usage(sess: &Session, total_token_usage: TokenUsage) {
     let mut state = sess.state.lock().await;
     state.set_token_info(Some(TokenUsageInfo {
         total_token_usage,
-        last_usage_includes_reasoning: None,
         last_token_usage: TokenUsage::default(),
         model_context_window: None,
+        context_usage: None,
     }));
 }
 

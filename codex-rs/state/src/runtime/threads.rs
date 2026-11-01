@@ -3756,7 +3756,7 @@ mod tests {
                         total_tokens: 321,
                         codex_rollout_budget_units: None,
                     },
-                    last_usage_includes_reasoning: None,
+                    context_usage: None,
                     last_token_usage: codex_protocol::protocol::TokenUsage::default(),
                     model_context_window: None,
                 }),
