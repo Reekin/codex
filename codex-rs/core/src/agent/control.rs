@@ -34,6 +34,7 @@ use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItemMetadata;
 use codex_protocol::models::ContentItemNamespace;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HasLegacyEvent;
@@ -276,14 +277,22 @@ impl LocalAgentControl {
         {
             // Keep unloaded delivery atomic with publication of a reloaded session.
             let threads = state.threads.read().await;
-            if !communication.trigger_turn && !threads.contains_key(&agent_id) {
+            let loaded = threads.contains_key(&agent_id);
+            let subagent_result = context.is_result();
+            // Child results always use the mailbox: its updates reach the recipient's
+            // submission loop, which may continue a parent whose turn already ended.
+            if !communication.trigger_turn && (!loaded || subagent_result) {
                 let _membership = self.runtime.admit_start()?;
-                self.runtime.ensure_agent_known(agent_id)?;
+                if !loaded {
+                    self.runtime.ensure_agent_known(agent_id)?;
+                }
                 let submission_id = uuid::Uuid::now_v7().to_string();
+                let mut message = crate::PendingAgentMessage::new(communication, delivery);
+                message.subagent_result = subagent_result;
                 self.runtime.mailboxes.enqueue(
                     agent_id,
                     Some(submission_id.clone()),
-                    vec![crate::PendingAgentMessage::new(communication, delivery)],
+                    vec![message],
                 )?;
                 drop(threads);
                 crate::agent_communication::emit_agent_communication_send(
@@ -499,6 +508,13 @@ impl LocalAgentControl {
                 }
                 None => true,
             };
+            // Loaded MAv1 children report every terminal turn through their session, including
+            // follow-ups. This watcher still reports children that stop without a terminal turn.
+            if !child_uses_multi_agent_v2
+                && matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_))
+            {
+                return;
+            }
             if child_agent_path.is_some() && child_uses_multi_agent_v2 {
                 let Some(child_agent_path) = child_agent_path.clone() else {
                     return;
@@ -539,27 +555,12 @@ impl LocalAgentControl {
             let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
                 return;
             };
-            let config = parent_thread.config().await;
-            let namespace = match parent_thread
-                .multi_agent_version()
-                .unwrap_or_else(|| config.multi_agent_version_from_features())
-            {
-                MultiAgentVersion::Disabled => None,
-                MultiAgentVersion::V1 => Some(ContentItemNamespace::MultiAgentV1),
-                MultiAgentVersion::V2 => Some(
-                    config
-                        .multi_agent_v2
-                        .tool_namespace
-                        .clone()
-                        .map(ContentItemNamespace::from)
-                        .unwrap_or(ContentItemNamespace::Functions),
-                ),
-            };
+            let notification =
+                legacy_subagent_notification(&parent_thread, child_reference.as_str(), status)
+                    .await;
             parent_thread
-                .inject_fragment_without_turn(
-                    SubagentNotification::new(child_reference.as_str(), status)
-                        .with_metadata(ContentItemMetadata::tool(namespace)),
-                )
+                .session
+                .inject_no_new_turn(vec![notification], /*current_turn_context*/ None)
                 .await;
         };
         tokio::spawn(async move {
@@ -664,6 +665,34 @@ impl LocalAgentControl {
             warn!("failed to persist thread-spawn edge: {err}");
         }
     }
+}
+
+/// Renders a MAv1 child status as a notification attributed to the parent's tool namespace.
+async fn legacy_subagent_notification(
+    parent_thread: &crate::CodexThread,
+    child_reference: &str,
+    status: AgentStatus,
+) -> ResponseItem {
+    let config = parent_thread.config().await;
+    let namespace = match parent_thread
+        .multi_agent_version()
+        .unwrap_or_else(|| config.multi_agent_version_from_features())
+    {
+        MultiAgentVersion::Disabled => None,
+        MultiAgentVersion::V1 => Some(ContentItemNamespace::MultiAgentV1),
+        MultiAgentVersion::V2 => Some(
+            config
+                .multi_agent_v2
+                .tool_namespace
+                .clone()
+                .map(ContentItemNamespace::from)
+                .unwrap_or(ContentItemNamespace::Functions),
+        ),
+    };
+    ContextualUserFragment::into(
+        SubagentNotification::new(child_reference, status)
+            .with_metadata(ContentItemMetadata::tool(namespace)),
+    )
 }
 
 async fn inherited_exec_policy_for_source(

@@ -101,6 +101,8 @@ pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     controller: Option<(ThreadId, Arc<dyn AgentControl>, watch::Receiver<bool>)>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    /// MAv1 child results, which are notifications rather than mail.
+    subagent_notifications: Mutex<Vec<ResponseItem>>,
 }
 
 pub(crate) struct PendingMailboxCommunication {
@@ -116,6 +118,7 @@ impl InputQueue {
             activity_tx,
             controller: None,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            subagent_notifications: Mutex::new(Vec::new()),
         }
     }
 
@@ -224,11 +227,36 @@ impl InputQueue {
     }
 
     pub(crate) async fn has_pending_mailbox_items(&self) -> bool {
-        !self.mailbox_pending_mails.lock().await.is_empty()
+        if !self.mailbox_pending_mails.lock().await.is_empty()
             || self
                 .controller
                 .as_ref()
                 .is_some_and(|(_, _, updates)| *updates.borrow())
+        {
+            return true;
+        }
+        !self.subagent_notifications.lock().await.is_empty()
+    }
+
+    pub(crate) async fn enqueue_subagent_notification(&self, notification: ResponseItem) {
+        self.subagent_notifications.lock().await.push(notification);
+        self.activity_tx.send_replace(InputQueueActivity::Mailbox);
+    }
+
+    /// Whether a child result is waiting for this session, in either agent version.
+    pub(crate) async fn has_pending_subagent_results(&self) -> bool {
+        {
+            let mut pending = self.mailbox_pending_mails.lock().await;
+            // Child results reach loaded sessions through the controller mailbox too.
+            self.read_mailbox(&mut pending);
+            if pending
+                .iter()
+                .any(|mail| mail.communication.subagent_result)
+            {
+                return true;
+            }
+        }
+        !self.subagent_notifications.lock().await.is_empty()
     }
 
     pub(crate) async fn has_trigger_turn_mailbox_items(&self) -> bool {
@@ -272,10 +300,17 @@ impl InputQueue {
                     .filter(|id| !id.trim().is_empty())
             })
             .map(str::to_string);
-        let items = pending_mails
+        let mut items: Vec<_> = pending_mails
             .into_iter()
             .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
             .collect();
+        items.extend(
+            self.subagent_notifications
+                .lock()
+                .await
+                .drain(..)
+                .map(|notification| TurnInput::ResponseItem(notification.into())),
+        );
         (items, start_options)
     }
 
@@ -842,5 +877,55 @@ mod tests {
             .enqueue_mailbox_communication(trigger_mail.into(), Default::default())
             .await;
         assert!(input_queue.has_trigger_turn_mailbox_items().await);
+    }
+
+    #[tokio::test]
+    async fn input_queue_tracks_child_results_until_drained_once() {
+        let input_queue = InputQueue::new();
+        let message = make_mail(
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            AgentPath::root(),
+            "progress",
+            /*trigger_turn*/ false,
+        );
+        input_queue
+            .enqueue_mailbox_communication(message.clone().into(), Default::default())
+            .await;
+        assert!(!input_queue.has_pending_subagent_results().await);
+
+        let result = make_mail(
+            AgentPath::try_from("/root/worker").expect("agent path"),
+            AgentPath::root(),
+            "Message Type: FINAL_ANSWER",
+            /*trigger_turn*/ false,
+        );
+        let mut pending_result = crate::PendingAgentMessage::from(result.clone());
+        pending_result.subagent_result = true;
+        input_queue
+            .enqueue_mailbox_communication(pending_result, Default::default())
+            .await;
+        assert!(input_queue.has_pending_subagent_results().await);
+        let (drained, _) = input_queue.drain_mailbox_input_items().await;
+        assert_eq!(
+            drained,
+            vec![
+                TurnInput::InterAgentCommunication(message.into()),
+                TurnInput::InterAgentCommunication(result.into()),
+            ]
+        );
+        assert!(!input_queue.has_pending_subagent_results().await);
+
+        let notification = ResponseItem::Other;
+        input_queue
+            .enqueue_subagent_notification(notification.clone())
+            .await;
+        assert!(input_queue.has_pending_subagent_results().await);
+        assert!(input_queue.has_pending_mailbox_items().await);
+        assert_eq!(
+            input_queue.drain_mailbox_input_items().await.0,
+            vec![TurnInput::ResponseItem(notification.into())]
+        );
+        assert!(!input_queue.has_pending_subagent_results().await);
+        assert!(!input_queue.has_pending_mailbox_items().await);
     }
 }

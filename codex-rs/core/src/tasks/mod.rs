@@ -357,6 +357,10 @@ impl Session {
             turn_context.multi_agent_version,
             &turn_context.session_source,
         );
+        let completion_parent_guard = self
+            .services
+            .local_agent_runtime
+            .completion_parent_guard(&turn_context.session_source);
         let done_clone = Arc::clone(&done);
         let session = Arc::clone(self);
         let ctx = Arc::clone(&turn_context);
@@ -383,6 +387,8 @@ impl Session {
         );
         let storage_originator = AuthStorageOriginator::from_client_name(&turn_context.originator);
         let task_future = async move {
+            // Finalization reports this child's result after RunningTask has been removed.
+            let _completion_parent_guard = completion_parent_guard;
             let ctx_for_finish = Arc::clone(&ctx);
             let task_result = task_for_run
                 .run(
@@ -923,20 +929,31 @@ impl Session {
         }
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "classifying a reserved wake must stay atomic with taking it"
+    )]
     async fn take_active_turn(&self, reason: &TurnAbortReason) -> Option<ActiveTurn> {
         let mut active = self.active_turn.lock().await;
         if matches!(
             reason,
             TurnAbortReason::Interrupted | TurnAbortReason::BudgetLimited
-        ) && active.as_ref().is_some_and(|turn| {
-            turn.task.is_some()
-                || (self.enabled(Feature::WakeOnAgentMessages) && turn.finishing.is_none())
-        }) {
-            // Message wakes reserve work before registering a task. With the
-            // feature enabled, stopping a reservation must block later mail too.
+        ) {
+            let stops_work = match active.as_ref() {
+                Some(turn) if turn.task.is_some() => true,
+                Some(turn) if turn.finishing.is_none() => {
+                    self.enabled(Feature::WakeOnAgentMessages)
+                        || self.input_queue.has_pending_subagent_results().await
+                }
+                Some(_) | None => false,
+            };
+            // Message wakes and child-result continuations reserve work before registering a
+            // task. Stopping such a reservation must block later wakes too.
             // Finishing turns must retain their status until completion is
             // persisted, so capacity eviction cannot close their rollout writer.
-            self.mark_interrupted();
+            if stops_work {
+                self.mark_interrupted();
+            }
         }
         active.take()
     }

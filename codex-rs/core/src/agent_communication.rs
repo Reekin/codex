@@ -53,6 +53,10 @@ impl AgentCommunicationContext {
             sender_thread_id,
         }
     }
+
+    pub(crate) fn is_result(&self) -> bool {
+        self.kind == AgentCommunicationKind::Result
+    }
 }
 
 pub(crate) fn send_log_content(
@@ -110,6 +114,9 @@ pub struct PendingAgentMessage {
     communication: InterAgentCommunication,
     #[serde(skip)]
     pub(crate) delivery: Option<MessageDelivery>,
+    /// A child's terminal result, which may resume its parent after a natural turn end.
+    #[serde(skip)]
+    pub(crate) subagent_result: bool,
 }
 
 impl From<InterAgentCommunication> for PendingAgentMessage {
@@ -139,6 +146,7 @@ impl PendingAgentMessage {
         Self {
             communication,
             delivery,
+            subagent_result: false,
         }
     }
 }

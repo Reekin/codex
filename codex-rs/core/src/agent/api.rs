@@ -236,6 +236,8 @@ pub struct AgentTurnOutcome {
     pub thread_id: ThreadId,
     pub turn_id: String,
     pub source: SessionSource,
+    /// Selects the parent's result format: MAv2 mail or a MAv1 notification.
+    pub multi_agent_version: MultiAgentVersion,
     pub parent_turn_id: Option<String>,
     pub initiating_agent_path: Option<AgentPath>,
     pub status: AgentStatus,

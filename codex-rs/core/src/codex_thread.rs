@@ -2,7 +2,6 @@ use crate::WithTurnExtensionData;
 use crate::agent::AgentStatus;
 use crate::agent::api::AgentControl;
 use crate::config::ConstraintResult;
-use crate::context::ContextualUserFragment;
 use crate::context::GuardianReviewEvidence;
 use crate::elicitation::ElicitationRegistration;
 use crate::session::SessionIo;
@@ -886,12 +885,36 @@ impl CodexThread {
         self.session.token_usage_info().await
     }
 
-    /// Records a context fragment without creating a new user turn boundary.
-    pub(crate) async fn inject_fragment_without_turn(&self, fragment: impl ContextualUserFragment) {
-        let item = ContextualUserFragment::into(fragment);
+    /// Queues a MAv1 child result for this parent's next model request.
+    ///
+    /// A parent whose turn ended naturally continues to process it; an active turn consumes it
+    /// through its normal input flow.
+    pub(crate) async fn deliver_subagent_notification(&self, notification: ResponseItem) {
+        if self.has_shutdown_status() {
+            return;
+        }
         self.session
-            .inject_no_new_turn(vec![item], /*current_turn_context*/ None)
+            .input_queue
+            .enqueue_subagent_notification(notification)
             .await;
+        // Admission runs detached so the reporting child never owns the parent's turn start.
+        tokio::spawn(self.session.maybe_start_turn_for_pending_work());
+    }
+
+    /// Whether child work or an unconsumed child result still needs this loaded runtime.
+    ///
+    /// This is independent of client subscriptions: a running child still reports here.
+    pub async fn has_pending_subagent_work(&self) -> bool {
+        self.session
+            .services
+            .local_agent_runtime
+            .has_outstanding_child_completion(self.session.thread_id)
+            || self
+                .session
+                .input_queue
+                .has_pending_subagent_results()
+                .await
+            || self.session.active_turn.lock().await.is_some()
     }
 
     /// Records an explicit user goal mutation without scheduling a model response.

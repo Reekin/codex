@@ -15,6 +15,7 @@ use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::SubAgentSource;
@@ -29,6 +30,13 @@ impl LocalAgentControl {
         outcome: AgentTurnOutcome,
         trace: &ThreadTraceContext,
     ) {
+        match outcome.multi_agent_version {
+            MultiAgentVersion::V2 => {}
+            MultiAgentVersion::V1 => {
+                return self.notify_legacy_parent_of_terminal_turn(outcome).await;
+            }
+            MultiAgentVersion::Disabled => return,
+        }
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             agent_path: Some(child_agent_path),
@@ -151,5 +159,34 @@ impl LocalAgentControl {
                 },
             );
         }
+    }
+
+    /// Queues a MAv1 child's terminal status for its loaded parent, including follow-up turns.
+    async fn notify_legacy_parent_of_terminal_turn(&self, outcome: AgentTurnOutcome) {
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            agent_path,
+            ..
+        }) = &outcome.source
+        else {
+            return;
+        };
+        let Ok(state) = self.runtime.upgrade() else {
+            return;
+        };
+        let Ok(parent_thread) = state.get_thread(*parent_thread_id).await else {
+            debug!("failed to notify unloaded parent thread {parent_thread_id}");
+            return;
+        };
+        let child_reference = agent_path
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| outcome.thread_id.to_string());
+        let notification =
+            super::legacy_subagent_notification(&parent_thread, &child_reference, outcome.status)
+                .await;
+        parent_thread
+            .deliver_subagent_notification(notification)
+            .await;
     }
 }

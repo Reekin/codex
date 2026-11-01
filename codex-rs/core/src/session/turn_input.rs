@@ -723,6 +723,7 @@ impl Session {
         if !has_trigger_turn
             && !self.has_outstanding_durable_sleep()
             && !self.should_wake_on_agent_messages().await
+            && !self.should_continue_for_subagent_results().await
         {
             return None;
         }
@@ -760,10 +761,12 @@ impl Session {
             return None;
         }
         let has_trigger_turn = self.input_queue.has_trigger_turn_mailbox_items().await;
+        let continues_for_subagent_results = self.should_continue_for_subagent_results().await;
         let state = self.state.lock().await;
         let configuration = &state.session_configuration;
         if !has_trigger_turn
             && !self.has_outstanding_durable_sleep()
+            && !continues_for_subagent_results
             && !TurnStartKind::Automatic
                 .permits_mode(configuration.step_settings.collaboration_mode.mode)
         {
@@ -785,6 +788,12 @@ impl Session {
         let config = &state.session_configuration;
         !config.session_source.is_non_root_agent()
             && TurnStartKind::Automatic.permits_mode(config.step_settings.collaboration_mode.mode)
+    }
+
+    /// Child results continue a parent whose turn ended naturally. After an explicit
+    /// interruption they wait for the next user turn instead.
+    pub(crate) async fn should_continue_for_subagent_results(&self) -> bool {
+        !self.is_interrupted() && self.input_queue.has_pending_subagent_results().await
     }
 
     pub(crate) async fn route_realtime_text_input(
