@@ -1,7 +1,6 @@
 //! Endpoint configuration and request construction shared by API clients.
 
 use crate::Request;
-use crate::RequestCompression;
 use crate::RetryOn;
 use crate::RetryPolicy;
 use http::Method;
@@ -77,15 +76,9 @@ impl Provider {
     }
 
     pub fn build_request(&self, method: Method, path: &str) -> Request {
-        Request {
-            method,
-            url: self.url_for_path(path),
-            headers: self.headers.clone(),
-            body: None,
-            compression: RequestCompression::None,
-            timeout: None,
-            response_body_limit_bytes: None,
-        }
+        let mut request = Request::new(method, self.url_for_path(path));
+        request.headers = self.headers.clone();
+        request
     }
 
     pub fn websocket_url_for_path(&self, path: &str) -> Result<Url, url::ParseError> {

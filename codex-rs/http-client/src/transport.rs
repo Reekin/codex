@@ -2,6 +2,10 @@
 //!
 //! Each request's limit applies to observed body bytes, including unsuccessful responses;
 //! declared content lengths are only an additional early-rejection check.
+//!
+//! Large encoded JSON bodies are streamed under an upload monitor. A stalled attempt is dropped
+//! before completion and replaced by an attempt on a fresh connection, within a request-scoped
+//! budget; the attempt after the budget is exhausted runs unmonitored to completion.
 
 use crate::HttpResponse;
 use crate::RouteAwareClientPool;
@@ -14,16 +18,21 @@ use crate::request::RequestBody;
 use crate::request::Response;
 use crate::request_draft::RequestDraft;
 use crate::retry_after::RetryAfter;
+use crate::upload::UploadMonitor;
+use crate::upload::UploadPolicy;
+use crate::upload::monitored_body;
 use bytes::Bytes;
 use bytes::BytesMut;
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use http::HeaderMap;
+use http::HeaderValue;
 use http::Method;
 use http::StatusCode;
 use tracing::Level;
 use tracing::enabled;
 use tracing::trace;
+use tracing::warn;
 
 pub type ByteStream = BoxStream<'static, Result<Bytes, TransportError>>;
 
@@ -47,6 +56,7 @@ pub trait HttpTransport: Send + Sync {
 #[derive(Clone, Debug)]
 pub struct ReqwestTransport {
     client: TransportClient,
+    upload_policy: UploadPolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +73,7 @@ impl ReqwestTransport {
     pub fn from_http_client(client: HttpClient) -> Self {
         Self {
             client: TransportClient::Fixed(client),
+            upload_policy: UploadPolicy::default(),
         }
     }
 
@@ -70,29 +81,87 @@ impl ReqwestTransport {
     pub fn from_route_aware_client_pool(client: RouteAwareClientPool) -> Self {
         Self {
             client: TransportClient::RouteAware(Box::new(client)),
+            upload_policy: UploadPolicy::default(),
         }
     }
 
+    #[cfg(test)]
+    fn with_upload_policy(mut self, upload_policy: UploadPolicy) -> Self {
+        self.upload_policy = upload_policy;
+        self
+    }
+
     async fn send(&self, req: Request) -> Result<HttpResponse, TransportError> {
-        let prepared = req.prepare_body_for_send().map_err(TransportError::Build)?;
+        loop {
+            let (request, upload_monitor) = self.draft(&req)?;
+            let Some(upload_monitor) = upload_monitor else {
+                return self.send_draft(request).await;
+            };
+            // Completing the select drops the incomplete attempt, so its connection cannot
+            // return to the pool before the retry starts.
+            let stall = tokio::select! {
+                result = self.send_draft(request) => return result,
+                stall = upload_monitor.wait_for_stall() => stall,
+            };
+            let attempt = req.record_slow_upload_retry();
+            warn!(
+                attempt,
+                max_attempts = self.upload_policy.max_fresh_connection_retries + 1,
+                total_bytes = stall.total_bytes,
+                submitted_bytes = stall.submitted_bytes,
+                elapsed_ms = stall.elapsed.as_millis(),
+                bytes_per_second = stall.bytes_per_second,
+                estimated_remaining_ms = stall.estimated_remaining.as_millis(),
+                "large request upload stalled; retrying on a fresh connection"
+            );
+        }
+    }
+
+    /// Builds one attempt, monitoring large encoded JSON uploads while the retry budget lasts.
+    fn draft(
+        &self,
+        req: &Request,
+    ) -> Result<(RequestDraft, Option<UploadMonitor>), TransportError> {
+        let mut prepared = req.prepare_body_for_send().map_err(TransportError::Build)?;
 
         let Request {
             method,
             url,
             headers: _,
-            body: _,
+            body,
             compression: _,
             timeout,
             response_body_limit_bytes: _,
+            slow_upload_retries: _,
         } = req;
+        let monitor_upload = matches!(body, Some(RequestBody::EncodedJson(_)))
+            && req.slow_upload_retries() < self.upload_policy.max_fresh_connection_retries;
 
         let method = Method::from_bytes(method.as_str().as_bytes()).unwrap_or(Method::GET);
-        let mut request =
-            RequestDraft::new(method, url).map_err(|error| Self::map_error(error.into()))?;
+        let mut request = RequestDraft::new(method, url.as_str())
+            .map_err(|error| Self::map_error(error.into()))?;
+        *request.request.timeout_mut() = *timeout;
+        let mut upload_monitor = None;
+        *request.request.body_mut() = match prepared.body {
+            Some(body) if monitor_upload => {
+                let body_len = body.len();
+                let (body, monitor) = monitored_body(body, self.upload_policy);
+                if monitor.is_some() {
+                    // A streamed body has no inherent length; keep the upload framed by length.
+                    prepared
+                        .headers
+                        .insert(http::header::CONTENT_LENGTH, HeaderValue::from(body_len));
+                }
+                upload_monitor = monitor;
+                Some(body)
+            }
+            body => body.map(Into::into),
+        };
         request.extend_headers(prepared.headers);
-        *request.request.timeout_mut() = timeout;
-        *request.request.body_mut() = prepared.body.map(Into::into);
+        Ok((request, upload_monitor))
+    }
 
+    async fn send_draft(&self, request: RequestDraft) -> Result<HttpResponse, TransportError> {
         match &self.client {
             TransportClient::Fixed(client) => match &client.backend {
                 HttpClientBackend::Routed(pool) => pool

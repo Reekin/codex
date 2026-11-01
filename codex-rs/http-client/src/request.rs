@@ -4,6 +4,9 @@ use http::HeaderValue;
 use http::Method;
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 /// A JSON request body serialized once into reference-counted bytes.
@@ -84,6 +87,7 @@ pub struct Request {
     /// Maximum accepted response-body bytes, including streaming and error bodies.
     /// `None` leaves the response unbounded.
     pub response_body_limit_bytes: Option<usize>,
+    pub(crate) slow_upload_retries: Arc<AtomicU32>,
 }
 
 impl Request {
@@ -96,6 +100,7 @@ impl Request {
             compression: RequestCompression::None,
             timeout: None,
             response_body_limit_bytes: None,
+            slow_upload_retries: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -112,6 +117,18 @@ impl Request {
     pub fn with_compression(mut self, compression: RequestCompression) -> Self {
         self.compression = compression;
         self
+    }
+
+    /// Records a stalled upload attempt and returns its 1-based attempt number.
+    ///
+    /// The counter is shared by every clone of this request, so the
+    /// fresh-connection retry budget spans all transport attempts.
+    pub(crate) fn record_slow_upload_retry(&self) -> u32 {
+        self.slow_upload_retries.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
+    pub(crate) fn slow_upload_retries(&self) -> u32 {
+        self.slow_upload_retries.load(Ordering::Acquire)
     }
 
     /// Prepares the body once and stores the exact bytes that will be sent.
