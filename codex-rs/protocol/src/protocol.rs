@@ -2506,34 +2506,32 @@ pub struct TokenUsageRecord {
 pub struct TokenUsageInfo {
     pub total_token_usage: TokenUsage,
     pub last_token_usage: TokenUsage,
-    /// Whether the last context count includes reasoning retained from earlier turns.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub last_usage_includes_reasoning: Option<bool>,
     // TODO(aibrahim): make this not optional
     #[ts(type = "number | null")]
     pub model_context_window: Option<i64>,
+    /// Active context usage at the time of this snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub context_usage: Option<crate::context_usage::ContextUsage>,
 }
 
 impl TokenUsageInfo {
     pub fn new_or_append(
         info: &Option<TokenUsageInfo>,
         last: &TokenUsage,
-        includes_reasoning: bool,
         model_context_window: Option<i64>,
     ) -> Self {
         let mut info = match info {
             Some(info) => info.clone(),
             None => Self {
                 total_token_usage: TokenUsage::default(),
-                last_usage_includes_reasoning: None,
                 last_token_usage: TokenUsage::default(),
                 model_context_window,
+                context_usage: None,
             },
         };
         info.total_token_usage.add_assign(last);
         info.last_token_usage = last.clone();
-        info.last_usage_includes_reasoning = Some(includes_reasoning);
         if let Some(model_context_window) = model_context_window {
             info.model_context_window = Some(model_context_window);
         }
@@ -2549,7 +2547,6 @@ impl TokenUsageInfo {
             total_tokens: context_window,
             ..TokenUsage::default()
         };
-        self.last_usage_includes_reasoning = None;
         self.last_token_usage = TokenUsage {
             total_tokens: delta,
             ..TokenUsage::default()
@@ -2559,9 +2556,9 @@ impl TokenUsageInfo {
     pub fn full_context_window(context_window: i64) -> Self {
         let mut info = Self {
             total_token_usage: TokenUsage::default(),
-            last_usage_includes_reasoning: None,
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(context_window),
+            context_usage: None,
         };
         info.fill_to_context_window(context_window);
         info
@@ -6626,9 +6623,9 @@ mod tests {
     fn token_usage_info_new_or_append_updates_context_window_when_provided() {
         let initial = Some(TokenUsageInfo {
             total_token_usage: TokenUsage::default(),
-            last_usage_includes_reasoning: None,
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(258_400),
+            context_usage: None,
         });
         let last = TokenUsage {
             input_tokens: 10,
@@ -6640,12 +6637,7 @@ mod tests {
             codex_rollout_budget_units: None,
         };
 
-        let info = TokenUsageInfo::new_or_append(
-            &initial,
-            &last,
-            /*includes_reasoning*/ true,
-            Some(128_000),
-        );
+        let info = TokenUsageInfo::new_or_append(&initial, &last, Some(128_000));
 
         assert_eq!(info.model_context_window, Some(128_000));
     }
@@ -6654,9 +6646,9 @@ mod tests {
     fn token_usage_info_new_or_append_preserves_context_window_when_not_provided() {
         let initial = Some(TokenUsageInfo {
             total_token_usage: TokenUsage::default(),
-            last_usage_includes_reasoning: None,
             last_token_usage: TokenUsage::default(),
             model_context_window: Some(258_400),
+            context_usage: None,
         });
         let last = TokenUsage {
             input_tokens: 10,
@@ -6668,9 +6660,8 @@ mod tests {
             codex_rollout_budget_units: None,
         };
 
-        let info = TokenUsageInfo::new_or_append(
-            &initial, &last, /*includes_reasoning*/ true, /*model_context_window*/ None,
-        );
+        let info =
+            TokenUsageInfo::new_or_append(&initial, &last, /*model_context_window*/ None);
 
         assert_eq!(info.model_context_window, Some(258_400));
     }

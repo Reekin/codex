@@ -914,36 +914,12 @@ fn drop_last_n_user_turns_removes_post_input_configuration_update_with_its_turn(
     assert!(history.annotated_items().is_empty());
 }
 
-#[test]
-fn non_last_reasoning_tokens_return_zero_when_no_user_messages() {
-    let history =
-        create_history_with_items(vec![reasoning_with_encrypted_content(/*len*/ 800)]);
-
-    assert_eq!(history.get_non_last_reasoning_items_tokens(), 0);
-}
-
-#[test]
-fn non_last_reasoning_tokens_ignore_entries_after_last_user() {
-    let history = create_history_with_items(vec![
-        reasoning_with_encrypted_content(/*len*/ 900),
-        user_msg("first"),
-        reasoning_with_encrypted_content(/*len*/ 1_000),
-        user_msg("second"),
-        reasoning_with_encrypted_content(/*len*/ 2_000),
-    ]);
-    // first: (900 * 0.75 - 650) / 4 = 6.25 tokens
-    // second: (1000 * 0.75 - 650) / 4 = 25 tokens
-    // first + second = 62.5
-    assert_eq!(history.get_non_last_reasoning_items_tokens(), 32);
-}
-
-#[test_case(None, 125; "legacy count")]
-#[test_case(Some(false), 125; "exclusive count")]
-#[test_case(Some(true), 100; "inclusive count")]
-fn total_token_usage_respects_saved_reasoning_accounting(
-    includes_reasoning: Option<bool>,
-    expected: i64,
-) {
+// Saved counts from older builds may carry a reasoning-accounting flag; reasoning retained from
+// earlier turns is already part of the provider total either way.
+#[test_case(None; "legacy count")]
+#[test_case(Some(false); "exclusive count")]
+#[test_case(Some(true); "inclusive count")]
+fn total_token_usage_does_not_re_estimate_prior_reasoning(includes_reasoning: Option<bool>) {
     let mut history = create_history_with_items(vec![
         reasoning_with_encrypted_content(/*len*/ 1_000),
         user_msg("second"),
@@ -961,7 +937,34 @@ fn total_token_usage_respects_saved_reasoning_accounting(
         serde_json::from_value(saved).expect("saved token count"),
     ));
 
-    assert_eq!(history.get_total_token_usage(), expected);
+    assert_eq!(history.get_total_token_usage(), 100);
+}
+
+#[test]
+fn empty_encrypted_reasoning_is_estimated_from_its_visible_text() {
+    let text = "plaintext reasoning ".repeat(200);
+    let ResponseItem::Reasoning {
+        id,
+        summary,
+        content,
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = reasoning_msg(&text)
+    else {
+        unreachable!("reasoning fixture");
+    };
+    let item = ResponseItem::Reasoning {
+        id,
+        summary,
+        content,
+        encrypted_content: Some(String::new()),
+        internal_chat_message_metadata_passthrough,
+    };
+
+    assert_eq!(
+        estimate_response_item_model_visible_bytes(&item),
+        i64::try_from("summary".len() + text.len()).unwrap()
+    );
 }
 
 #[test]
@@ -1180,15 +1183,17 @@ fn legacy_inter_agent_assistant_messages_are_not_turn_boundaries() {
 
 #[test]
 fn total_token_usage_includes_all_items_after_last_model_generated_item() {
-    let mut history = create_history_with_items(vec![assistant_msg("already counted by API")]);
-    history.update_token_info(
-        &TokenUsage {
-            total_tokens: 100,
-            ..Default::default()
-        },
-        /*model_context_window*/ None,
-        /*includes_reasoning*/ true,
-    );
+    // Reasoning retained from an earlier turn is already part of the provider total.
+    let mut history = create_history_with_items(vec![
+        user_msg("first"),
+        reasoning_with_encrypted_content(/*len*/ 4_000),
+        assistant_msg("already counted by API"),
+    ]);
+    let usage = TokenUsage {
+        total_tokens: 100,
+        ..Default::default()
+    };
+    history.update_token_info(&usage, &usage, /*model_context_window*/ None);
     let added_user = user_msg("new user message");
     let added_tool_output = custom_tool_call_output("tool-tail", "new tool output");
     history.record_items(

@@ -473,6 +473,10 @@ pub struct ModelInfo {
     /// Whether the model supports provider-native Responses compaction.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub supports_remote_compaction: bool,
+    /// Whether reasoning from earlier turns stays in the model's input. Providers that drop it
+    /// after each turn do not count it toward context usage.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub retains_prior_reasoning: bool,
     /// Percentage of the context window considered usable for inputs, after
     /// reserving headroom for system prompts, tool overhead, and model output.
     #[serde(default = "default_effective_context_window_percent")]
@@ -1174,6 +1178,7 @@ mod tests {
             auto_compact_token_limit: None,
             comp_hash: None,
             supports_remote_compaction: true,
+            retains_prior_reasoning: true,
             effective_context_window_percent: 95,
             experimental_supported_tools: vec![],
             input_modalities: default_input_modalities(),
