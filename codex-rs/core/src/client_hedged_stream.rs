@@ -36,20 +36,21 @@ impl ModelClientSession {
     ) -> Result<ResponseStream> {
         self.hedge_started = false;
         let hedge_after = self.stream_idle_timeout;
+        // Candidate requests are boxed: two inline request futures would otherwise be embedded
+        // in every caller's state machine and overflow the turn task's stack.
         if !self.hedge_allowed {
-            return self
-                .stream_once(
-                    prompt,
-                    model_info,
-                    session_telemetry,
-                    effort,
-                    summary,
-                    service_tier,
-                    responses_metadata,
-                    inference_trace,
-                    hedge_after,
-                )
-                .await;
+            return Box::pin(self.stream_once(
+                prompt,
+                model_info,
+                session_telemetry,
+                effort,
+                summary,
+                service_tier,
+                responses_metadata,
+                inference_trace,
+                hedge_after,
+            ))
+            .await;
         }
 
         let backup_wait = hedge_after.saturating_add(STREAM_IDLE_TIMEOUT_INCREMENT);
@@ -68,8 +69,8 @@ impl ModelClientSession {
             turn_state: Arc::clone(&self.turn_state),
         };
         let mut hedge_started = false;
-        let result = select_response(
-            self.stream_once(
+        let result = Box::pin(select_response(
+            Box::pin(self.stream_once(
                 prompt,
                 model_info,
                 session_telemetry,
@@ -80,8 +81,8 @@ impl ModelClientSession {
                 inference_trace,
                 // Keep the original eligible for the replacement's whole waiting interval.
                 hedge_after.saturating_add(backup_wait),
-            ),
-            backup.stream_once(
+            )),
+            Box::pin(backup.stream_once(
                 prompt,
                 model_info,
                 session_telemetry,
@@ -91,11 +92,11 @@ impl ModelClientSession {
                 responses_metadata,
                 inference_trace,
                 backup_wait,
-            ),
+            )),
             hedge_after,
             backup_wait,
             &mut hedge_started,
-        )
+        ))
         .await;
         self.hedge_started = hedge_started;
         let (winner, stream) = result?;
