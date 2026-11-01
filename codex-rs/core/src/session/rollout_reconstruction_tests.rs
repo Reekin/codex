@@ -2857,3 +2857,6 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
     );
     assert!(session.reference_context_item().await.is_none());
 }
+
+#[path = "rollout_reconstruction_subagent_identity_tests.rs"]
+mod subagent_identity;

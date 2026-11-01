@@ -13,6 +13,8 @@ use super::turn_context::TurnEnvironment;
 use super::*;
 #[path = "config_refresh_tests.rs"]
 mod config_refresh_tests;
+#[path = "subagent_identity_tests.rs"]
+mod subagent_identity_tests;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
 use crate::config::ConfigBuilder;

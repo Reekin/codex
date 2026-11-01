@@ -248,6 +248,8 @@ pub enum Feature {
     SubagentThreadEnvironments,
     /// Use each subagent model's default context window and auto-compaction threshold.
     SubagentDefaultContextLimits,
+    /// Give spawned subagents identity context, fork-history boundaries, and mailbox-aware waits.
+    SubagentIdentity,
     /// Keep sampling through reasoning and commentary boundaries when agent mail arrives.
     /// Pending mail is delivered at the next normal input boundary instead.
     DeferMailboxPreemption,
@@ -1597,6 +1599,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::SubagentDefaultContextLimits,
         key: "subagent_default_context_limits",
         stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::SubagentIdentity,
+        key: "subagent_identity",
+        stage: Stage::Stable,
         default_enabled: false,
     },
     FeatureSpec {

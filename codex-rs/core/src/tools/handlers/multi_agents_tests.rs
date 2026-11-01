@@ -4679,6 +4679,9 @@ async fn build_agent_spawn_config_uses_captured_step_settings_and_turn_context_v
     assert_eq!(config, expected);
 }
 
+#[path = "multi_agents_subagent_identity_tests.rs"]
+mod subagent_identity;
+
 #[tokio::test]
 async fn build_agent_resume_config_clears_base_instructions() {
     let (_session, mut turn) = make_session_and_context().await;

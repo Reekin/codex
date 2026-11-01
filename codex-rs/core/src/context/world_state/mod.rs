@@ -14,6 +14,7 @@ mod permissions;
 mod persistent_mode;
 mod plugins_instructions;
 mod realtime;
+mod subagent_identity;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod tools;
@@ -55,6 +56,7 @@ pub(crate) use permissions::PermissionsState;
 pub(crate) use persistent_mode::PersistentModeState;
 pub(crate) use plugins_instructions::PluginsInstructionsState;
 pub(crate) use realtime::RealtimeState;
+pub(crate) use subagent_identity::SubagentIdentityState;
 pub(crate) use tools::ToolsState;
 pub(crate) use top_level_tools::IncrementalToolsHint;
 pub(crate) use top_level_tools::TopLevelToolsState;

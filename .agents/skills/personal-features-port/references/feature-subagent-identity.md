@@ -14,6 +14,11 @@ with its own identity.
 
 ## Stable Contract
 
+The behavior below is enabled by `[features] subagent_identity = true` in the user's `config.toml`.
+With it off, Codex keeps upstream behavior: no identity context, no fork-history boundaries (forked
+children inherit the parent history exactly as upstream does), upstream `wait_agent` wording and
+self-wait handling, and upstream agent name/path validation.
+
 - **REQ-1 Canonical identity**: When a canonical agent path exists, provide it. Otherwise state that
   the path is absent and the current agent is still not the `/root` main agent.
 - **REQ-2 Identity facts**: Provide parent thread, depth, nickname, and role when available.
@@ -61,6 +66,11 @@ Rediscover these semantics on every upstream base:
 - model-visible tool schemas.
 
 ## P0 Acceptance
+
+### Flag Off
+
+With `subagent_identity` off, prove spawned-subagent requests, forked-child history, and
+`wait_agent` results match upstream.
 
 ### Startup Identity
 
