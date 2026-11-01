@@ -1,12 +1,12 @@
 //! Reconstruction of the fork-history boundary that subagent identity records for forked children.
 
 use super::*;
-use pretty_assertions::assert_eq;
 use crate::context::ForkedHistoryBoundary;
 use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::RenderedFragment;
 use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::input_text;
+use pretty_assertions::assert_eq;
 
 fn typed_fork_boundary_message(text: &str) -> ResponseItem {
     RenderedFragment::new(
