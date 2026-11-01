@@ -324,10 +324,13 @@ async fn automatic_compaction_follows_the_active_model_across_a_switch() -> Resu
         .build_with_auto_env(&server)
         .await?;
     // Each reply reports usage past the configured automatic limit, so the next turn compacts
-    // before sampling; its size leaves the local route an earlier turn to summarize.
+    // before sampling. Pre-turn compaction runs before the new input is recorded, so on the
+    // local route the latest reply belongs to the current turn and stays verbatim. It outgrows
+    // the kept-window share, so the earlier turn is summarized, yet stays well inside the hard
+    // limit the compacted history must fit.
     let over_limit_reply = |id: &str| {
         sse(vec![
-            ev_assistant_message(id, &"Earlier evidence needs verification. ".repeat(5000)),
+            ev_assistant_message(id, &"Earlier evidence needs verification. ".repeat(2000)),
             ev_completed_with_tokens(id, /*total_tokens*/ 96_000),
         ])
     };
