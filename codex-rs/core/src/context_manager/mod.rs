@@ -1,3 +1,4 @@
+pub(crate) mod context_usage;
 mod history;
 mod image_availability;
 mod normalize;

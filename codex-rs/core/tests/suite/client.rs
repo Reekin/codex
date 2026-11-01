@@ -3554,8 +3554,18 @@ async fn token_count_includes_rate_limits_snapshot() {
         EventMsg::TokenCount(ev) => ev,
         _ => unreachable!(),
     };
-    // Assert full JSON for the final token count event (usage + rate limits)
-    let final_json = serde_json::to_value(&final_payload).unwrap();
+    // Assert full JSON for the final token count event (usage + rate limits). The context usage
+    // breakdown is an estimate, so only its active-token total is pinned here.
+    let mut final_json = serde_json::to_value(&final_payload).unwrap();
+    let context_usage = final_json["info"]
+        .as_object_mut()
+        .and_then(|info| info.remove("context_usage"))
+        .expect("token count should carry context usage");
+    assert!(
+        context_usage["tokens"]
+            .as_i64()
+            .is_some_and(|tokens| tokens >= 123)
+    );
     pretty_assertions::assert_eq!(
         final_json,
         json!({
@@ -3576,7 +3586,6 @@ async fn token_count_includes_rate_limits_snapshot() {
                     "reasoning_output_tokens": 0,
                     "total_tokens": 123
                 },
-                "last_usage_includes_reasoning": false,
                 // Default model is gpt-5.4 in tests → 95% usable context window
                 "model_context_window": 258400
             },

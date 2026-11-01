@@ -41,6 +41,7 @@ fn test_model(model_messages: Option<ModelMessages>) -> ModelInfo {
         auto_compact_token_limit: None,
         comp_hash: None,
         supports_remote_compaction: true,
+        retains_prior_reasoning: true,
         effective_context_window_percent: 95,
         experimental_supported_tools: vec![],
         input_modalities: vec![],

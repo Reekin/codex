@@ -246,6 +246,7 @@ use codex_protocol::exec_output::StreamOutput;
 pub(crate) mod async_compaction;
 mod code_mode_warning;
 mod config_refresh;
+mod context_usage;
 pub(crate) mod context_window;
 mod daemon_recovery;
 mod environment;
@@ -285,6 +286,7 @@ mod turn_input;
 mod turn_suspension;
 mod world_state;
 use self::code_mode_warning::unsupported_code_mode_warning;
+pub(crate) use self::context_usage::ResponseContext;
 pub(crate) use self::environment::ThreadEnvironmentDefaults;
 #[cfg(test)]
 use self::handlers::submission_dispatch_span;
@@ -417,7 +419,8 @@ use codex_utils_stream_parser::ProposedPlanSegment;
 /// Whether reported usage updates the installed context baseline or only spending.
 #[derive(Clone, Copy)]
 pub(crate) enum TokenUsageContext {
-    Sampling { includes_reasoning: bool },
+    /// Usage that measures the active context, qualified by the request it answered.
+    Sampling(ResponseContext),
     SpendingOnly,
 }
 
@@ -5244,14 +5247,13 @@ impl Session {
         &self,
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
-        includes_reasoning: bool,
     ) -> CodexResult<()> {
         let result = self
             .record_token_usage_info(
                 turn_context,
                 &turn_context.initial_settings,
                 token_usage,
-                TokenUsageContext::Sampling { includes_reasoning },
+                TokenUsageContext::Sampling(ResponseContext::default()),
             )
             .await;
         self.send_token_count_event(turn_context).await;
@@ -5313,33 +5315,46 @@ impl Session {
             let token_info = {
                 let mut state = self.state.lock().await;
                 match context {
-                    TokenUsageContext::Sampling { includes_reasoning } => {
+                    TokenUsageContext::Sampling(response) => {
+                        let stale = response.is_stale(state.history.history_version());
+                        // A replaced history keeps the active usage it was given at replacement.
+                        let active_usage = if stale {
+                            state
+                                .token_info()
+                                .map(|info| info.last_token_usage)
+                                .unwrap_or_default()
+                        } else {
+                            response.active_usage(token_usage)
+                        };
                         state.update_token_info_from_usage(
                             token_usage,
+                            &active_usage,
                             turn_context.model_context_window(),
-                            includes_reasoning,
                         );
-                        if matches!(
-                            turn_context.config.model_auto_compact_token_limit_scope,
-                            AutoCompactTokenLimitScope::BodyAfterPrefix
-                        ) {
-                            state.ensure_auto_compact_window_server_prefill_from_usage(token_usage);
+                        if !stale
+                            && matches!(
+                                turn_context.config.model_auto_compact_token_limit_scope,
+                                AutoCompactTokenLimitScope::BodyAfterPrefix
+                            )
+                        {
+                            state.ensure_auto_compact_window_server_prefill_from_usage(
+                                &active_usage,
+                            );
                         }
                         state.token_info()
                     }
                     TokenUsageContext::SpendingOnly => {
                         let mut info = state.token_info().unwrap_or(TokenUsageInfo {
                             total_token_usage: TokenUsage::default(),
-                            last_usage_includes_reasoning: None,
                             last_token_usage: TokenUsage::default(),
                             model_context_window: turn_context.model_context_window(),
+                            context_usage: None,
                         });
                         info.total_token_usage.add_assign(token_usage);
                         state.set_token_info(Some(info.clone()));
 
                         // Contributors receive the reported usage; stored context stays unchanged.
                         info.last_token_usage = token_usage.clone();
-                        info.last_usage_includes_reasoning = None;
                         info.model_context_window = turn_context
                             .model_context_window()
                             .or(info.model_context_window);
@@ -5388,9 +5403,9 @@ impl Session {
             let mut state = self.state.lock().await;
             let mut info = state.token_info().unwrap_or(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
-                last_usage_includes_reasoning: None,
                 last_token_usage: TokenUsage::default(),
                 model_context_window: None,
+                context_usage: None,
             });
 
             info.last_token_usage = TokenUsage {
@@ -5406,9 +5421,6 @@ impl Session {
             if let Some(model_context_window) = turn_context.model_context_window() {
                 info.model_context_window = Some(model_context_window);
             }
-
-            // The local estimate already includes every retained reasoning item.
-            info.last_usage_includes_reasoning = Some(true);
             state.set_token_info(Some(info));
         }
         self.set_auto_compact_window_estimated_prefill_for_scope(
@@ -5449,6 +5461,7 @@ impl Session {
     }
 
     pub(crate) async fn send_token_count_event(&self, turn_context: &TurnContext) {
+        self.refresh_context_usage(turn_context).await;
         let (info, rate_limits) = {
             let state = self.state.lock().await;
             state.token_info_and_rate_limits()

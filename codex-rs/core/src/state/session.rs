@@ -16,6 +16,7 @@ use super::auto_compact_window::AutoCompactWindowSnapshot;
 use crate::TurnStartOptions;
 use crate::context_manager::ContextManager;
 use crate::context_manager::HistoryReplacement;
+use crate::context_manager::context_usage::RequestOverhead;
 use crate::session::PreviousTurnSettings;
 use crate::session::session::SessionConfiguration;
 use crate::session::startup_prewarm::SessionStartupPrewarmHandle;
@@ -81,6 +82,8 @@ pub(crate) struct SessionState {
     pub(crate) history_reset: CancellationToken,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
+    /// Base-instruction and tool-definition size of the latest sampling request.
+    pub(crate) request_overhead: RequestOverhead,
     pub(crate) mcp_dependency_prompted: HashSet<String>,
     pub(crate) additional_context: AdditionalContextStore,
     /// Settings used by the latest regular user turn, used for turn-to-turn
@@ -135,6 +138,7 @@ impl SessionState {
             history_reset: CancellationToken::new(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
+            request_overhead: RequestOverhead::default(),
             mcp_dependency_prompted: HashSet::new(),
             additional_context: AdditionalContextStore::default(),
             previous_turn_settings: None,
@@ -293,11 +297,11 @@ impl SessionState {
     pub(crate) fn update_token_info_from_usage(
         &mut self,
         usage: &TokenUsage,
+        active_usage: &TokenUsage,
         model_context_window: Option<i64>,
-        includes_reasoning: bool,
     ) {
         self.history
-            .update_token_info(usage, model_context_window, includes_reasoning);
+            .update_token_info(usage, active_usage, model_context_window);
     }
 
     pub(crate) fn ensure_auto_compact_window_server_prefill_from_usage(

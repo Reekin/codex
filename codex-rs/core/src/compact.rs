@@ -837,7 +837,6 @@ async fn drain_to_completed(
 ) -> CodexResult<CompactionResponse> {
     let turn_context = step_context.turn.as_ref();
     let settings = &step_context.settings;
-    let mut includes_reasoning = settings.model_info.use_responses_lite;
     let mut stream = client_session
         .stream(
             prompt,
@@ -864,9 +863,8 @@ async fn drain_to_completed(
         match event {
             // Keep each attempt isolated until the response completes successfully.
             Ok(ResponseEvent::OutputItemDone(item)) => output.push(item),
-            Ok(ResponseEvent::ServerReasoningIncluded(included)) => {
-                includes_reasoning = included;
-            }
+            // Provider usage totals already cover retained reasoning.
+            Ok(ResponseEvent::ServerReasoningIncluded(_)) => {}
             Ok(ResponseEvent::RateLimits(snapshot)) => {
                 sess.update_rate_limits(turn_context, snapshot).await;
             }
@@ -899,12 +897,8 @@ async fn drain_to_completed(
                     usage_metadata.as_ref(),
                 )
                 .await;
-                sess.update_token_usage_info(
-                    turn_context,
-                    token_usage.as_ref(),
-                    includes_reasoning,
-                )
-                .await?;
+                sess.update_token_usage_info(turn_context, token_usage.as_ref())
+                    .await?;
                 return Ok(CompactionResponse {
                     response_id,
                     output,
