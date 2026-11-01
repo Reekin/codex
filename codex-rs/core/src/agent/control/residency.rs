@@ -16,9 +16,12 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use tracing::warn;
 
 /// The result of trying to unload one exact MAv2 child runtime.
@@ -120,6 +123,8 @@ pub(super) struct V2Residency {
 struct V2ResidencyState {
     residents: VecDeque<ThreadId>,
     pending_slots: usize,
+    /// Parents whose child turns have not yet handed their results to the parent.
+    completion_parents: HashMap<ThreadId, Weak<()>>,
 }
 
 pub(super) struct V2ResidencySlot {
@@ -164,6 +169,24 @@ impl LocalAgentControl {
 }
 
 impl LocalAgentRuntime {
+    /// Keeps a spawned child's parent loaded until this child turn has reported its result.
+    pub(crate) fn completion_parent_guard(
+        &self,
+        session_source: &SessionSource,
+    ) -> Option<Arc<()>> {
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        }) = session_source
+        else {
+            return None;
+        };
+        Some(self.residency.retain_completion_parent(*parent_thread_id))
+    }
+
+    pub(crate) fn has_outstanding_child_completion(&self, thread_id: ThreadId) -> bool {
+        self.residency.has_outstanding_child_completion(thread_id)
+    }
+
     /// Pins and touches the registered runtime without waiting for unrelated eviction.
     pub(crate) async fn pin_v2_residency(
         &self,
@@ -184,6 +207,38 @@ impl LocalAgentRuntime {
 }
 
 impl V2Residency {
+    /// Shares one lease per parent across all of its outstanding child turns.
+    fn retain_completion_parent(&self, thread_id: ThreadId) -> Arc<()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state
+            .completion_parents
+            .retain(|_, lease| lease.strong_count() > 0);
+        if let Some(lease) = state
+            .completion_parents
+            .get(&thread_id)
+            .and_then(Weak::upgrade)
+        {
+            return lease;
+        }
+        let lease = Arc::new(());
+        state
+            .completion_parents
+            .insert(thread_id, Arc::downgrade(&lease));
+        lease
+    }
+
+    fn has_outstanding_child_completion(&self, thread_id: ThreadId) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .completion_parents
+            .get(&thread_id)
+            .is_some_and(|lease| lease.strong_count() > 0)
+    }
+
     async fn reserve_slot(
         self: Arc<Self>,
         manager: &Arc<ThreadManagerState>,
@@ -334,6 +389,7 @@ async fn is_unloadable(thread: &CodexThread) -> bool {
             .input_queue
             .has_trigger_turn_mailbox_items()
             .await
+        && !thread.has_pending_subagent_work().await
 }
 
 #[cfg(test)]

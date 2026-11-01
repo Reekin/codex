@@ -473,6 +473,7 @@ pub(super) async fn submission_loop(
                         sess.input_queue.notify_mailbox();
                         if sess.features.enabled(Feature::WakeOnAgentMessages)
                             || sess.has_outstanding_durable_sleep()
+                            || sess.should_continue_for_subagent_results().await
                         {
                             sess.maybe_start_turn_for_pending_work().await;
                         }

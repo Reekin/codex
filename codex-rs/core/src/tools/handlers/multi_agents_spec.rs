@@ -290,7 +290,7 @@ pub fn create_wait_agent_tool_v1(options: WaitAgentTimeoutOptions) -> ToolSpec {
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
             name: "wait_agent".to_string(),
-            description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status when timed out. Once the agent reaches a final status, a notification message will be received containing the same completed status."
+            description: "Wait for agents to reach a final status. Completed statuses may include the agent's final message. Returns empty status with timed_out=true when timed out. New user input ends the wait early with empty status and timed_out=false, without cancelling the agents. Once the agent reaches a final status, a notification message will be received containing the same completed status."
                 .to_string(),
             strict: false,
             defer_loading: None,
@@ -689,6 +689,8 @@ fn hide_spawn_agent_metadata_options(properties: &mut BTreeMap<String, JsonSchem
     properties.remove("reasoning_effort");
 }
 
+const SUBAGENT_CONTINUATION_DESCRIPTION: &str = "A completed or failed sub-agent automatically resumes its parent after the parent's turn naturally ends. Explicitly stopping the parent suppresses this automatic resumption. Use wait_agent when you need a result before continuing; new user input releases that wait without stopping the sub-agent.";
+
 fn spawn_agent_tool_description(
     available_models_description: Option<&str>,
     model_catalog_in_context: bool,
@@ -705,6 +707,7 @@ fn spawn_agent_tool_description(
         format!(
             r#"
         Spawn a sub-agent for a well-scoped task. {return_value_description} {inherited_model_guidance}
+        {SUBAGENT_CONTINUATION_DESCRIPTION}
 {model_catalog_guidance}"#
         )
     } else {
@@ -712,7 +715,8 @@ fn spawn_agent_tool_description(
         format!(
             r#"
         {available_models_description}
-        Spawn a sub-agent for a well-scoped task. {return_value_description} {inherited_model_guidance}"#
+        Spawn a sub-agent for a well-scoped task. {return_value_description} {inherited_model_guidance}
+        {SUBAGENT_CONTINUATION_DESCRIPTION}"#
         )
     };
 
@@ -803,6 +807,7 @@ You are then able to refer to this agent as `task_3` or `/root/task1/task_3` int
 The spawned agent will have the same tools as you and the ability to spawn its own subagents.
 {inherited_model_guidance}{catalog_suffix}
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
+{SUBAGENT_CONTINUATION_DESCRIPTION}
 The new agent's canonical task name will be provided to it along with the message.
 
 Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#
