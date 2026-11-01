@@ -822,14 +822,16 @@ impl Session {
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
         let auth = auth_manager.auth_cached();
-        let provider_compaction = create_model_provider(
-            config.model_provider.clone(),
-            Some(Arc::clone(&auth_manager)),
-        )
-        .capabilities()
-        .remote_compaction;
-        let local_route =
-            crate::local_compaction::owns_window(&config, provider_compaction, &model_info);
+        let local_route = crate::local_compaction::enabled(&config)
+            && crate::local_compaction::is_local_route(
+                create_model_provider(
+                    config.model_provider.clone(),
+                    Some(Arc::clone(&auth_manager)),
+                )
+                .capabilities()
+                .remote_compaction,
+                &model_info,
+            );
         // Forked subagents keep their parent's activation with the copied history.
         // Fresh children restore configured preferences before applying startup defaults.
         // A local-route child clears any inherited activation.
@@ -841,11 +843,9 @@ impl Session {
                 .prepare_token_budget_for_startup()
                 .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
             // Resolve activation for this runtime, including when resuming saved history.
-            if !token_budget::disable_for_local_route(
-                Arc::make_mut(&mut config),
-                provider_compaction,
-                &model_info,
-            ) {
+            if local_route {
+                token_budget::clear_for_local_compaction(Arc::make_mut(&mut config));
+            } else {
                 token_budget::apply_experimental_context(
                     Arc::make_mut(&mut config),
                     auth.as_ref(),

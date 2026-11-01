@@ -13,21 +13,25 @@ use codex_protocol::openai_models::ModelInfo;
 
 /// With local context compaction on, local full compaction owns the context window of a
 /// local-route model, so no token-budget window reset, tool, reminder or fallback buffer stands
-/// in for it or moves its trigger. Clears token-budget activation and settings for such a model
-/// and reports whether it did; every later token-budget check then sees the feature off.
+/// in for it or moves its trigger. Clears token budget for such a model (see
+/// [`clear_for_local_compaction`]).
 pub(super) fn disable_for_local_route(
     config: &mut Config,
     provider_support: RemoteCompactionSupport,
     model_info: &ModelInfo,
-) -> bool {
-    if !crate::local_compaction::owns_window(config, provider_support, model_info) {
-        return false;
+) {
+    if crate::local_compaction::owns_window(config, provider_support, model_info) {
+        clear_for_local_compaction(config);
     }
+}
+
+/// Clears token-budget activation and settings; every later token-budget check then sees the
+/// feature off.
+pub(super) fn clear_for_local_compaction(config: &mut Config) {
     if let Err(error) = config.features.disable(Feature::TokenBudget) {
         tracing::warn!(%error, "token budget is pinned on for a local compaction route");
     }
     config.token_budget = None;
-    true
 }
 
 fn experimental_context_is_eligible(auth_mode: AuthMode, plan_type: Option<PlanType>) -> bool {
