@@ -8,7 +8,6 @@ use crate::agent::status::is_final;
 use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
 use crate::agent_communication::AgentCommunicationContext;
-use crate::agent_communication::AgentCommunicationKind;
 use crate::agent_communication::MessageDelivery;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
@@ -278,7 +277,7 @@ impl LocalAgentControl {
             // Keep unloaded delivery atomic with publication of a reloaded session.
             let threads = state.threads.read().await;
             let loaded = threads.contains_key(&agent_id);
-            let subagent_result = context.is_result();
+            let subagent_result = context.resumes_recipient();
             // Child results always use the mailbox: its updates reach the recipient's
             // submission loop, which may continue a parent whose turn already ended.
             if !communication.trigger_turn && (!loaded || subagent_result) {
@@ -540,8 +539,7 @@ impl LocalAgentControl {
                     message,
                     /*trigger_turn*/ false,
                 );
-                let context =
-                    AgentCommunicationContext::new(AgentCommunicationKind::Result, child_thread_id);
+                let context = AgentCommunicationContext::subagent_result(child_thread_id, &status);
                 let _ = control
                     .send_inter_agent_communication(
                         parent_thread_id,
