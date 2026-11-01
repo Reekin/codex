@@ -143,6 +143,24 @@ Derive every model-visible, API-visible, and UI-visible representation from one 
 facts. Rendering and protocol adapters may change; identity or state facts must not be reconstructed
 independently by each surface.
 
+## Isolate Default-Changing Behavior
+
+A feature that changes behavior upstream's own tests observe under default configuration must sit
+behind a downstream flag in the upstream `[features]` table: stage `Stable`, `default_enabled =
+false`. With the flag off, behavior is exactly upstream's, so upstream tests and snapshots run
+unmodified and every port only rewires adapters. Each upstream release adds tests that pin default
+behavior; an ungated replacement must re-align with all of them on every port, and that cost grows
+with upstream rather than with the feature.
+
+- Keep upstream code paths the flag replaces; route between them at the seam instead of deleting the
+  upstream path.
+- Feature-owned tests enable the flag explicitly. Upstream test files change only where compilation
+  requires it, such as a new struct field.
+- Name the flag in the feature contract and the user-facing PRD; the user's own `config.toml` turns
+  it on.
+- Additive surfaces (optional schema fields, behavior selected by opt-in metadata) and transparent
+  fixes that upstream tests cannot observe do not need a flag.
+
 ## Implement And Validate
 
 Implement in dependency order:
@@ -170,6 +188,10 @@ implementation helpers are not sufficient by themselves.
 
 Follow the current repository `AGENTS.md` for formatting, tests, schema generation, snapshots, and
 full-suite approval. Do not copy version-sensitive commands into this skill.
+
+Before porting, run the upstream test suite for the crates the features touch on a remote
+validation branch built from the plain upstream tag. Its failures are environment noise; only
+failures beyond that baseline count against a port.
 
 ### Static-Only Local Validation
 
@@ -235,7 +257,8 @@ Read `references/feature-guide-template.md`, then:
 2. Add the registry row and `references/feature-<name>.md` as the first feature-owned commit before
    broad implementation.
 3. Choose the smallest correct portability profile.
-4. Define stable behavior, non-goals, portability constraints, and P0 scenarios.
+4. Define stable behavior, non-goals, portability constraints, and P0 scenarios, and decide whether
+   the feature needs a flag under "Isolate Default-Changing Behavior".
 5. Create feature-owned tests and at least one real CLI, RPC, model/tool, or UI acceptance path.
 6. State cross-feature interactions and integration-only work.
 
