@@ -38,6 +38,7 @@ mod compact_remote_history;
 mod compact_remote_v2;
 mod compact_retained_tool_outputs;
 mod compact_token_budget;
+mod compaction_policy;
 mod thread_startup_metadata;
 pub use codex_network_proxy::EnvironmentNetworkPolicy;
 pub use codex_network_proxy::NetworkDomainPermission;

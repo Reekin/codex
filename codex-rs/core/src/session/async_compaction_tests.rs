@@ -124,7 +124,9 @@ async fn cancelled_turn_skips_launch_but_preserves_existing_work(trigger: Compac
         .expect("capture next step");
     match trigger {
         CompactionTrigger::Auto => {
-            let candidate = take_ready(&sess, &turn).await.expect("published candidate");
+            let candidate = take_ready(&sess, &turn, &next_step.settings.model_info)
+                .await
+                .expect("published candidate");
             let mut client_session = sess.services.model_client.new_session();
             assert!(
                 crate::compact_remote_v2::run_inline_remote_auto_compact_task(
