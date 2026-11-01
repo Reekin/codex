@@ -54,6 +54,7 @@ use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
+use core_test_support::responses::strip_fork_history_boundaries;
 use core_test_support::responses::strip_metadata_from_json;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::skip_if_no_network;
@@ -1504,17 +1505,19 @@ async fn grandchild_full_fork_preserves_context_baseline(
     );
     if matches!(parent_context, GrandchildParentContext::FullHistory) {
         let parent_input = root_request.input();
+        // Fork-history boundaries wrap the inherited prefix; the prefix itself stays unchanged.
         assert_eq!(
             strip_response_item_ids_from_json(json!(
-                &descendant_requests[0].input()[..parent_input.len()]
+                &strip_fork_history_boundaries(descendant_requests[0].input())
+                    [..parent_input.len()]
             )),
             strip_response_item_ids_from_json(json!(parent_input))
         );
     }
-    let child_input = descendant_requests[0].input();
+    let child_input = strip_fork_history_boundaries(descendant_requests[0].input());
     assert_eq!(
         strip_response_item_ids_from_json(json!(
-            &descendant_requests[1].input()[..child_input.len()]
+            &strip_fork_history_boundaries(descendant_requests[1].input())[..child_input.len()]
         )),
         strip_response_item_ids_from_json(json!(child_input))
     );
@@ -1836,8 +1839,9 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
     let child_request = wait_for_request_with_model(&child_request_log, expected_model).await?;
     assert!(child_request.body_contains_text(TURN_0_FORK_PROMPT));
     // Models encode tool declarations and provenance differently; compare inherited messages.
+    // Fork-history boundaries wrap the inherited prefix without changing it.
     let parent_input = parent_request.inputs_of_type("message");
-    let child_input = child_request.inputs_of_type("message");
+    let child_input = strip_fork_history_boundaries(child_request.inputs_of_type("message"));
     assert_eq!(
         strip_metadata_from_json(strip_response_item_ids_from_json(json!(
             &child_input[..parent_input.len()]

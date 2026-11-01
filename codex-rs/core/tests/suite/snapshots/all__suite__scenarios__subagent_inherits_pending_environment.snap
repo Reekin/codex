@@ -76,8 +76,10 @@ Scenario: A parent spawns a child before the selected environment is configured.
     You are an agent in a team of agents collaborating to complete a task.
     <STANDARD_MULTI_AGENT_INSTRUCTIONS>
 03:message/developer:
+    You are a spawned subagent in the multi-agent tree. Your current canonical agent path is `/root/worker`,...llowing all system, developer, and user instructions. [hash=882a3f8b5c16c343]
+04:message/developer:
     <multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. D...elegation, or parallel agent work.</multi_agent_mode> [hash=2b6e037067b4390c]
-04:message/user:
+05:message/user:
     <environment_context>
       <environments>
         <environment id="<ENVIRONMENT>">
@@ -88,11 +90,11 @@ Scenario: A parent spawns a child before the selected environment is configured.
       <current_date><CURRENT_DATE></current_date>
       <timezone><HOST_TIMEZONE></timezone>
     </environment_context>
-05:agent_message
+06:agent_message
 -- request 4 (request; child receives the ready result and updated environment) --
-06:function_call/functions.wait_for_environment:{"environment_id":"<ENVIRONMENT>"}
-07:function_call_output:{"environment_id":"<ENVIRONMENT>","status":"ready"}
-08:message/user:
+07:function_call/functions.wait_for_environment:{"environment_id":"<ENVIRONMENT>"}
+08:function_call_output:{"environment_id":"<ENVIRONMENT>","status":"ready"}
+09:message/user:
     <environment_context>
       <cwd><CWD></cwd>
       <shell><HOST_SHELL></shell>
