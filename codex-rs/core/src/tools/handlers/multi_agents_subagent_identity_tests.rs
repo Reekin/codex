@@ -1,10 +1,10 @@
 //! Subagent identity behavior of the multi-agent handlers, enabled by `Feature::SubagentIdentity`.
 
 use super::*;
-use pretty_assertions::assert_eq;
 use crate::agent::AgentIdentity;
 use crate::session::session::Session;
 use crate::tools::handlers::multi_agents_v2::wait::WaitAgentResult;
+use pretty_assertions::assert_eq;
 
 fn enable_subagent_identity(turn: &mut TurnContext, multi_agent_v2: bool) {
     let mut config = (*turn.config).clone();
@@ -150,9 +150,14 @@ async fn multi_agent_v2_spawned_child_lists_and_waits_as_its_canonical_path() {
         "list_agents should report the child's canonical path, got {content}"
     );
 
-    assert_eq!(
-        wait_v2(child_session, child_turn).await,
-        timed_out_wait_result("/root/worker")
+    // The spawn task may already sit in the child's mailbox, so the wait can complete or time out;
+    // either way it must name the child's own mailbox.
+    let waited = wait_v2(child_session, child_turn).await;
+    assert!(
+        waited
+            .message
+            .contains("for your mailbox as `/root/worker`."),
+        "wait should name the child's mailbox, got {waited:?}"
     );
 }
 
