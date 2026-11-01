@@ -222,8 +222,53 @@ pub(crate) type InFlightFuture<'f> =
 #[derive(Default)]
 pub(crate) struct OutputItemResult {
     pub last_agent_message: Option<String>,
+    pub final_answer: Option<FinalAnswerItem>,
     pub needs_follow_up: bool,
     pub tool_future: Option<InFlightFuture<'static>>,
+}
+
+/// Visible-text classification of one completed final-answer assistant message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FinalAnswerItem {
+    Empty,
+    NonEmpty,
+}
+
+/// Final-answer facts aggregated over the output items of one sampling response.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FinalAnswerObservation {
+    state: FinalAnswerState,
+    had_output_item: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+enum FinalAnswerState {
+    #[default]
+    NotSeen,
+    EmptyOnly,
+    NonEmptySeen,
+}
+
+impl FinalAnswerObservation {
+    pub(crate) fn observe_output_item(&mut self, final_answer: Option<FinalAnswerItem>) {
+        self.had_output_item = true;
+        self.state = match (self.state, final_answer) {
+            (_, Some(FinalAnswerItem::NonEmpty)) => FinalAnswerState::NonEmptySeen,
+            (FinalAnswerState::NotSeen, Some(FinalAnswerItem::Empty)) => {
+                FinalAnswerState::EmptyOnly
+            }
+            (state, Some(FinalAnswerItem::Empty) | None) => state,
+        };
+    }
+
+    /// The response emitted output, but no final-answer message carried visible text.
+    pub(crate) fn lacks_visible_final_answer(&self) -> bool {
+        match self.state {
+            FinalAnswerState::NotSeen => self.had_output_item,
+            FinalAnswerState::EmptyOnly => true,
+            FinalAnswerState::NonEmptySeen => false,
+        }
+    }
 }
 
 pub(crate) struct HandleOutputCtx {
@@ -265,6 +310,7 @@ pub(crate) struct FinalizedTurnItem {
 pub(crate) struct FinalizedTurnItemFacts {
     pub(crate) memory_citation: Option<MemoryCitation>,
     pub(crate) last_agent_message: Option<String>,
+    pub(crate) final_answer: Option<FinalAnswerItem>,
     pub(crate) defers_mailbox_delivery_to_next_turn: bool,
 }
 
@@ -276,7 +322,7 @@ pub(crate) async fn finalize_non_tool_response_item(
 ) -> Option<FinalizedTurnItem> {
     let turn_item =
         handle_non_tool_response_item(sess, contributor_policy, item, plan_mode).await?;
-    let (memory_citation, last_agent_message, defers_mailbox_delivery_to_next_turn) =
+    let (memory_citation, last_agent_message, final_answer, defers_mailbox_delivery_to_next_turn) =
         match &turn_item {
             TurnItem::AgentMessage(agent_message) => {
                 let combined = agent_message
@@ -286,10 +332,16 @@ pub(crate) async fn finalize_non_tool_response_item(
                         codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
                     })
                     .collect::<String>();
-                let last_agent_message = if combined.trim().is_empty() {
-                    None
-                } else {
-                    Some(combined)
+                let empty_message = combined.trim().is_empty();
+                let last_agent_message = (!empty_message).then_some(combined);
+                let final_answer = match agent_message.phase {
+                    Some(MessagePhase::Commentary | MessagePhase::PartialAnswer) => None,
+                    // Without an explicit phase, assistant text is treated as a final answer.
+                    Some(MessagePhase::FinalAnswer) | None => Some(if empty_message {
+                        FinalAnswerItem::Empty
+                    } else {
+                        FinalAnswerItem::NonEmpty
+                    }),
                 };
                 let defers_mailbox_delivery_to_next_turn =
                     assistant_message_defers_mailbox_delivery(agent_message.phase.as_ref(), || {
@@ -298,16 +350,18 @@ pub(crate) async fn finalize_non_tool_response_item(
                 (
                     agent_message.memory_citation.clone(),
                     last_agent_message,
+                    final_answer,
                     defers_mailbox_delivery_to_next_turn,
                 )
             }
-            _ => (None, None, false),
+            _ => (None, None, None, false),
         };
     Some(FinalizedTurnItem {
         turn_item,
         facts: FinalizedTurnItemFacts {
             memory_citation,
             last_agent_message,
+            final_answer,
             defers_mailbox_delivery_to_next_turn,
         },
     })
@@ -407,7 +461,10 @@ pub(crate) async fn handle_output_item_done(
             )
             .await;
 
-            output.last_agent_message = finalized_facts.and_then(|facts| facts.last_agent_message);
+            if let Some(facts) = finalized_facts {
+                output.last_agent_message = facts.last_agent_message;
+                output.final_answer = facts.final_answer;
+            }
         }
         // The tool request should be answered directly (or was denied); push that response into the transcript.
         Err(FunctionCallError::RespondToModel(message)) => {
