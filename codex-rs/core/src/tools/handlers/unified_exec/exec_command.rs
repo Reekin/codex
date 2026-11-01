@@ -45,7 +45,7 @@ use super::preparation::ExecCommandLifetime;
 use super::preparation::ParsedExecCommand;
 
 // A byte limit is a conservative hard token bound even for byte-fallback tokenizers.
-const EXEC_COMMAND_REJECTION_MAX_BYTES: usize = 900;
+pub(super) const EXEC_COMMAND_REJECTION_MAX_BYTES: usize = 900;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ExecCommandHandlerOptions {
@@ -204,7 +204,7 @@ impl ExecCommandHandler {
                 process_id: None,
                 exit_code: None,
                 original_token_count: None,
-                hook_command: None,
+                hook_metadata: None,
                 tool_cwd: None,
             }));
         }
@@ -221,7 +221,7 @@ impl ExecCommandHandler {
         .await;
         // Preparation can be cancelled. Reserve a process only once it is done.
         let process_id = manager.allocate_process_id().await;
-        let hook_command = prepared.hook_command.clone();
+        let hook_metadata = prepared.resolved.hook_metadata();
         let tool_cwd =
             (!prepared.turn_environment.environment.is_remote()).then(|| prepared.cwd.clone());
         let request = ExecCommandRequest {
@@ -262,7 +262,7 @@ impl ExecCommandHandler {
                     process_id: None,
                     exit_code: Some(output.exit_code),
                     original_token_count: Some(original_token_count),
-                    hook_command: Some(hook_command),
+                    hook_metadata: Some(hook_metadata),
                     tool_cwd,
                 }))
             }
@@ -394,7 +394,7 @@ impl CoreToolRuntime for ExecCommandHandler {
     }
 }
 
-fn emit_unified_exec_tty_metric(session_telemetry: &SessionTelemetry, tty: bool) {
+pub(super) fn emit_unified_exec_tty_metric(session_telemetry: &SessionTelemetry, tty: bool) {
     session_telemetry.counter(
         TOOL_CALL_UNIFIED_EXEC_METRIC,
         /*inc*/ 1,

@@ -29,7 +29,7 @@ impl SnapshotMetrics {
             || req.shell_snapshot.is_some()
             || prepared.turn_environment.environment.is_remote()
             || !config.features.enabled(Feature::ShellSnapshot)
-            || !prepared.resolved.shell.is_posix_login()
+            || !prepared.resolved.is_posix_login_shell()
             || (prepared.cwd != prepared.turn_environment.selection.cwd && !brokered)
         {
             return None;

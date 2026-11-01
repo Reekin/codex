@@ -564,7 +564,10 @@ impl ToolRegistry {
             return false;
         }
         if tool_name.is_default_namespace()
-            && matches!(tool_name.name.as_str(), "exec_command" | "shell_command")
+            && matches!(
+                tool_name.name.as_str(),
+                "exec_argv" | "exec_command" | "shell_command"
+            )
         {
             tracing::warn!(tool_name = %tool_name, "skipping external tool with reserved name");
             if self.tools.contains_key(&tool_name) {

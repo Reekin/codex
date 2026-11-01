@@ -170,15 +170,16 @@ pub(super) fn shell_snapshot_request(
     request: &PreparedExecCommand,
     context: &UnifiedExecContext,
 ) -> Option<ShellSnapshotRequest> {
+    let invocation = request.resolved.shell()?;
     if !context.session.features().enabled(Feature::ShellSnapshotV2)
         || !request.turn_environment.shell_snapshot_v2_supported
         || request.turn_environment.selection.cwd != request.cwd
-        || !request.resolved.shell.is_posix_login()
+        || !invocation.is_posix_login()
     {
         return None;
     }
 
-    let shell = &request.resolved.shell.shell;
+    let shell = &invocation.shell;
     Some(ShellSnapshotRequest {
         scope_id: format!(
             "{}:{}",

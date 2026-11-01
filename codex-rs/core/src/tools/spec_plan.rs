@@ -11,6 +11,8 @@ use crate::tools::handlers::CodeModeExecuteHandler;
 use crate::tools::handlers::CodeModeWaitHandler;
 use crate::tools::handlers::CurrentTimeHandler;
 use crate::tools::handlers::DynamicToolHandler;
+use crate::tools::handlers::ExecArgvHandler;
+use crate::tools::handlers::ExecArgvHandlerOptions;
 use crate::tools::handlers::ExecCommandHandler;
 use crate::tools::handlers::ExecCommandHandlerOptions;
 use crate::tools::handlers::GetContextRemainingHandler;
@@ -1263,6 +1265,11 @@ fn add_shell_tools(context: &CoreToolPlanContext<'_>, registry: &mut ToolRegistr
         include_windows_shell_guidance: should_include_windows_shell_guidance(context.environments),
     };
     if features.enabled(Feature::UnifiedExec) {
+        registry.add(ExecArgvHandler::new(ExecArgvHandlerOptions {
+            allow_tty: options.allow_tty,
+            exec_permission_approvals_enabled,
+            include_environment_id,
+        }));
         registry.add(ExecCommandHandler::new(options));
         registry.add(WriteStdinHandler);
     } else {

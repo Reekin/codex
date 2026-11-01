@@ -12,17 +12,22 @@ use crate::tools::handlers::parse_arguments;
 use crate::tools::handlers::resolve_tool_environment;
 use crate::tools::hook_names::HookToolName;
 use crate::tools::registry::PostToolUsePayload;
+use crate::tools::sandboxing::ExecHookMetadata;
 use codex_protocol::models::AdditionalPermissionProfile;
+use codex_tools::ToolName;
 use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+mod exec_argv;
 mod exec_command;
 pub(crate) mod preparation;
 mod write_stdin;
 
+pub use exec_argv::ExecArgvHandler;
+pub(crate) use exec_argv::ExecArgvHandlerOptions;
 pub use exec_command::ExecCommandHandler;
 pub(crate) use exec_command::ExecCommandHandlerOptions;
 pub use write_stdin::WriteStdinHandler;
@@ -125,7 +130,50 @@ fn default_tty() -> bool {
 #[derive(Debug)]
 pub(crate) struct ResolvedCommand {
     pub(crate) command: Vec<String>,
-    pub(crate) shell: ShellInvocation,
+    pub(crate) launch: CommandLaunch,
+}
+
+/// How unified exec turns `ResolvedCommand::command` into a process.
+///
+/// Every shell-derived transform (snapshots, login PATH setup, PowerShell
+/// preparation, brokered shell restores) applies only to `Shell` launches.
+#[derive(Debug)]
+pub(crate) enum CommandLaunch {
+    /// `command` runs `script` through a shell chosen by Codex.
+    Shell {
+        invocation: ShellInvocation,
+        script: String,
+    },
+    /// `command` is the model's argv, passed unchanged to process creation.
+    Argv,
+}
+
+impl ResolvedCommand {
+    pub(crate) fn shell(&self) -> Option<&ShellInvocation> {
+        match &self.launch {
+            CommandLaunch::Shell { invocation, .. } => Some(invocation),
+            CommandLaunch::Argv => None,
+        }
+    }
+
+    pub(crate) fn is_posix_login_shell(&self) -> bool {
+        self.shell().is_some_and(ShellInvocation::is_posix_login)
+    }
+
+    /// The model-facing tool that owns this launch.
+    pub(crate) fn tool_name(&self) -> ToolName {
+        match self.launch {
+            CommandLaunch::Shell { .. } => ToolName::plain("exec_command"),
+            CommandLaunch::Argv => ToolName::plain("exec_argv"),
+        }
+    }
+
+    pub(crate) fn hook_metadata(&self) -> ExecHookMetadata {
+        match &self.launch {
+            CommandLaunch::Shell { script, .. } => ExecHookMetadata::shell(script),
+            CommandLaunch::Argv => ExecHookMetadata::argv(&self.command),
+        }
+    }
 }
 
 fn post_unified_exec_tool_use_payload(
@@ -141,7 +189,9 @@ fn post_unified_exec_tool_use_payload(
     let tool_response = result.post_tool_use_response(&tool_use_id, &invocation.payload)?;
     Some(PostToolUsePayload {
         tool_cwd: result.post_tool_use_cwd(),
-        tool_name: HookToolName::bash(),
+        tool_name: result
+            .post_tool_use_tool_name()
+            .map_or_else(HookToolName::bash, HookToolName::new),
         tool_use_id,
         tool_input,
         tool_response,
@@ -170,9 +220,12 @@ pub(crate) fn get_command(
         .unwrap_or_else(|| session_shell.as_ref().clone());
     Ok(ResolvedCommand {
         command: shell.derive_exec_args(&args.cmd, use_login_shell),
-        shell: ShellInvocation {
-            shell,
-            use_login_shell,
+        launch: CommandLaunch::Shell {
+            invocation: ShellInvocation {
+                shell,
+                use_login_shell,
+            },
+            script: args.cmd.clone(),
         },
     })
 }
