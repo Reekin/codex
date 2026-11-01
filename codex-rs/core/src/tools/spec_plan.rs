@@ -807,7 +807,12 @@ fn image_generation_available(turn_context: &TurnContext, model_info: &ModelInfo
         return false;
     }
 
-    if !turn_context.provider.capabilities().image_generation {
+    let auth_independent = turn_context
+        .config
+        .features
+        .get()
+        .enabled(Feature::AuthIndependentTools);
+    if !auth_independent && !turn_context.provider.capabilities().image_generation {
         return false;
     }
 
@@ -816,7 +821,8 @@ fn image_generation_available(turn_context: &TurnContext, model_info: &ModelInfo
     }
 
     let provider = turn_context.provider.info();
-    provider.uses_openai_actor_authorization()
+    auth_independent
+        || provider.uses_openai_actor_authorization()
         || (provider.requires_openai_auth
             && turn_context
                 .auth_manager

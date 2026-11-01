@@ -888,6 +888,9 @@
             "auth_elicitation": {
               "type": "boolean"
             },
+            "auth_independent_tools": {
+              "type": "boolean"
+            },
             "background_paginated_rollout_migration": {
               "type": "boolean"
             },
@@ -7544,6 +7547,9 @@
           "$ref": "#/definitions/FeatureToml_for_AsyncCompactionConfigToml"
         },
         "auth_elicitation": {
+          "type": "boolean"
+        },
+        "auth_independent_tools": {
           "type": "boolean"
         },
         "background_paginated_rollout_migration": {

@@ -368,6 +368,8 @@ pub enum Feature {
     ExternalMigration,
     /// Enable extension-backed image generation.
     ImageGeneration,
+    /// Expose installed image generation for every model provider and login method.
+    AuthIndependentTools,
     /// Omit inline image and audio content from app-server item notifications.
     OmitAppServerNotificationMedia,
     /// Tell the model when a prompt image was resized and include its dimensions.
@@ -1882,6 +1884,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "image_generation",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::AuthIndependentTools,
+        key: "auth_independent_tools",
+        stage: Stage::Stable,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::OmitAppServerNotificationMedia,

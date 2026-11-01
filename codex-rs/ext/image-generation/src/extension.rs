@@ -11,6 +11,7 @@ use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ToolCall;
 use codex_extension_api::ToolContributor;
 use codex_extension_api::ToolExecutor;
+use codex_features::Feature;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
@@ -40,7 +41,8 @@ impl ImageGenerationExtensionConfig {
     /// Resolves the image provider and save root for a thread.
     fn from_config(config: &Config, resolve_save_root: &SaveRootResolver) -> Self {
         Self {
-            available: config.model_provider.is_openai()
+            available: config.features.enabled(Feature::AuthIndependentTools)
+                || config.model_provider.is_openai()
                 || config.model_provider.requires_openai_auth
                 || config.model_provider.uses_openai_actor_authorization(),
             http_client_factory: config.http_client_factory(),
