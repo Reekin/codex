@@ -2618,33 +2618,37 @@ impl Session {
     }
 
     /// Forwards terminal turn events from spawned MultiAgentV2 children to their direct parent.
-    /// With subagent continuation, MultiAgentV1 children report every terminal turn as well.
+    /// Under a parent with subagent continuation, MultiAgentV1 children report every terminal
+    /// turn as well.
     async fn maybe_notify_parent_of_terminal_turn(
         &self,
         turn_context: &TurnContext,
         msg: &EventMsg,
     ) {
-        let subagent_continuation = self.enabled(Feature::SubagentContinuation);
-        let reports_terminal_turns = match turn_context.multi_agent_version {
-            MultiAgentVersion::V2 => true,
-            MultiAgentVersion::V1 => subagent_continuation,
-            MultiAgentVersion::Disabled => false,
-        };
-        if !reports_terminal_turns {
-            return;
-        }
-
         if !matches!(msg, EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) {
             return;
         }
 
-        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_path, .. }) =
-            &turn_context.session_source
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            agent_path,
+            ..
+        }) = &turn_context.session_source
         else {
             return;
         };
-        // MAv2 results address the parent by agent path.
-        if turn_context.multi_agent_version == MultiAgentVersion::V2 && agent_path.is_none() {
+        let reports_terminal_turn = match turn_context.multi_agent_version {
+            // MAv2 results address the parent by agent path.
+            MultiAgentVersion::V2 => agent_path.is_some(),
+            MultiAgentVersion::V1 => {
+                self.services
+                    .local_agent_runtime
+                    .parent_continues_subagent_results(*parent_thread_id)
+                    .await
+            }
+            MultiAgentVersion::Disabled => false,
+        };
+        if !reports_terminal_turn {
             return;
         }
 
@@ -2685,7 +2689,6 @@ impl Session {
                     turn_id: turn_context.sub_id.clone(),
                     source: turn_context.session_source.clone(),
                     multi_agent_version: turn_context.multi_agent_version,
-                    subagent_continuation,
                     parent_turn_id: turn_context.turn_metadata_state.parent_turn_id(),
                     initiating_agent_path: turn_context
                         .turn_metadata_state
