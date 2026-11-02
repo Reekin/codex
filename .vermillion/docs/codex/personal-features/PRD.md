@@ -15,6 +15,8 @@
 - stream-retry-timeout：响应长时间没有完整结果时保留原请求并补发，采用先就绪的一条，规则见[功能契约](../../../../.agents/skills/personal-features-port/references/feature-stream-retry-timeout.md)。
 - auth-independent-tools：已安装的生图工具满足功能开关、模型要求和套餐条件时，任何 provider 均可向模型暴露该工具，不按 provider 类型、声明的生图能力或登录方式隐藏；实际服务请求沿用原有凭据和授权流程。[用户：确保任何provider都能看到生图]
 
+改变 Codex 默认行为的功能需要在 `config.toml` 的 `[features]` 中打开，默认关闭；关闭时 Codex 保持上游原有行为。对应开关：exec-argv 为 `exec_argv`，retry-empty-final-answer 为 `final_answer_retry`，subagent-identity-labels 为 `subagent_identity`，subagent-continuation 为 `subagent_continuation`，local-context-compaction 为 `local_context_compaction`，stream-retry-timeout 为 `stream_retry_timeout`，auth-independent-tools 为 `auth_independent_tools`。其余功能始终生效：model-aware-compaction 只在模型声明不支持远端压缩时改变路线，request-input-preparation 只在模型元数据设置了上限时生效。
+
 integration 分支每次推送后自动发布 Windows x64 和 macOS Apple Silicon 便携包，作为仓库的 latest release。macOS 包只有 ad-hoc 签名、未经 Apple 公证：用 `gh release download` 或 `curl` 下载的包解压后可直接运行，浏览器下载的包首次运行前需要清除隔离属性。
 
 ## 明确不做什么
