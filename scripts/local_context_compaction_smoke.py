@@ -182,6 +182,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.flush()
             if analysis_payload(body, "LOCAL_COMPACTION_CLASSIFY") is not None:
                 self.server.mark_sent.set()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            # Background marking may still be in flight when the smoke closes the app-server;
+            # the client dropping that request is expected.
+            return
         except Exception as error:
             self.server.errors.append(str(error))
             self.send_error(500, str(error))
