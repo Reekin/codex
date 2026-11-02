@@ -8,6 +8,7 @@ use crate::agent::registry::EvictedEnvironments;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
 use crate::thread_manager::ThreadManagerState;
+use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_protocol::error::AgentErrorContext;
 use codex_protocol::error::CodexErr;
@@ -169,6 +170,21 @@ impl LocalAgentControl {
 }
 
 impl LocalAgentRuntime {
+    /// Whether a loaded parent runs with subagent continuation. The parent's flag selects how
+    /// its children's results reach it and whether they keep it loaded.
+    pub(crate) async fn parent_continues_subagent_results(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> bool {
+        let Ok(state) = self.upgrade() else {
+            return false;
+        };
+        state
+            .get_thread(parent_thread_id)
+            .await
+            .is_ok_and(|parent| parent.enabled(Feature::SubagentContinuation))
+    }
+
     /// Keeps a spawned child's parent loaded until this child turn has reported its result.
     pub(crate) fn completion_parent_guard(
         &self,

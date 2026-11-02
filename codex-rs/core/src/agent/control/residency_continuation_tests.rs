@@ -37,6 +37,63 @@ fn child_turns_retain_parent_until_each_result_is_reported() {
 }
 
 #[tokio::test]
+async fn parent_flag_decides_child_result_continuation() {
+    let mut config = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let mut enabled_config = config.clone();
+    let _ = enabled_config
+        .features
+        .enable(Feature::SubagentContinuation);
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let root = manager
+        .start_thread(StartThreadOptions::new(enabled_config.clone()))
+        .await
+        .expect("start root thread");
+    let control = manager.agent_control();
+    let state = control
+        .runtime
+        .upgrade()
+        .expect("thread manager should be live");
+    let disabled_worker =
+        spawn_v2_subagent(&control, &state, config, root.thread_id, "disabled").await;
+    // Each parent's own flag counts, whatever its child runs with.
+    spawn_v2_subagent(
+        &control,
+        &state,
+        enabled_config,
+        disabled_worker.thread_id,
+        "enabled",
+    )
+    .await;
+    assert!(
+        control
+            .runtime
+            .parent_continues_subagent_results(root.thread_id)
+            .await
+    );
+    assert!(
+        !control
+            .runtime
+            .parent_continues_subagent_results(disabled_worker.thread_id)
+            .await
+    );
+    assert!(
+        !control
+            .runtime
+            .parent_continues_subagent_results(ThreadId::new())
+            .await
+    );
+}
+
+#[tokio::test]
 async fn residency_eviction_waits_for_outstanding_child_results() {
     let mut config = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);

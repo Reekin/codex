@@ -343,6 +343,18 @@ impl Session {
             codex_extension_api::TurnStartPhase::BeforeTaskRegistration,
         )
         .await;
+        // A parent with subagent continuation stays loaded until this child turn reports.
+        let runtime = &self.services.local_agent_runtime;
+        let completion_parent_guard = match turn_context.session_source.parent_thread_id() {
+            Some(parent_thread_id)
+                if runtime
+                    .parent_continues_subagent_results(parent_thread_id)
+                    .await =>
+            {
+                runtime.completion_parent_guard(&turn_context.session_source)
+            }
+            _ => None,
+        };
 
         let mut active = self.active_turn.lock().await;
         let turn = active.get_or_insert_with(ActiveTurn::default);
@@ -357,13 +369,6 @@ impl Session {
             turn_context.multi_agent_version,
             &turn_context.session_source,
         );
-        let completion_parent_guard = if self.enabled(Feature::SubagentContinuation) {
-            self.services
-                .local_agent_runtime
-                .completion_parent_guard(&turn_context.session_source)
-        } else {
-            None
-        };
         let done_clone = Arc::clone(&done);
         let session = Arc::clone(self);
         let ctx = Arc::clone(&turn_context);

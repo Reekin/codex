@@ -277,13 +277,15 @@ impl LocalAgentControl {
         {
             // Keep unloaded delivery atomic with publication of a reloaded session.
             let threads = state.threads.read().await;
-            let loaded = threads.contains_key(&agent_id);
+            let recipient = threads.get(&agent_id);
             let subagent_result = context.resumes_recipient();
-            // Child results always use the mailbox: its updates reach the recipient's
-            // submission loop, which may continue a parent whose turn already ended.
-            if !communication.trigger_turn && (!loaded || subagent_result) {
+            // A parent with subagent continuation takes child results through the mailbox: its
+            // updates reach the parent's submission loop, which may continue an ended turn.
+            let continues_recipient = subagent_result
+                && recipient.is_some_and(|thread| thread.enabled(Feature::SubagentContinuation));
+            if !communication.trigger_turn && (recipient.is_none() || continues_recipient) {
                 let _membership = self.runtime.admit_start()?;
-                if !loaded {
+                if recipient.is_none() {
                     self.runtime.ensure_agent_known(agent_id)?;
                 }
                 let submission_id = uuid::Uuid::now_v7().to_string();
@@ -508,15 +510,15 @@ impl LocalAgentControl {
                 }
                 None => true,
             };
-            let subagent_continuation = child_thread
-                .as_ref()
-                .is_some_and(|child_thread| child_thread.enabled(Feature::SubagentContinuation));
-            // With subagent continuation, loaded MAv1 children report every terminal turn through
-            // their session, including follow-ups. This watcher still reports children that stop
-            // without a terminal turn.
-            if subagent_continuation
-                && !child_uses_multi_agent_v2
+            // Under a parent with subagent continuation, loaded MAv1 children report every
+            // terminal turn through their session, including follow-ups. This watcher still
+            // reports children that stop without a terminal turn.
+            if !child_uses_multi_agent_v2
                 && matches!(status, AgentStatus::Completed(_) | AgentStatus::Errored(_))
+                && control
+                    .runtime
+                    .parent_continues_subagent_results(parent_thread_id)
+                    .await
             {
                 return;
             }
@@ -545,11 +547,7 @@ impl LocalAgentControl {
                     message,
                     /*trigger_turn*/ false,
                 );
-                let context = AgentCommunicationContext::subagent_result(
-                    child_thread_id,
-                    &status,
-                    subagent_continuation,
-                );
+                let context = AgentCommunicationContext::subagent_result(child_thread_id, &status);
                 let _ = control
                     .send_inter_agent_communication(
                         parent_thread_id,
