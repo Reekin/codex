@@ -171,6 +171,8 @@ mod guardian_subagent_authorization;
 #[cfg(not(target_os = "windows"))]
 mod hooks;
 #[cfg(not(target_os = "windows"))]
+mod hooks_exec_argv;
+#[cfg(not(target_os = "windows"))]
 mod hooks_executor;
 #[cfg(not(target_os = "windows"))]
 mod hooks_mcp;
