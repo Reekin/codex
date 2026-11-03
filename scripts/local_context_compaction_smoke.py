@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import queue
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -18,15 +19,15 @@ import time
 
 class SmokeDirectory(tempfile.TemporaryDirectory):
     def cleanup(self):
-        # Windows can retain directory handles briefly after child processes exit.
-        for attempt in range(20):
+        # Windows can keep handles on freshly written files after child processes exit, for
+        # example while a scanner reads them. Leftover temp files do not affect the result.
+        for _ in range(60):
             try:
                 super().cleanup()
                 return
             except PermissionError:
-                if attempt == 19:
-                    raise
-                time.sleep(0.25)
+                time.sleep(0.5)
+        print(f"warning: could not remove {self.name}", file=sys.stderr)
 
 
 def analysis_payload(body, marker):
