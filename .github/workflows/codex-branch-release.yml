@@ -88,6 +88,12 @@ jobs:
           workspaces: codex-rs
           shared-key: release-${{ matrix.target }}
 
+      - name: Rerun the v8 build script after a cache restore
+        # v8 stages its static library under the profile's gn_out directory, which the cache does
+        # not keep; dropping its fingerprint makes Cargo stage the library again.
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR}/${TARGET}/release/.fingerprint"/v8-* "${CARGO_TARGET_DIR}/${TARGET}/release/build"/v8-*
+
       - name: Configure rusty_v8 artifact overrides and verify checksums
         uses: ./.github/actions/setup-rusty-v8
         with:
