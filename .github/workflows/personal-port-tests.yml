@@ -1,0 +1,116 @@
+name: Personal port tests
+
+# Runs one hash partition of the selected crates' tests for personal-port validation, either on a
+# personal branch or on the upstream tag it is built on, and uploads the JUnit results and logs.
+on:
+  workflow_call:
+    inputs:
+      repository:
+        required: true
+        type: string
+      ref:
+        required: true
+        type: string
+      package_args:
+        required: true
+        type: string
+      helper_args:
+        required: true
+        type: string
+      shard:
+        required: true
+        type: number
+      artifact:
+        required: true
+        type: string
+      cache_key:
+        description: Shared Cargo cache key; empty disables caching.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_INCREMENTAL: "0"
+      INSTA_UPDATE: new
+      RUST_MIN_STACK: "8388608"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          repository: ${{ inputs.repository }}
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Install native dependencies
+        run: sudo DEBIAN_FRONTEND=noninteractive apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev bubblewrap
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - name: Keep Cargo output in the workspace target directory
+        if: inputs.cache_key != ''
+        # The dependency cache only prunes workspace crates from the workspace target directory.
+        run: echo "CARGO_TARGET_DIR=${GITHUB_WORKSPACE}/codex-rs/target" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: inputs.cache_key != ''
+        with:
+          workspaces: codex-rs
+          shared-key: ${{ inputs.cache_key }}
+          save-if: ${{ inputs.shard == 1 }}
+
+      - name: Rerun the v8 build script after a cache restore
+        if: inputs.cache_key != ''
+        # v8 stages its static library under the profile's gn_out directory, which the cache does
+        # not keep; dropping its fingerprint makes Cargo stage the library again.
+        run: rm -rf "${CARGO_TARGET_DIR}/dev-small/.fingerprint"/v8-* "${CARGO_TARGET_DIR}/dev-small/build"/v8-*
+
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+
+      - uses: taiki-e/install-action@4cef1412cce204788f482e778a0b9187f9626a29 # v2.87.21
+        with:
+          tool: nextest
+
+      - name: Run tests
+        # Failures are judged against the upstream baseline by the report job, so this step only
+        # records results; a missing JUnit file tells the report that the build failed.
+        run: |
+          set -o pipefail
+          {
+            if [ -n "${{ inputs.helper_args }}" ]; then
+              cargo build --profile dev-small ${{ inputs.helper_args }} --bins
+            fi
+            # The partition count matches the caller's three-shard matrix.
+            cargo nextest run --cargo-profile dev-small --no-fail-fast \
+              --partition "hash:${{ inputs.shard }}/3" ${{ inputs.package_args }}
+          } 2>&1 | tee "${RUNNER_TEMP}/nextest.log" || true
+
+      - name: Collect results
+        if: always()
+        working-directory: .
+        run: |
+          mkdir -p "${RUNNER_TEMP}/results"
+          cp "${RUNNER_TEMP}/nextest.log" "${RUNNER_TEMP}/results/" 2>/dev/null || true
+          junit="$(find "${CARGO_TARGET_DIR:-codex-rs/target}" -path '*/nextest/default/junit.xml' -print -quit 2>/dev/null)"
+          [ -n "$junit" ] && cp "$junit" "${RUNNER_TEMP}/results/junit.xml"
+          find codex-rs \( -name '*.snap.new' -o -name '*.pending-snap' \) -print0 \
+            | tar --null -czf "${RUNNER_TEMP}/results/snapshots.tar.gz" -T -
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
+        with:
+          name: ${{ inputs.artifact }}
+          path: ${{ runner.temp }}/results
+          retention-days: 7

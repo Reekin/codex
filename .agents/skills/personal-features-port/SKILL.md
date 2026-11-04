@@ -68,8 +68,8 @@ Before editing code:
 3. Resolve the target upstream stable tag and the direct previous immutable feature acceptance tag.
 4. Create or reuse `integration-<target-version>` from the target upstream tag.
 5. Before creating feature branches, carry this complete skill and integration-owned release
-   infrastructure from the launch integration into the target integration as a knowledge-baseline
-   commit.
+   and validation infrastructure (the `codex-branch-*` and `personal-port-*` workflows) from the
+   launch integration into the target integration as a knowledge-baseline commit.
 6. Create each `ft/<feature>-<target-version>` branch and worktree from that knowledge baseline.
 
 This ordering ensures every migration agent starts with all contracts even when only one feature
@@ -92,6 +92,10 @@ skill:
 
 Do not begin broad implementation edits until the previous implementation and new hook points are
 accounted for.
+
+Port one feature per agent and let that agent own its validation loop below until the report is
+clean. The orchestrator merges validated branches and reads only each agent's summary and report,
+which keeps CI waits, logs, and failure triage out of the shared context.
 
 ## Choose The Port Shape
 
@@ -189,9 +193,21 @@ implementation helpers are not sufficient by themselves.
 Follow the current repository `AGENTS.md` for formatting, tests, schema generation, snapshots, and
 full-suite approval. Do not copy version-sensitive commands into this skill.
 
-Before porting, run the upstream test suite for the crates the features touch on a remote
-validation branch built from the plain upstream tag. Its failures are environment noise; only
-failures beyond that baseline count against a port.
+### Remote Validation
+
+Push a branch to `validation/<name>` (for example
+`git push origin ft/<feature>-<version>:refs/heads/validation/<feature>-<version>`) to run the
+`personal-port-validation` workflow. It tests the crates the branch changes relative to its
+upstream tag plus the end-to-end crates that depend on them, runs the same tests on the plain
+upstream tag once per crate and version, and publishes a `validation-report` artifact and job
+summary listing only the failures the branch adds, with pending snapshot files. Upstream's own
+failures in CI are environment noise and appear only as a count. Read the report instead of raw
+JUnit output; wait with a single `gh run watch` rather than repeated polling.
+
+Validate each feature branch this way before merging it into the integration branch, so failures
+arrive attributed to one feature instead of mixed in the integration. An upstream test that fails
+only because the feature changes default behavior means the feature needs a flag (see "Isolate
+Default-Changing Behavior"); fix the gating rather than editing upstream expectations.
 
 ### Static-Only Local Validation
 
@@ -214,14 +230,19 @@ a `write_schema_fixtures` binary in others), stage the result, and confirm the s
 contains only the intended protocol changes; line-ending churn in the working tree is normalized
 on commit.
 
-After static validation passes, merge into the integration branch and push it; the remote build is
-the compile gate. It compiles every workspace test target alongside the release packages, because
-release builds leave test code out and a test that stops compiling would otherwise hide every unit
-test in its crate; publishing waits for it and the Windows package, and the macOS package is attached
-to the same release when its slower build finishes. Compiling is not running: a feature that changes
-behavior covered by unit or integration tests still needs those tests run on a remote validation
-branch before it is merged. Real-path P0 acceptance then runs against the packaged binary from that
-build. Return compile failures reported by the remote build to the owning feature branch.
+After every feature branch has a clean validation report, merge them into the integration branch,
+push it to `validation/integration-<version>` for the composed run, then push the integration
+branch itself. The release workflow compiles every workspace test target alongside the release
+packages, because release builds leave test code out and a test that stops compiling would
+otherwise hide every unit test in its crate; publishing waits for it and the Windows package, and
+the macOS package is attached to the same release when its slower build finishes. Return failures
+to the owning feature branch.
+
+Run real-path P0 acceptance on the published Windows package with
+`scripts/personal_acceptance.py --codex <package>\bin\codex.exe` and the feature-owned smoke
+scripts its contracts name. Each case drives the packaged app-server against a deterministic model
+fixture with the feature flag on, and the flag-off cases confirm upstream behavior. A feature
+branch that changes its P0 scenarios updates its case in the harness in the same branch.
 
 After implementation and real-path acceptance, use a fresh independent reviewer. Give it the
 feature contract, direct previous ref, migration diff, port brief, and evidence. Ask only for
@@ -271,6 +292,10 @@ stable public contract that agents can load conditionally, and link it directly 
 - Put common workflow changes on the current integration branch.
 - Put an intentional feature contract change on that feature branch so code and contract are
   reviewed together; merging it updates the next integration's canonical knowledge.
+- A porting agent never rewrites a contract's stable behavior to fit its implementation. When a
+  requirement cannot hold on the new upstream, or a fix needs different observable behavior, stop
+  and propose the change to the user with the reason; land the approved change in its own commit
+  and list it in the port report, so contracts move only by decision.
 - Do not edit a feature contract for routine adapter movement.
 - Do not store current versions, concrete branch refs, source paths, test filters, command results,
   `pending` tables, migration status, or historical changelogs in long-term references.

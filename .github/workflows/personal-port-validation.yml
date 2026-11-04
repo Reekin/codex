@@ -1,0 +1,140 @@
+name: Personal port validation
+
+# Runs the tests a personal-port branch can affect and reports only the failures it adds over the
+# upstream tag it is built on. Push a feature or integration branch to `validation/<name>` to run it.
+on:
+  push:
+    branches: ["validation/**"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  SHARDS: 3
+  SCRIPTS: .agents/skills/personal-features-port/scripts
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      upstream_tag: ${{ steps.tag.outputs.upstream_tag }}
+      packages: ${{ steps.plan.outputs.packages }}
+      package_args: ${{ steps.plan.outputs.package_args }}
+      helper_args: ${{ steps.plan.outputs.helper_args }}
+      baseline_packages: ${{ steps.plan.outputs.baseline_packages }}
+      baseline_package_args: ${{ steps.plan.outputs.baseline_package_args }}
+      baseline_helper_args: ${{ steps.plan.outputs.baseline_helper_args }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Fetch the upstream tag the branch is built on
+        id: tag
+        run: |
+          set -euo pipefail
+          version="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' codex-rs/Cargo.toml)"
+          tag="rust-v${version}"
+          git fetch --no-tags --depth=1 https://github.com/openai/codex.git "refs/tags/${tag}:refs/tags/${tag}"
+          git worktree add --detach "${RUNNER_TEMP}/upstream" "${tag}"
+          echo "upstream_tag=${tag}" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        with:
+          path: port-baseline
+          key: port-baseline-${{ steps.tag.outputs.upstream_tag }}-${{ github.run_id }}
+          restore-keys: port-baseline-${{ steps.tag.outputs.upstream_tag }}-
+      - name: Select crates
+        id: plan
+        run: >-
+          python3 "${SCRIPTS}/validation_plan.py"
+          --head codex-rs
+          --upstream "${RUNNER_TEMP}/upstream/codex-rs"
+          --upstream-ref "${{ steps.tag.outputs.upstream_tag }}"
+          --baseline-dir port-baseline
+          --github-output "$GITHUB_OUTPUT"
+
+  head:
+    needs: plan
+    if: needs.plan.outputs.packages != ''
+    name: Branch tests ${{ matrix.shard }}
+    uses: ./.github/workflows/personal-port-tests.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    with:
+      ref: ${{ github.sha }}
+      repository: ${{ github.repository }}
+      package_args: ${{ needs.plan.outputs.package_args }}
+      helper_args: ${{ needs.plan.outputs.helper_args }}
+      shard: ${{ matrix.shard }}
+      artifact: head-${{ matrix.shard }}
+      cache_key: port-validation
+
+  baseline:
+    needs: plan
+    if: needs.plan.outputs.baseline_packages != ''
+    name: Upstream tests ${{ matrix.shard }}
+    uses: ./.github/workflows/personal-port-tests.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    with:
+      ref: ${{ needs.plan.outputs.upstream_tag }}
+      repository: openai/codex
+      package_args: ${{ needs.plan.outputs.baseline_package_args }}
+      helper_args: ${{ needs.plan.outputs.baseline_helper_args }}
+      shard: ${{ matrix.shard }}
+      artifact: baseline-${{ matrix.shard }}
+      cache_key: ""
+
+  report:
+    needs: [plan, head, baseline]
+    if: always() && needs.plan.result == 'success' && needs.plan.outputs.packages != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        with:
+          path: port-baseline
+          key: port-baseline-${{ needs.plan.outputs.upstream_tag }}-${{ github.run_id }}
+          restore-keys: port-baseline-${{ needs.plan.outputs.upstream_tag }}-
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: results
+      - name: Compare with upstream
+        id: compare
+        run: |
+          set -uo pipefail
+          python3 "${SCRIPTS}/validation_report.py" \
+            --results results \
+            --shards "${SHARDS}" \
+            --baseline-dir port-baseline \
+            --baseline-packages "${{ needs.baseline.result == 'success' && needs.plan.outputs.baseline_packages || '' }}" \
+            --packages "${{ needs.plan.outputs.packages }}" \
+            --out report
+          status=$?
+          cat report/report.md >> "$GITHUB_STEP_SUMMARY"
+          for archive in results/head-*/snapshots.tar.gz; do
+            [ -f "$archive" ] && cp "$archive" "report/$(basename "$(dirname "$archive")")-snapshots.tar.gz"
+          done
+          exit "$status"
+      - uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        if: always() && needs.baseline.result == 'success'
+        with:
+          path: port-baseline
+          key: port-baseline-${{ needs.plan.outputs.upstream_tag }}-${{ github.run_id }}
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
+        with:
+          name: validation-report
+          path: report
+          retention-days: 14

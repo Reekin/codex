@@ -41,6 +41,11 @@ lifetimes, and interrupting unrelated tools are outside this feature.
 - MUST preserve active-turn delivery and stop semantics when upstream changes the input queue.
 - MUST retain a result recipient across client unsubscription and idle eviction while child work
   or unconsumed child results still depend on it; release that retention after consumption.
+- The recipient parent's flag alone MUST decide routing, retention, and continuation; a child's own
+  configuration never does.
+- Continuation policy (which results resume a parent, routing, retention, and when a reserved turn
+  starts) MUST live in one agent-control module that upstream files call at their seams, so a port
+  rewires call sites instead of re-deriving the policy in each upstream file.
 
 ## Adapter Seams
 

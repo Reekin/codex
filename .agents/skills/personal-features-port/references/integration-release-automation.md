@@ -9,6 +9,8 @@ Carry forward the previous accepted integration's:
 
 - branch-push release workflow and the reusable package workflow it calls per platform;
 - the release's test-compile job, which compiles every workspace test target and gates publishing;
+- the `personal-port-validation` workflow, its reusable test workflow, and the skill's
+  `scripts/` that plan and report validation runs;
 - required runtime binary set;
 - portable archive and checksum behavior;
 - build/staging adapters;
@@ -31,8 +33,9 @@ When creating the target integration knowledge baseline:
 
 Before push, verify:
 
-- every included feature passed static validation (see `SKILL.md`); real-path P0 acceptance and
-  integration smoke paths run against the packaged binary after the remote build;
+- every included feature has a clean remote validation report and the composed integration run is
+  clean (see `SKILL.md`); real-path P0 acceptance and integration smoke paths run against the
+  packaged binary after the remote build;
 - all required binaries and runtime assets are staged;
 - workflow syntax and shell continuations are valid;
 - artifact names remain clearly downstream and portable;

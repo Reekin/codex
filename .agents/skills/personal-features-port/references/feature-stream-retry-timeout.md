@@ -42,7 +42,10 @@ fields is outside this feature. Canceling a request does not undo work already d
   retry counters that may reset during fallback.
 - Each candidate MUST use an independent connection and WebSocket continuation state. Only the
   selected candidate may supply the reusable connection and previous-response state.
-- Selection MUST happen before events reach conversation history or client-side tool execution.
+- Once a replacement starts, selection MUST happen before any further event reaches conversation
+  history or client-side tool execution; a complete tool call or answer ends the race first.
+- Candidate racing and selection MUST stay in one dedicated client module; retry loops only opt in
+  and read whether a replacement started.
 - The original transport MUST stay alive beyond the replacement trigger. Bound the entire
   selection window even when a provider sends only heartbeats or reasoning.
 - Timeout arithmetic MUST saturate rather than wrap.
