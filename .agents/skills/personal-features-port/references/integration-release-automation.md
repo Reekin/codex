@@ -7,7 +7,7 @@ branches may carry only the smallest build adapter required for their own focuse
 
 Carry forward the previous accepted integration's:
 
-- branch-push release workflow;
+- branch-push release workflow and the reusable package workflow it calls per platform;
 - the release's test-compile job, which compiles every workspace test target and gates publishing;
 - required runtime binary set;
 - portable archive and checksum behavior;

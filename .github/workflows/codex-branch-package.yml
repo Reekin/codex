@@ -1,0 +1,136 @@
+name: codex-branch-package
+
+# Builds, smoke-tests, and uploads one portable package for codex-branch-release.
+on:
+  workflow_call:
+    inputs:
+      runner:
+        required: true
+        type: string
+      target:
+        required: true
+        type: string
+      package:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ inputs.target }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CODEX_REPO_ROOT: ${{ github.workspace }}
+      # Cross-crate LTO defers all code generation to linking each packaged binary, which
+      # dominated build time and left cached dependencies as bitcode to recompile every run.
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      TARGET: ${{ inputs.target }}
+      PACKAGE: ${{ inputs.package }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci
+
+      - name: Keep Cargo output in the workspace target directory
+        # The dependency cache only prunes workspace crates from the workspace target directory.
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=${GITHUB_WORKSPACE}/codex-rs/target" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ inputs.target }}
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        # Only the packaging jobs gate publishing, so they own the repository's cache budget.
+        with:
+          workspaces: codex-rs
+          shared-key: release-${{ inputs.target }}
+
+      - name: Rerun the v8 build script after a cache restore
+        # v8 stages its static library under the profile's gn_out directory, which the cache does
+        # not keep; dropping its fingerprint makes Cargo stage the library again.
+        shell: bash
+        run: rm -rf "${CARGO_TARGET_DIR}/${TARGET}/release/.fingerprint"/v8-* "${CARGO_TARGET_DIR}/${TARGET}/release/build"/v8-*
+
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ inputs.target }}
+
+      - name: Configure LLVM linker
+        if: runner.os == 'Windows'
+        uses: ./.github/actions/setup-msvc-env
+        with:
+          target: ${{ inputs.target }}
+
+      - name: Show runner resources
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "Logical CPUs: $(sysctl -n hw.logicalcpu)"
+          echo "RAM: $(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 )) GiB"
+          df -h .
+
+      - name: Build portable package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+          fi
+          workspace="${GITHUB_WORKSPACE}"
+          if command -v cygpath >/dev/null 2>&1; then
+            workspace="$(cygpath -u "$workspace")"
+          fi
+          mkdir -p "${workspace}/dist"
+
+          python3 "${workspace}/scripts/build_codex_package.py" \
+            --target "$TARGET" \
+            --variant codex \
+            --cargo-profile release \
+            --package-dir "${RUNNER_TEMP}/codex-package-${TARGET}" \
+            --archive-output "${workspace}/dist/${PACKAGE}" \
+            --force
+          ls -lh "${workspace}/dist"
+
+      - name: Smoke-test extracted package
+        shell: bash
+        working-directory: .
+        run: |
+          set -euo pipefail
+          mkdir -p package-verify
+          case "$PACKAGE" in
+            *.zip) python3 -m zipfile -e "dist/${PACKAGE}" package-verify ;;
+            *.tar.gz) tar -xzf "dist/${PACKAGE}" -C package-verify ;;
+          esac
+          cd package-verify
+          cat codex-package.json
+
+          exe=""
+          if [[ "$TARGET" == *-windows-msvc ]]; then
+            exe=".exe"
+          fi
+          "bin/codex${exe}" --version
+          "bin/codex-code-mode-host${exe}" --help >/dev/null
+          "bin/codex-exec-server${exe}" --help >/dev/null
+          "codex-path/rg${exe}" --version
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            file bin/* codex-path/*
+          fi
+
+      - name: Upload package
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: codex-package-${{ inputs.target }}
+          path: dist/${{ inputs.package }}
+          if-no-files-found: error
+          retention-days: 3

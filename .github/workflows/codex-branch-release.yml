@@ -40,150 +40,41 @@ jobs:
         # The voice host needs GStreamer 1.28, newer than this runner ships.
         run: cargo check --profile dev-small --workspace --exclude codex-voice-host --tests
 
-  build:
+  windows:
     if: github.repository == 'Reekin/codex' && startsWith(github.ref_name, 'integration-')
-    name: Build ${{ matrix.target }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 240
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: windows-latest
-            target: x86_64-pc-windows-msvc
-            package: codex-windows-x64.zip
-          - runner: macos-15
-            target: aarch64-apple-darwin
-            package: codex-macos-arm64.tar.gz
-    defaults:
-      run:
-        working-directory: codex-rs
-    env:
-      CODEX_REPO_ROOT: ${{ github.workspace }}
-      # Cross-crate LTO defers all code generation to linking each packaged binary, which
-      # dominated build time and left cached dependencies as bitcode to recompile every run.
-      CARGO_PROFILE_RELEASE_LTO: "off"
-      TARGET: ${{ matrix.target }}
-      PACKAGE: ${{ matrix.package }}
+    uses: ./.github/workflows/codex-branch-package.yml
+    with:
+      runner: windows-latest
+      target: x86_64-pc-windows-msvc
+      package: codex-windows-x64.zip
 
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
+  macos:
+    if: github.repository == 'Reekin/codex' && startsWith(github.ref_name, 'integration-')
+    uses: ./.github/workflows/codex-branch-package.yml
+    with:
+      runner: macos-15
+      target: aarch64-apple-darwin
+      package: codex-macos-arm64.tar.gz
 
-      - uses: ./.github/actions/setup-ci
-
-      - name: Keep Cargo output in the workspace target directory
-        # The dependency cache only prunes workspace crates from the workspace target directory.
-        shell: bash
-        run: echo "CARGO_TARGET_DIR=${GITHUB_WORKSPACE}/codex-rs/target" >> "$GITHUB_ENV"
-
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        # Only the packaging jobs gate publishing, so they own the repository's cache budget.
-        with:
-          workspaces: codex-rs
-          shared-key: release-${{ matrix.target }}
-
-      - name: Rerun the v8 build script after a cache restore
-        # v8 stages its static library under the profile's gn_out directory, which the cache does
-        # not keep; dropping its fingerprint makes Cargo stage the library again.
-        shell: bash
-        run: rm -rf "${CARGO_TARGET_DIR}/${TARGET}/release/.fingerprint"/v8-* "${CARGO_TARGET_DIR}/${TARGET}/release/build"/v8-*
-
-      - name: Configure rusty_v8 artifact overrides and verify checksums
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: ${{ matrix.target }}
-
-      - name: Configure LLVM linker
-        if: runner.os == 'Windows'
-        uses: ./.github/actions/setup-msvc-env
-        with:
-          target: ${{ matrix.target }}
-
-      - name: Show runner resources
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          echo "Logical CPUs: $(sysctl -n hw.logicalcpu)"
-          echo "RAM: $(( $(sysctl -n hw.memsize) / 1024 / 1024 / 1024 )) GiB"
-          df -h .
-
-      - name: Build portable package
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ "$TARGET" == *-windows-msvc ]]; then
-            export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
-          fi
-          workspace="${GITHUB_WORKSPACE}"
-          if command -v cygpath >/dev/null 2>&1; then
-            workspace="$(cygpath -u "$workspace")"
-          fi
-          mkdir -p "${workspace}/dist"
-
-          python3 "${workspace}/scripts/build_codex_package.py" \
-            --target "$TARGET" \
-            --variant codex \
-            --cargo-profile release \
-            --package-dir "${RUNNER_TEMP}/codex-package-${TARGET}" \
-            --archive-output "${workspace}/dist/${PACKAGE}" \
-            --force
-          ls -lh "${workspace}/dist"
-
-      - name: Smoke-test extracted package
-        shell: bash
-        working-directory: .
-        run: |
-          set -euo pipefail
-          mkdir -p package-verify
-          case "$PACKAGE" in
-            *.zip) python3 -m zipfile -e "dist/${PACKAGE}" package-verify ;;
-            *.tar.gz) tar -xzf "dist/${PACKAGE}" -C package-verify ;;
-          esac
-          cd package-verify
-          cat codex-package.json
-
-          exe=""
-          if [[ "$TARGET" == *-windows-msvc ]]; then
-            exe=".exe"
-          fi
-          "bin/codex${exe}" --version
-          "bin/codex-code-mode-host${exe}" --help >/dev/null
-          "bin/codex-exec-server${exe}" --help >/dev/null
-          "codex-path/rg${exe}" --version
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            file bin/* codex-path/*
-          fi
-
-      - name: Upload package
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: codex-package-${{ matrix.target }}
-          path: dist/${{ matrix.package }}
-          if-no-files-found: error
-          retention-days: 3
-
+  # Publishing waits only for Windows; the slower macOS package is attached to the same release.
   publish:
-    needs: [build, test-compile]
+    needs: [windows, test-compile]
     name: Publish latest release
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: write
+    outputs:
+      release-tag: ${{ steps.publish.outputs.release-tag }}
     steps:
-      - name: Download packages
+      - name: Download Windows package
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: codex-package-*
+          name: codex-package-x86_64-pc-windows-msvc
           path: dist
-          merge-multiple: true
 
       - name: Publish GitHub latest release
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -220,7 +111,7 @@ jobs:
           Packages:
 
           - `codex-windows-x64.zip`: Windows x64. Extract it and run `bin\codex.exe`.
-          - `codex-macos-arm64.tar.gz`: macOS on Apple Silicon. The archive has no top-level folder, so extract it into a new directory: `mkdir codex && tar -xzf codex-macos-arm64.tar.gz -C codex`, then run `codex/bin/codex`.
+          - `codex-macos-arm64.tar.gz`: macOS on Apple Silicon, attached when its build finishes, usually two to three hours after the Windows package. The archive has no top-level folder, so extract it into a new directory: `mkdir codex && tar -xzf codex-macos-arm64.tar.gz -C codex`, then run `codex/bin/codex`.
 
           Keep each extracted package directory intact: `codex` loads the code-mode host and bundled tools from it.
 
@@ -237,3 +128,31 @@ jobs:
             --notes-file "$notes_path" \
             --latest \
             dist/*
+          echo "release-tag=${release_tag}" >> "$GITHUB_OUTPUT"
+
+  attach-macos:
+    needs: [publish, macos]
+    name: Attach macOS package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download macOS package
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: codex-package-aarch64-apple-darwin
+          path: dist
+
+      - name: Attach to the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.publish.outputs.release-tag }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --pattern SHA256SUMS.txt --dir dist
+          (cd dist && sha256sum -- codex-macos-arm64.tar.gz >> SHA256SUMS.txt)
+          cat dist/SHA256SUMS.txt
+          gh release upload "$RELEASE_TAG" dist/codex-macos-arm64.tar.gz
+          gh release upload "$RELEASE_TAG" dist/SHA256SUMS.txt --clobber
