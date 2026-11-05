@@ -43,6 +43,11 @@ jobs:
       INSTA_UPDATE: new
       RUST_MIN_STACK: "8388608"
     steps:
+      - name: Free disk space
+        # Test binaries for the end-to-end crates exceed the hosted runner's free disk.
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL && df -h /
+        working-directory: /
+
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           repository: ${{ inputs.repository }}
@@ -55,7 +60,7 @@ jobs:
         run: sudo DEBIAN_FRONTEND=noninteractive apt-get update -y && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libasound2-dev bubblewrap
 
       - name: Install the pinned Rust toolchain
-        run: rustup toolchain install
+        run: rustup toolchain install --profile minimal
 
       - name: Keep Cargo output in the workspace target directory
         if: inputs.cache_key != ''
