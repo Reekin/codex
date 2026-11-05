@@ -75,12 +75,12 @@ def compile_errors(root, prefix, shards):
     return lines[:COMPILE_ERROR_LINES]
 
 
-def pending_snapshots(root):
+def pending_snapshots(root, prefix):
     names = set()
-    for archive in root.glob("head-*/snapshots.tar.gz"):
+    for archive in root.glob(f"{prefix}-*/snapshots.tar.gz"):
         with tarfile.open(archive) as tar:
             names.update(member.name for member in tar.getmembers() if member.isfile())
-    return sorted(names)
+    return names
 
 
 def main():
@@ -112,6 +112,10 @@ def main():
                     if package_of(test_id) == package
                 }
                 (baseline_dir / f"{package}.json").write_text(json.dumps(status), encoding="utf-8")
+            snapshot_file = baseline_dir / "snapshots.json"
+            known_snapshots = set(json.loads(snapshot_file.read_text(encoding="utf-8"))) if snapshot_file.exists() else set()
+            known_snapshots |= pending_snapshots(results_root, "baseline")
+            snapshot_file.write_text(json.dumps(sorted(known_snapshots)), encoding="utf-8")
 
     baseline = {}
     for package in args.packages.split():
@@ -150,12 +154,14 @@ def main():
             reason = "passes upstream"
         new_failures.append((test_id, reason, message))
 
-    snapshots = pending_snapshots(results_root)
+    snapshot_file = baseline_dir / "snapshots.json"
+    upstream_snapshots = set(json.loads(snapshot_file.read_text(encoding="utf-8"))) if snapshot_file.exists() else set()
+    snapshots = sorted(pending_snapshots(results_root, "head") - upstream_snapshots)
     report += [
         f"- Tests run: {len(head)} in `{args.packages}`",
         f"- Failures that upstream also has in CI: {known}",
         f"- Failures this branch adds: {len(new_failures)}",
-        f"- Pending snapshot updates: {len(snapshots)}",
+        f"- Pending snapshot updates this branch adds: {len(snapshots)}",
         "",
     ]
     if new_failures:
